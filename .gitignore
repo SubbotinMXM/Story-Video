@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+data/
+web/node_modules/
+assets/subscribe.mp4
+# собранный интерфейс (web/dist) коммитится: пользователю не нужен Node.js
+.coverage

@@ -1,0 +1,231 @@
+{
+ "groups": {
+  "calm": "Спокойная, атмосферная",
+  "epic": "Эпическая, кинематографичная",
+  "energetic": "Энергичная, вдохновляющая",
+  "ethnic": "Этническая: Восток, пустыня, кочевники",
+  "mystery": "Задумчивая, таинственная"
+ },
+ "tracks": [
+  {
+   "id": "river-meditation",
+   "title": "River Meditation",
+   "group": "calm",
+   "file": "river-meditation.mp3",
+   "duration": 153.6,
+   "lufs": -15.7,
+   "lra": 3.7,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "parhelion",
+   "title": "Parhelion",
+   "group": "calm",
+   "file": "parhelion.mp3",
+   "duration": 153.6,
+   "lufs": -15.0,
+   "lra": 2.6,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "romantic-inspiration",
+   "title": "Romantic Inspiration",
+   "group": "calm",
+   "file": "romantic-inspiration.mp3",
+   "duration": 140.5,
+   "lufs": -15.3,
+   "lra": 3.2,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "drop-point",
+   "title": "Drop Point",
+   "group": "calm",
+   "file": "drop-point.mp3",
+   "duration": 175.7,
+   "lufs": -16.2,
+   "lra": 4.1,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "the-britons",
+   "title": "The Britons",
+   "group": "epic",
+   "file": "the-britons.mp3",
+   "duration": 301.1,
+   "lufs": -16.2,
+   "lra": 4.1,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "black-knight",
+   "title": "Black Knight",
+   "group": "epic",
+   "file": "black-knight.mp3",
+   "duration": 132.2,
+   "lufs": -15.0,
+   "lra": 4.8,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "night-in-the-castle",
+   "title": "Night in the Castle",
+   "group": "epic",
+   "file": "night-in-the-castle.mp3",
+   "duration": 183.9,
+   "lufs": -16.2,
+   "lra": 5.1,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "emotional-blockbuster-2",
+   "title": "Emotional Blockbuster 2",
+   "group": "epic",
+   "file": "emotional-blockbuster-2.mp3",
+   "duration": 91.9,
+   "lufs": -15.3,
+   "lra": 2.8,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "beginning-of-conflict",
+   "title": "Beginning of Conflict",
+   "group": "epic",
+   "file": "beginning-of-conflict.mp3",
+   "duration": 90.3,
+   "lufs": -16.0,
+   "lra": 0.9,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "inspiration",
+   "title": "Inspiration",
+   "group": "energetic",
+   "file": "inspiration.mp3",
+   "duration": 126.2,
+   "lufs": -15.8,
+   "lra": 1.9,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "energizing",
+   "title": "Energizing",
+   "group": "energetic",
+   "file": "energizing.mp3",
+   "duration": 121.0,
+   "lufs": -15.2,
+   "lra": 5.4,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "inventing-flight",
+   "title": "Inventing Flight",
+   "group": "energetic",
+   "file": "inventing-flight.mp3",
+   "duration": 107.2,
+   "lufs": -15.7,
+   "lra": 5.2,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "celebration",
+   "title": "Celebration",
+   "group": "energetic",
+   "file": "celebration.mp3",
+   "duration": 137.2,
+   "lufs": -15.9,
+   "lra": 3.6,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "nomadic-sunset",
+   "title": "Nomadic Sunset",
+   "group": "ethnic",
+   "file": "nomadic-sunset.mp3",
+   "duration": 175.0,
+   "lufs": -14.8,
+   "lra": 5.0,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "desert-fox",
+   "title": "Desert Fox",
+   "group": "ethnic",
+   "file": "desert-fox.mp3",
+   "duration": 126.0,
+   "lufs": -16.1,
+   "lra": 1.8,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "desert-conflict",
+   "title": "Desert Conflict",
+   "group": "ethnic",
+   "file": "desert-conflict.mp3",
+   "duration": 151.6,
+   "lufs": -16.3,
+   "lra": 5.2,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "hidden-truth",
+   "title": "Hidden Truth",
+   "group": "mystery",
+   "file": "hidden-truth.mp3",
+   "duration": 86.6,
+   "lufs": -16.0,
+   "lra": 3.5,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "asking-questions",
+   "title": "Asking Questions",
+   "group": "mystery",
+   "file": "asking-questions.mp3",
+   "duration": 95.9,
+   "lufs": -16.1,
+   "lra": 3.4,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "attic-secrets",
+   "title": "Attic Secrets",
+   "group": "mystery",
+   "file": "attic-secrets.mp3",
+   "duration": 60.6,
+   "lufs": -16.0,
+   "lra": 2.9,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+   "id": "brewing-potions",
+   "title": "Brewing Potions",
+   "group": "mystery",
+   "file": "brewing-potions.mp3",
+   "duration": 84.4,
+   "lufs": -14.9,
+   "lra": 4.9,
+   "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+   "license": "https://creativecommons.org/publicdomain/zero/1.0/"
+  }
+ ]
+}
