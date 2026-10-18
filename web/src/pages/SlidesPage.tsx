@@ -5,6 +5,7 @@ import { TextComposer, collectTexts, type TextItem } from "../components/TextCom
 import { VideoOptionsCard, VoiceCard } from "../components/SharedCards";
 import { TemplateCard } from "../components/Templates";
 import { MusicCard } from "../components/MusicCard";
+import { AiCard } from "../components/AiCard";
 import { useJobs, useLoadedSettings } from "../lib/store";
 
 const MEDIA_MODES = [
@@ -110,6 +111,7 @@ export function SlidesPage({ goRuns }: { goRuns: () => void }) {
               </Field>
             </div>
           </Card>
+          <AiCard />
           <MusicCard />
         </div>
         <div className="col-side">

@@ -139,6 +139,20 @@ def _tts_req(cfg: dict, tj: TextJob, audio: Path | None, *, run_dir: Path | None
     )
 
 
+def _ai(cfg: dict):
+    """AI-кадры: включены галочкой, есть ключ и выбрана хоть одна модель — иначе None."""
+    from engine.slides.ai_gen import AiConfig
+
+    if not cfg.get("ai_gen_enabled"):
+        return None
+    ai = AiConfig(api_key=_s(cfg, "royaltechno_api_key"), image_model=_s(cfg, "ai_image_model"), video_model=_s(cfg, "ai_video_model"))
+    if not ai.api_key:
+        raise ValueError("Включены AI-кадры, но нет ключа RoyalTechno (Настройки → AI-кадры)")
+    if not ai.active:
+        raise ValueError("Включены AI-кадры, но не выбрана ни модель фото, ни модель видео")
+    return ai
+
+
 def _media_mode(cfg: dict) -> dict[str, bool]:
     mode = _s(cfg, "media_mode") or "theme"
     return {"strict_sync": mode in ("strict_3min", "strict_full"), "strict_full": mode == "strict_full"}
@@ -160,18 +174,25 @@ def _render_flags(cfg: dict) -> dict[str, Any]:
 
 
 def _slides_result(render, extra: list[str] | None = None) -> dict[str, Any]:
+    from engine.slides.ai_fill import report_lines
+
     folder = render.desktop_video or render.run_dir
     mb = render.size_bytes / 1e6
+    ai_lines, warnings = report_lines(render.run_dir)
+    summary = f"Готово: {render.duration:.0f} с, {mb:.1f} MB"
     return {
-        "summary": f"Готово: {render.duration:.0f} с, {mb:.1f} MB",
+        "summary": summary + (" · AI-кадры не все — см. карточку" if warnings else ""),
         "folder": str(folder),
         "video": str(render.video_file),
         "lines": [
             f"Папка: {folder}",
             f"Длительность: {render.duration:.1f} с",
             f"Размер: {mb:.1f} MB",
+            *ai_lines,
             *(extra or []),
         ],
+        # оповещения: что не удалось и почему (ролик при этом собран)
+        "warnings": warnings,
     }
 
 
@@ -335,6 +356,7 @@ def _slides_pipeline(cfg: dict, params: dict, state: dict, *, voice_only: bool) 
         stock_keys=stock_keys_from_config(cfg),
         speed_copies=_copies(cfg),
         **_media_mode(cfg),
+        ai=_ai(cfg),
         stop_after_chunks=voice_only,
         **_render_flags(cfg),
     )
@@ -391,6 +413,7 @@ def _slides_resume(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
         stock_keys=stock_keys_from_config(cfg),
         speed_copies=_copies(cfg),
         **_media_mode(cfg),
+        ai=_ai(cfg),
         resume_dir=run_dir,
         **_render_flags(cfg),
     )
@@ -419,12 +442,17 @@ def _slides_media(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
         llm_base_url=base,
         llm_model=model,
         **_media_mode(cfg),
+        ai=_ai(cfg),
     )
 
     def run(job: Job, progress, cancel: CancelToken) -> dict[str, Any]:
         res = run_media_stage(req, cancel=cancel, on_progress=progress)
+        from engine.slides.ai_fill import report_lines
+
+        ai_lines, warnings = report_lines(run_dir)
         return {
-            "summary": f"Кадры: выбрано {res.selected}, пропущено {res.skipped}",
+            "warnings": warnings,
+            "summary": f"Кадры: выбрано {res.selected}, пропущено {res.skipped}" + (" · AI-кадры не все" if warnings else ""),
             "folder": str(run_dir),
             "run": run_dir.name,
             "lines": [f"Выбрано: {res.selected}", f"Пропущено: {res.skipped}", f"Слабых: {res.weak}"],

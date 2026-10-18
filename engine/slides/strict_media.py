@@ -84,6 +84,9 @@ HEAD_SEC = 120.0
 VIDEO_PHASE_SEC = HEAD_SEC  # старое имя: так называлось «начало», когда оно было только из видео
 # пометка запроса: кусок — призыв подписаться (кадр по теме ролика, не буквальный)
 CTA_MARK = "CTA|"
+# пометка запроса: кусок про цифры/графики/статистику — живой кадр к нему почти не найти,
+# при включённых AI-кадрах сюда обязательно ставится сгенерированная инфографика
+DATA_MARK = "DATA|"
 QUERY_BATCH = 16
 IMAGE_TRIES = 3
 VIDEO_TRIES = 3
@@ -99,6 +102,10 @@ Each query must depict what THAT beat says as filmable B-roll.
 Return ONLY JSON: {"queries": ["...", "..."]} with the same length as the beats.
 If a beat is a call to action — subscribe, like, comment, ring the bell, support the channel —
 return exactly "CTA" for it (that moment gets a general shot about the film's topic).
+If a beat is mainly about numbers, statistics, percentages, money, prices, growth or decline,
+rankings, comparisons, a chart/graph/map or an abstract idea that cannot be filmed, return
+"DATA: <short English description of a chart or infographic that shows it>",
+e.g. "DATA: bar chart of Mongolia GDP growth 2010-2020".
 
 Rules:
 - 4 to 10 English words, concrete things a camera can film
@@ -302,6 +309,26 @@ _CTA_SIGN = re.compile(r"подпи[сш]", re.I)
 _CTA_CHANNEL = re.compile(r"канал|видео|channel|ролик", re.I)
 
 
+_DATA_NUM = re.compile(r"\d")
+_DATA_WORDS = re.compile(
+    r"%|процент|миллион|миллиард|тысяч|трлн|млрд|млн|ВВП|доход|зарплат|рубл|доллар|евро|"
+    r"percent|million|billion|trillion|thousand|GDP|income|salary|dollar|euro|"
+    r"por ciento|millón|millones|mil millones|PIB|"
+    r"procent|milion|miliard|PKB|"
+    r"prozent|millionen|milliarde|BIP|"
+    r"pour cent|millions|milliards|"
+    r"per cento|milioni|miliardi|"
+    r"lei\b|PIB|[$€₽£¥]",
+    re.I,
+)
+
+
+def is_data(text: str) -> bool:
+    """Кусок про цифры: число + проценты/миллионы/деньги (годы сами по себе не считаются)."""
+    t = text or ""
+    return bool(_DATA_NUM.search(t) and _DATA_WORDS.search(t))
+
+
 def is_cta(text: str) -> bool:
     """Кусок — призыв подписаться / лайк / колокольчик (на любом из языков роликов)."""
     t = text or ""
@@ -380,6 +407,7 @@ def collect_strict_timeline(
         raise MediaError(f"Нет {TIMINGS_NAME}: строгий ряд режется по таймингам слов")
 
     words = _load_words(run_dir)
+    (run_dir / "ai_report.json").unlink(missing_ok=True)  # отчёт AI-кадров — заново на этот подбор
     voice = run_dir / AUDIO_NAME
     voice_end = probe_duration(voice) if voice.is_file() else (words[-1].end if words else 0.0)
     full = bool(req.strict_full)
@@ -553,11 +581,28 @@ def collect_strict_timeline(
     head_slots = [x for x in filled if float(x.get("start") or 0) < HEAD_SEC]
     if head_slots and not any(x.get("kind") == "video" for x in head_slots):
         log("В первых 2 минутах так и нет видео (не нашлось ни одного подходящего клипа) — только фото")
+    by_start = {round(b.start, 3): q for b, q in zip(beats, queries)}
+    for slot in filled:
+        q = by_start.get(round(float(slot.get("start") or 0), 3), "")
+        if q.startswith(DATA_MARK):
+            slot["data"] = q[len(DATA_MARK):]
+    if req.ai is not None and req.ai.active:
+        # цифры/графики — в первую очередь; дальше дыры и слабые кадры (≤ ~12–15% ролика)
+        from engine.slides.ai_fill import fill_slots
+
+        progress(0.9, "AI-кадры: генерирую для кусков без хорошего живого кадра…")
+        filled = fill_slots(filled, plan, req.ai, pool=pool, cancel=cancel, tag="beat",
+                            progress=lambda p, m: progress(0.9 + 0.04 * p, m))
     holes = sum(1 for item in filled if item.get("fallback"))
     if holes:
         log(f"Дыр без своего кадра: {holes}, закрыты другими найденными кадрами (не соседними)")
     if late_dur > 0.5:
         videos, images = late_pool
+        if req.ai is not None and req.ai.active:
+            from engine.slides.ai_fill import fill_pool
+
+            videos, images = fill_pool(videos, images, plan, req.ai, pool=pool, image_target=len(images),
+                                       video_target=len(videos), cancel=cancel, tag="late")
         if not videos and not images:
             log("Пул для остального ролика пуст — повторяю кадры первых 2 минут вразбивку")
             videos = [dict(x) for x in filled if x.get("kind") == "video" and not x.get("fallback")]
@@ -682,6 +727,16 @@ def _pick_beat(
         if hit is not None:
             return hit, rej, bool(hit.get("weak"))
         query = query[len(CTA_MARK):]
+
+    if query.startswith(DATA_MARK):
+        # цифры/график: живой кадр всё равно ищем (на случай выключенных AI-кадров),
+        # а пометку несём дальше — AI-кадры поставят сюда инфографику в первую очередь
+        desc = query[len(DATA_MARK):]
+        hit, rej, weak = _pick_beat(http, clients, plan, beat, desc, index=index, trials=trials,
+                                    frames=frames, pool=pool, mix=mix, full=full)
+        if hit is not None:
+            hit["data"] = desc
+        return hit, rej, weak
 
     # Начало (оба строгих режима) и весь «весь ролик»: кадр строго под этот кусок,
     # фото и видео чередуются (чётный кусок — сначала видео, нечётный — фото).
@@ -1232,6 +1287,14 @@ def _plan_queries(
             # призыв подписаться — не буквально, а видео по теме всего ролика
             queries[i] = CTA_MARK + _theme_video_query(plan, i, fallback=fallback)
             log(f"Кусок {i + 1}: призыв подписаться — беру видео по теме ролика")
+            continue
+        q = queries[i].strip()
+        if q.upper().startswith("DATA:") or q.startswith(DATA_MARK):
+            desc = q.split(":", 1)[1].strip() if q.upper().startswith("DATA:") else q[len(DATA_MARK):]
+            queries[i] = DATA_MARK + (desc or fallback)
+            continue
+        if q and is_data(beat.text):
+            queries[i] = DATA_MARK + q
             continue
         if queries[i]:
             continue

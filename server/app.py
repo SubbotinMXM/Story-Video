@@ -100,6 +100,13 @@ def ping(service: str) -> dict[str, Any]:
         if service.startswith("tts:"):
             pid = service.split(":", 1)[1]
             return {"ok": True, "message": get_provider(pid).ping(provider_options(cfg, pid))}
+        if service == "ai":
+            from engine.slides.ai_gen import ping as ai_ping
+
+            key = str(cfg.get("royaltechno_api_key") or "").strip()
+            if not key:
+                raise ValueError("Вставь ключ RoyalTechno")
+            return {"ok": True, "message": ai_ping(key)}
         if service == "llm":
             key = str(cfg.get("llm_api_key") or "").strip()
             if not key:
@@ -284,6 +291,16 @@ def check_path(body: PathIn) -> dict[str, Any]:
 
 if (WEB_DIST / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="assets")
+
+
+# ---------- AI-кадры ----------
+
+
+@app.get("/api/ai/models")
+def ai_models() -> dict[str, Any]:
+    from engine.slides.ai_gen import AI_SHARE, AI_SHARE_MAX, model_options
+
+    return {"share": AI_SHARE, "share_max": AI_SHARE_MAX, **model_options()}
 
 
 # ---------- фоновая музыка ----------

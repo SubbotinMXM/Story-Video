@@ -86,6 +86,7 @@ function summary(t: VideoTemplate, meta: Meta, settings: Settings): string {
     parts.push(`кадры: ${MODE_TITLES[String(v.media_mode)] ?? "по смыслу ролика"}`);
     parts.push(`интро: ${folder(v.slides_intro_dir)}`, `аутро: ${folder(v.slides_outro_dir)}`);
     parts.push(`музыка: ${String(v.music_track ?? "") || "нет"}`);
+    if (v.ai_gen_enabled) parts.push(`AI-кадры: ${[v.ai_image_model, v.ai_video_model].filter(Boolean).join(" + ") || "—"}`);
   }
   parts.push(`субтитры: ${v.subtitles ? "да" : "нет"}`, `подписка: ${v.subscribe ? "да" : "нет"}`);
   parts.push(`копии: ${v.speed_copies ? v.speed_copies_count : "нет"}`);

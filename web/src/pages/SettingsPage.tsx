@@ -121,6 +121,20 @@ export function SettingsPage() {
         <PingButton service="stocks" label="Проверить стоки и YouTube" />
       </Card>
 
+      <Card
+        title="AI-кадры (RoyalTechno)"
+        description="Генерация фото и видео для кусков, где живой кадр не нашёлся или подходит плохо. Ключ — в боте @royaltechno_ai_bot (/api_key_new). Включается на странице «Стоковые слайды»."
+      >
+        <Field label="API key">
+          <SecretInput
+            value={settings.royaltechno_api_key}
+            onChange={(v) => update({ royaltechno_api_key: v })}
+            placeholder="rt_live_…"
+          />
+        </Field>
+        <PingButton service="ai" label="Проверить ключ и баланс" />
+      </Card>
+
       {!meta.ffmpeg && (
         <Card title="ffmpeg не найден">
           <p>

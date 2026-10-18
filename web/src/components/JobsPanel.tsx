@@ -104,6 +104,12 @@ function JobCard({ job, now, onShowLog }: { job: Job; now: number; onShowLog: (i
       {!open && job.status !== "running" && job.status !== "queued" && (
         <div className="job-msg muted ellipsis">{job.error || job.message}</div>
       )}
+      {job.status === "done" &&
+        job.result?.warnings?.map((w, i) => (
+          <div key={i} className="notice warn small">
+            ⚠ {w}
+          </div>
+        ))}
 
       {/* в работе / в очереди — только стоп */}
       {(job.status === "running" || job.status === "queued") && (

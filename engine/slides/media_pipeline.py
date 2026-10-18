@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import random
 import time
 from dataclasses import dataclass, field
@@ -25,6 +27,10 @@ ProgressCb = Callable[[float, str], None]
 SEARCH_PER_SOURCE = 12
 _DOWNLOAD_TIMEOUT = httpx.Timeout(45.0, connect=10.0, read=25.0)
 _MAX_BYTES = 80_000_000
+
+
+if TYPE_CHECKING:
+    from engine.slides.ai_gen import AiConfig
 
 
 @dataclass
@@ -55,6 +61,8 @@ class MediaRequest:
     llm_model: str = ""
     strict_sync: bool = False
     strict_full: bool = False
+    # AI-кадры (RoyalTechno): None — выключены, ролик только из живых кадров
+    ai: "AiConfig | None" = None
 
 
 @dataclass

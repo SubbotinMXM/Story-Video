@@ -47,6 +47,11 @@ DEFAULTS: dict[str, Any] = {
     "slides_outro_dir": "",
     # фоновая музыка стоковых роликов: id трека из assets/music ("" — без музыки)
     "music_track": "",
+    # AI-кадры (RoyalTechno AI): генерация фото/видео для кусков без хорошего живого кадра
+    "royaltechno_api_key": "",
+    "ai_gen_enabled": False,
+    "ai_image_model": "",
+    "ai_video_model": "",
     # шаблоны оформления: [{"id", "name", "kind": broll|slides, "values": {...}}] (см. TEMPLATE_KEYS)
     "templates": [],
     # какой шаблон сейчас выбран в разделе ("" — настраиваю вручную)
@@ -57,7 +62,8 @@ DEFAULTS: dict[str, Any] = {
 _TEMPLATE_COMMON = ("subtitles", "subscribe", "subscribe_path", "speed_copies", "speed_copies_count", "tts_provider", "voice")
 TEMPLATE_KEYS: dict[str, tuple[str, ...]] = {
     "broll": _TEMPLATE_COMMON + ("broll_dir", "head_dir", "overlay_text", "intro_dir", "outro_dir"),
-    "slides": _TEMPLATE_COMMON + ("media_mode", "slides_intro_dir", "slides_outro_dir", "music_track"),
+    "slides": _TEMPLATE_COMMON
+    + ("media_mode", "slides_intro_dir", "slides_outro_dir", "music_track", "ai_gen_enabled", "ai_image_model", "ai_video_model"),
 }
 
 # модели, которые сервис убрал: сохранённый выбор сбрасывается на модель по умолчанию

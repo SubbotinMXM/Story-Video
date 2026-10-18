@@ -51,6 +51,10 @@ export type Settings = {
   slides_intro_dir: string;
   slides_outro_dir: string;
   music_track: string;
+  royaltechno_api_key: string;
+  ai_gen_enabled: boolean;
+  ai_image_model: string;
+  ai_video_model: string;
   templates: VideoTemplate[];
   active_template: Record<TemplateKind, string>;
 };
@@ -82,6 +86,7 @@ export type Job = {
     video?: string;
     run?: string;
     lines?: string[];
+    warnings?: string[];
   } | null;
   error: string | null;
   attempts: number;
@@ -103,6 +108,9 @@ export type Run = {
   snippet: string;
   has_final: boolean;
 };
+
+export type AiModelOption = { id: string; label: string; price_cents: number; low_res: boolean };
+export type AiModels = { share: number; share_max: number; image: AiModelOption[]; video: AiModelOption[] };
 
 export type MusicTrack = { id: string; title: string; group: string; duration: number };
 export type MusicCatalog = { groups: Record<string, string>; tracks: MusicTrack[] };
@@ -137,6 +145,7 @@ export const api = {
   refreshTtsList: (provider: string, key: string) =>
     request<{ count: number; settings: Settings }>("POST", `/api/tts/${provider}/refresh/${key}`),
   music: () => request<MusicCatalog>("GET", "/api/music"),
+  aiModels: () => request<AiModels>("GET", "/api/ai/models"),
   ping: (service: string) =>
     request<{ ok: boolean; message: string }>("POST", `/api/ping/${service}`),
   addJobs: (items: JobIn[]) => request<Job[]>("POST", "/api/jobs", items),

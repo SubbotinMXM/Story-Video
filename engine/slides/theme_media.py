@@ -87,6 +87,7 @@ def collect_theme_pool(
     if not script_path.is_file():
         raise MediaError(f"Нет {SCRIPT_NAME}")
     script = script_path.read_text(encoding="utf-8")
+    (run_dir / "ai_report.json").unlink(missing_ok=True)  # отчёт AI-кадров — заново на этот подбор
 
     progress(0.02, "Тема: читаю весь текст…")
     client = _llm(req)
@@ -161,6 +162,16 @@ def collect_theme_pool(
                 pass
         shutil.rmtree(trials, ignore_errors=True)
         shutil.rmtree(frames, ignore_errors=True)
+
+    if req.ai is not None and req.ai.active and hero is None:
+        # живые кадры важнее: AI — только нехватка и слабые, не больше ~12% пула
+        from engine.slides.ai_fill import fill_pool
+
+        progress(0.92, "AI-кадры: генерирую для слабых и недостающих кадров…")
+        videos, images = fill_pool(
+            videos, images, plan, req.ai, pool=pool, image_target=image_need, video_target=video_need,
+            cancel=cancel, progress=lambda p, m: progress(0.92 + 0.06 * p, m),
+        )
 
     video_sec = sum(float(v.get("duration") or CLIP_SEC) for v in videos)
     if not videos:

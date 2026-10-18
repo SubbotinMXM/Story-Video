@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 from pathlib import Path
 from typing import Callable
 
@@ -35,6 +36,9 @@ from engine.slides.whisper_pipeline import (
 )
 from engine.slides.whisper_timings import DEFAULT_MODEL_SIZE
 
+if TYPE_CHECKING:
+    from engine.slides.ai_gen import AiConfig
+
 ProgressCb = Callable[[float, str], None]
 
 
@@ -53,6 +57,8 @@ class FullRunRequest:
     outro_dir: Path | None = None
     # фоновая музыка (assets/music): по кругу под рассказом, в переводах тоже
     music: Path | None = None
+    # AI-кадры (RoyalTechno): None — выключены
+    ai: "AiConfig | None" = None
     speed_copies: int = 0
     strict_sync: bool = False
     # строгий подбор на весь ролик, а не только первые 3 мин (вместе со strict_sync)
@@ -201,6 +207,7 @@ def run_full_pipeline(
                 llm_model=req.llm_model,
                 strict_sync=req.strict_sync,
                 strict_full=req.strict_full,
+                ai=req.ai,
             ),
             cancel=cancel,
             on_progress=lambda p, m: span(0.50, 0.80, p, m),

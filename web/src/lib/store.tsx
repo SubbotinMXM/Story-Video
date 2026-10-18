@@ -151,6 +151,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         prevStatus.current.set(job.id, job.status);
         if (before && before !== job.status) {
           if (job.status === "done") push({ kind: "ok", title: job.title, text: job.result?.summary || "Готово" });
+          if (job.status === "done" && job.result?.warnings?.length)
+            push({ kind: "error", title: `${job.title}: не всё получилось`, text: job.result.warnings.join("\n") });
           if (job.status === "failed") push({ kind: "error", title: job.title, text: job.error || "Ошибка" });
         }
         setJobs((all) => {

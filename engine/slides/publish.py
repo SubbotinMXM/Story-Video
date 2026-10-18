@@ -50,6 +50,7 @@ _PROVIDER_NAMES = {
     "archive": "Internet Archive",
     "google": "Google Images",
     "youtube": "YouTube",
+    "ai": "AI-кадры (RoyalTechno)",
 }
 
 
