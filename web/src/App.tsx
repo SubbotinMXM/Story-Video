@@ -1,13 +1,20 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
+  ListChecks,
+  BarChart3,
   CheckCircle2,
   Clapperboard,
   Copy,
   History,
+  ImageIcon,
   Images,
   Info,
   Loader2,
+  MessageCircleHeart,
+  Telescope,
+  Vote,
   Moon,
+  Palette,
   Settings as SettingsIcon,
   Sun,
   X,
@@ -16,18 +23,32 @@ import {
 import { JobsPanel } from "./components/JobsPanel";
 import { useJobs, useSettings, useToasts } from "./lib/store";
 import { BrollPage } from "./pages/BrollPage";
+import { StepsPage } from "./pages/StepsPage";
 import { CopiesPage } from "./pages/CopiesPage";
 import { RunsPage } from "./pages/RunsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { SlidesPage } from "./pages/SlidesPage";
+import { ThumbnailPage } from "./pages/ThumbnailPage";
+import { CoversPage } from "./pages/CoversPage";
+import { AnalyticsPage } from "./pages/AnalyticsPage";
+import { CommentsPage } from "./pages/CommentsPage";
+import { PollsPage } from "./pages/PollsPage";
+import { NichesPage } from "./pages/NichesPage";
 
-type PageId = "broll" | "slides" | "runs" | "copies" | "settings";
+import type { PageId } from "./lib/nav";
 
 const NAV: { id: PageId; label: string; icon: ReactNode; group: string }[] = [
-  { id: "broll", label: "Футажи", icon: <Clapperboard size={18} />, group: "Создать" },
+  { id: "steps", label: "Генерация по шагам", icon: <ListChecks size={18} />, group: "Создать" },
+  { id: "broll", label: "Рассказы", icon: <Clapperboard size={18} />, group: "Создать" },
   { id: "slides", label: "Стоковые слайды", icon: <Images size={18} />, group: "Создать" },
+  { id: "covers", label: "Обложки", icon: <Palette size={18} />, group: "Создать" },
+  { id: "thumbnail", label: "Обложки звёзд", icon: <ImageIcon size={18} />, group: "Создать" },
   { id: "runs", label: "Запуски слайдов", icon: <History size={18} />, group: "Работа" },
   { id: "copies", label: "Копии ролика", icon: <Copy size={18} />, group: "Работа" },
+  { id: "comments", label: "Комментарии", icon: <MessageCircleHeart size={18} />, group: "Работа" },
+  { id: "polls", label: "Голосования", icon: <Vote size={18} />, group: "Работа" },
+  { id: "niches", label: "Поиск ниш", icon: <Telescope size={18} />, group: "Работа" },
+  { id: "analytics", label: "Аналитика", icon: <BarChart3 size={18} />, group: "Работа" },
   { id: "settings", label: "Настройки", icon: <SettingsIcon size={18} />, group: "Приложение" },
 ];
 
@@ -99,6 +120,17 @@ export default function App() {
   const { jobs } = useJobs();
   const running = jobs.filter((j) => j.status === "running");
 
+  // переход из карточки («Промпты → Настройки»): страница + прокрутка к нужной карточке
+  useEffect(() => {
+    const on = (e: Event) => {
+      const { page: next, anchor } = (e as CustomEvent<{ page: PageId; anchor?: string }>).detail;
+      setPage(next);
+      if (anchor) setTimeout(() => document.getElementById(anchor)?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+    };
+    window.addEventListener("sv-goto", on);
+    return () => window.removeEventListener("sv-goto", on);
+  }, []);
+
   useEffect(() => {
     try {
       localStorage.setItem("page", page);
@@ -161,17 +193,38 @@ export default function App() {
         ) : (
           <>
             {/* все страницы смонтированы: введённый текст не теряется при переключении */}
+            <div hidden={page !== "steps"}>
+              <StepsPage />
+            </div>
             <div hidden={page !== "broll"}>
               <BrollPage />
             </div>
             <div hidden={page !== "slides"}>
               <SlidesPage goRuns={() => setPage("runs")} />
             </div>
+            <div hidden={page !== "covers"}>
+              <CoversPage />
+            </div>
+            <div hidden={page !== "thumbnail"}>
+              <ThumbnailPage />
+            </div>
             <div hidden={page !== "runs"}>
               <RunsPage active={page === "runs"} />
             </div>
             <div hidden={page !== "copies"}>
               <CopiesPage />
+            </div>
+            <div hidden={page !== "comments"}>
+              <CommentsPage />
+            </div>
+            <div hidden={page !== "polls"}>
+              <PollsPage />
+            </div>
+            <div hidden={page !== "niches"}>
+              <NichesPage active={page === "niches"} />
+            </div>
+            <div hidden={page !== "analytics"}>
+              <AnalyticsPage active={page === "analytics"} />
             </div>
             <div hidden={page !== "settings"}>
               <SettingsPage />

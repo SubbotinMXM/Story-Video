@@ -106,6 +106,7 @@ class StocksSkipNameTests(unittest.TestCase):
         mix._lock = threading.Lock()
         mix.searches = {}
         mix.subject = "person"
+        mix.weights.side_effect = lambda video: sm.base_weights("person", video=video)
         mix.stats.adjusted.side_effect = lambda w: w
         clients = {"google": object(), "pexels": object(), "wikimedia": object()}
         with mock.patch.object(sm, "_search_source", fake_search):

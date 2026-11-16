@@ -81,6 +81,126 @@ class JobManagerEdgeTests(_ManagerCase):
         gate.set()
         _wait(lambda: job.status == jobs_mod.DONE)
 
+    def test_upload_lane_runs_beside_render(self) -> None:
+        """Выкладка не ждёт монтажа (и монтаж — выкладки): у неё своя полоса, по одной задаче."""
+        gate = threading.Event()
+        started: list[str] = []
+
+        def builder(kind, params, state):
+            def run(job, p, c):
+                started.append(kind)
+                gate.wait(3)
+                return {}
+            return kind, run
+
+        with mock.patch.object(jobs_mod, "MAX_PARALLEL", 1):
+            m = jobs_mod.JobManager(builder)
+            m.add(m.create("broll", {}))
+            m.add(m.create("publish", {}))
+            m.add(m.create("publish", {}))
+            _wait(lambda: len(started) == 2)
+            time.sleep(0.2)
+            snapshot = list(started)
+            gate.set()
+            _wait(lambda: len(started) == 3)
+        self.assertEqual(sorted(snapshot), ["broll", "publish"], "вторая выкладка ждёт первую")
+
+    def test_retry_at_from_exception_requeues_for_later(self) -> None:
+        class Limit(RuntimeError):
+            retry_at = time.time() + 3600
+
+        def builder(kind, params, state):
+            def run(job, p, c):
+                raise Limit("лимит загрузок YouTube — продолжу позже")
+            return kind, run
+
+        m = jobs_mod.JobManager(builder)
+        job = m.add(m.create("publish", {}))
+        _wait(lambda: job.state.get("retry_at") is not None and job.status == jobs_mod.QUEUED)
+        self.assertGreater(job.state["retry_at"], time.time() + 3000)
+        self.assertIn("лимит", job.message)
+        m.cancel(job.id)
+
+    def test_move_changes_which_queued_job_runs_next(self) -> None:
+        """Приоритет: поднятая задача берётся следующей; работающую не двигаем."""
+        gate = threading.Event()
+        ran: list[str] = []
+
+        def builder(kind, params, state):
+            def run(job, p, c):
+                ran.append(kind)
+                gate.wait(3)
+                return {}
+            return kind, run
+
+        with mock.patch.object(jobs_mod, "MAX_PARALLEL", 1):
+            m = jobs_mod.JobManager(builder)
+            first = m.add(m.create("a", {}))
+            _wait(lambda: first.status == jobs_mod.RUNNING)
+            m.add(m.create("b", {}))
+            c = m.add(m.create("c", {}))
+            d = m.add(m.create("d", {}))
+            with self.assertRaisesRegex(ValueError, "ждут"):
+                m.move(first.id, "down")
+            self.assertTrue(m.move(d.id, "top"))
+            self.assertTrue(m.move(c.id, "up"))  # d, c, b
+            self.assertTrue(m.move(c.id, "top"))  # c, d, b
+            self.assertFalse(m.move(c.id, "up"), "и так первая")
+            queued = [j["title"] for j in m.list() if j["status"] == jobs_mod.QUEUED]
+            gate.set()
+            _wait(lambda: len(ran) == 4)
+        self.assertEqual(ran, ["a", "c", "d", "b"])
+        self.assertEqual(queued, ["c", "d", "b"])
+
+    def test_follow_up_goes_right_after_its_parent(self) -> None:
+        """Рерайт ссылки 1 готов → её ролик встаёт сразу за ней, впереди рерайтов ссылок 2 и 3."""
+        gate = threading.Event()
+
+        def builder(kind, params, state):
+            return kind, lambda job, p, c: gate.wait(3) and {}
+
+        with mock.patch.object(jobs_mod, "MAX_PARALLEL", 1):
+            m = jobs_mod.JobManager(builder)
+            first = m.add(m.create("rewrite-1", {}))
+            m.add(m.create("rewrite-2", {}))
+            m.add(m.create("rewrite-3", {}))
+            m.add(m.create("video-1", {}), after=first.id)
+            order = [j["title"] for j in m.list()][-4:]
+            gate.set()
+        self.assertEqual(order, ["rewrite-1", "video-1", "rewrite-2", "rewrite-3"])
+
+    def test_transient_failure_is_retried_automatically(self) -> None:
+        """Обрыв сети / 522 у VoiceGen: задача сама встаёт в очередь с паузой и продолжает с места падения."""
+        calls = []
+
+        def builder(kind, params, state):
+            def run(job, p, c):
+                calls.append(dict(job.state))
+                if len(calls) == 1:
+                    job.save_state(step="озвучка готова")
+                    raise RuntimeError("VoiceGen 522: Cloudflare could not establish a TCP connection")
+                return {"summary": "ок"}
+            return "Ролик", run
+
+        with mock.patch.object(jobs_mod, "AUTO_RETRY_MIN", (0.0005,)):  # ~0.03 с вместо минут
+            m = jobs_mod.JobManager(builder)
+            job = m.add(m.create("x", {}))
+            _wait(lambda: job.status == jobs_mod.DONE, timeout=5)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1].get("step"), "озвучка готова", "повтор — с места падения")
+
+    def test_settings_error_is_not_retried(self) -> None:
+        def builder(kind, params, state):
+            def run(job, p, c):
+                raise ValueError("Укажи папку футажей")
+            return "Ролик", run
+
+        m = jobs_mod.JobManager(builder)
+        job = m.add(m.create("x", {}))
+        _wait(lambda: job.status == jobs_mod.FAILED)
+        time.sleep(0.2)
+        self.assertEqual(job.status, jobs_mod.FAILED, "ошибку настроек повтор не исправит — ждём человека")
+
     def test_cancel_queued_job(self) -> None:
         gate = threading.Event()
 
@@ -181,6 +301,13 @@ class ConfigTests(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.addCleanup(self.tmp.cleanup)
+
+    def test_builtin_rewrite_engine_becomes_claude(self) -> None:
+        """Встроенная нейросеть — только запасная: сохранённый выбор «llm» становится Claude, Codex остаётся."""
+        self.cfg_path.write_text(json.dumps({"rewrite_engine": "llm"}), encoding="utf-8")
+        self.assertEqual(cfg_mod.load_config()["rewrite_engine"], "claude_code")
+        self.assertEqual(cfg_mod.save_config({"rewrite_engine": "codex"})["rewrite_engine"], "codex")
+        self.assertEqual(cfg_mod.load_config()["rewrite_engine"], "codex")
 
     def test_first_run_imports_legacy(self) -> None:
         self.legacy.write_text(json.dumps({"api_key": "llm", "lumean_api_key": "lum", "strict_sync": True}), encoding="utf-8")
@@ -289,11 +416,13 @@ class KeepAwakeTests(unittest.TestCase):
             self.skipTest("caffeinate есть только на macOS")
         k.hold()
         first = k._proc
+        self.assertIsNotNone(k._activity, "App Nap выключен на время работы")
         k.hold()  # второй раз не плодит процессы
         self.assertIs(k._proc, first)
         self.assertTrue(k.active)
         k.release()
         self.assertFalse(k.active)
+        self.assertIsNone(k._activity, "очередь пуста — App Nap снова разрешён")
         k.release()  # повторно — без ошибок
         self.assertIsNotNone(first.poll())
 
@@ -322,3 +451,26 @@ class SingleInstanceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RewriteModelTest(unittest.TestCase):
+    def test_own_rewrite_model_or_common(self) -> None:
+        from server.runners import _rewrite_llm
+
+        base = {"llm_api_key": "k", "llm_base_url": "https://x/v1", "llm_model": "gpt-a"}
+        self.assertEqual(_rewrite_llm(base)[2], "gpt-a", "пусто — как в разделе LLM")
+        self.assertEqual(_rewrite_llm({**base, "rewrite_llm_model": " gpt-b "})[2], "gpt-b")
+        self.assertIsNone(_rewrite_llm({"rewrite_llm_model": "gpt-b"}), "без ключа — нет нейросети")
+
+
+class AnalyticsGroupsConfigTest(unittest.TestCase):
+    def test_groups_and_view_normalized(self):
+        from engine.core.config import _normalize
+
+        cfg = _normalize({"analytics_groups": [
+            {"id": "g1", "name": " Рассказы ", "channels": ["UC1", "UC1", "", "UC2"]},
+            {"id": "g1", "name": "дубль"}, {"id": "", "name": "без id"}, {"id": "g2", "name": ""}, "мусор",
+        ], "analytics_view": {"sort": "subscribers", "лишнее": 1}})
+        self.assertEqual(cfg["analytics_groups"], [{"id": "g1", "name": "Рассказы", "channels": ["UC1", "UC2"]}])
+        self.assertEqual(cfg["analytics_view"], {"group": "", "sort": "subscribers", "dir": "desc"})
+        self.assertEqual(_normalize({})["analytics_groups"], [])

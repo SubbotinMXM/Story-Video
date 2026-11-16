@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import re
 import threading
+import time
 from concurrent.futures import Future
 from urllib.parse import quote_plus, urlparse
 
@@ -30,6 +31,18 @@ _BAD_HOST = (
 # для редких тем это бывает заметная часть находок, — но ставим в конец очереди:
 # берутся, только если чистой подходящей картинки не нашлось.
 _WATERMARK_HOST = (
+    # русские издания и фотобанки, которые ставят свой знак на фото знаменитостей
+    "7days.ru",
+    "starhit.ru",
+    "kino-teatr.ru",
+    "ria.ru",
+    "tass.ru",
+    "kp.ru",
+    "sobesednik.ru",
+    "globallookpress.",
+    "russianlook.",
+    "legion-media.",
+    "eastnews.",
     "alamy.com",
     "shutterstock.com",
     "istockphoto.com",
@@ -77,6 +90,12 @@ _UA = (
 )
 
 
+# капча Google: столько подряд — Google на паузу, ищем сразу в Bing
+_CAPTCHA_LIMIT = 3
+_CAPTCHA_PAUSE_SEC = 20 * 60
+_CAPTCHA_SEEN: dict[int, bool] = {}
+
+
 class GoogleImagesClient:
     name = "google"
 
@@ -92,6 +111,8 @@ class GoogleImagesClient:
         self._browser = None
         self._context = None
         self._start_lock = threading.Lock()
+        self._captchas = 0
+        self._google_off_until = 0.0
 
     def close(self) -> None:
         self._closed = True
@@ -278,7 +299,18 @@ class GoogleImagesClient:
         return out
 
     async def _scrape(self, page, query: str, limit: int) -> list[str]:
-        urls = await _scrape_google(page, query, limit)
+        urls: list[str] = []
+        if time.monotonic() >= self._google_off_until:
+            urls = await _scrape_google(page, query, limit)
+            if _CAPTCHA_SEEN.pop(id(page), False):
+                self._captchas += 1
+                if self._captchas >= _CAPTCHA_LIMIT:
+                    # Google признал нас роботом — каждая попытка только тратит время: пока сразу Bing
+                    self._google_off_until = time.monotonic() + _CAPTCHA_PAUSE_SEC
+                    self._captchas = 0
+                    log(f"Google Images: капча {_CAPTCHA_LIMIT} раза подряд — {_CAPTCHA_PAUSE_SEC // 60} мин ищу сразу в Bing")
+            else:
+                self._captchas = 0
         if len(urls) >= max(3, limit // 3):
             return urls
         log(f"Google Images пусто/капча ({query!r}) → Bing")
@@ -299,6 +331,7 @@ async def _scrape_google(page, query: str, limit: int) -> list[str]:
     await page.goto(url, wait_until="domcontentloaded", timeout=45000)
     if "sorry" in (page.url or "") or "/sorry/" in (page.url or ""):
         log("Google Images: captcha/sorry")
+        _CAPTCHA_SEEN[id(page)] = True
         return []
     await _dismiss_consent(page)
     for _ in range(6):
@@ -306,6 +339,7 @@ async def _scrape_google(page, query: str, limit: int) -> list[str]:
         await page.wait_for_timeout(350)
     html = await page.content()
     if "unusual traffic" in html.lower() or "captcha" in html.lower():
+        _CAPTCHA_SEEN[id(page)] = True
         return []
     urls = _extract_urls(html)
     if len(urls) < limit:

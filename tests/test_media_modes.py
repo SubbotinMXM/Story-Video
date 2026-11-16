@@ -76,9 +76,27 @@ class HoleFillingTests(unittest.TestCase):
 
 class ModeMappingTests(unittest.TestCase):
     def test_runner_flags(self) -> None:
-        self.assertEqual(_media_mode({"media_mode": "theme"}), {"strict_sync": False, "strict_full": False})
-        self.assertEqual(_media_mode({"media_mode": "strict_3min"}), {"strict_sync": True, "strict_full": False})
-        self.assertEqual(_media_mode({"media_mode": "strict_full"}), {"strict_sync": True, "strict_full": True})
+        self.assertEqual(_media_mode({"media_mode": "theme"}), {"strict_sync": False, "strict_full": False, "stars": False, "source_mix": None})
+        self.assertEqual(_media_mode({"media_mode": "strict_3min"}), {"strict_sync": True, "strict_full": False, "stars": False, "source_mix": None})
+        self.assertEqual(_media_mode({"media_mode": "strict_full"}), {"strict_sync": True, "strict_full": True, "stars": False, "source_mix": None})
+        self.assertEqual(_media_mode({"media_mode": "stars"}), {"strict_sync": False, "strict_full": False, "stars": True, "source_mix": None})
+
+    def test_mode_frozen_in_job_params(self) -> None:
+        params: dict = {}
+        self.assertTrue(_media_mode({"media_mode": "strict_full"}, params)["strict_full"])
+        self.assertEqual(params["media_mode"], "strict_full", "режим запомнен в задаче")
+        # настройку потом поменяли — поставленный ролик идёт прежним режимом
+        self.assertTrue(_media_mode({"media_mode": "theme"}, params)["strict_full"])
+
+    def test_custom_source_mix(self) -> None:
+        from engine.slides.source_mix import DEFAULT_MIX, clean_mix, custom_weights
+
+        self.assertIsNone(clean_mix({}), "пусто — по умолчанию (по теме ролика)")
+        self.assertIsNone(clean_mix(dict(DEFAULT_MIX)), "как по умолчанию — тоже по теме ролика")
+        mix = clean_mix({"ai": 5, "stocks": 60, "youtube": 0, "google": 20, "wikimedia": 10, "archive": 5})
+        self.assertEqual(_media_mode({"source_mix": mix})["source_mix"], mix)
+        self.assertEqual(custom_weights(mix, video=True), {"stocks": 60, "archive": 5}, "YouTube 0% — не ищем")
+        self.assertEqual(custom_weights(mix, video=False), {"google": 20, "stocks": 60, "wikimedia": 10, "archive": 5})
 
     def test_resume_requires_same_variant(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -142,6 +160,55 @@ class YoutubeSafetyTests(unittest.TestCase):
         self.assertFalse(_risky("What Really Happened Inside the Colosseum?", "Ancient Rome Live"))
         self.assertTrue(_risky("People flee in panic as skyscraper wobbles", "News 360 Tv"))
         self.assertTrue(_risky("16 dead in flash flood in Qinghai", "中国新闻社"))
+        self.assertTrue(_risky("Wild Africa | Full Documentary", "Wildlife Channel"))
+        self.assertTrue(_risky("Elden Ring gameplay 4K", "Gamer"))
+        self.assertFalse(_risky("Filmed with a drone over Iceland", "Sky Pilot"), "filmed ≠ film")
+
+    def test_reupload_signs(self) -> None:
+        from engine.slides.source_youtube import _reupload_signs
+
+        def info(**kw):
+            base = {"status": {"license": "creativeCommon"}, "contentDetails": {"licensedContent": False}, "snippet": {"description": "My drone flight", "categoryId": "19"}}
+            for k, v in kw.items():
+                base[k] = {**base[k], **v}
+            return base
+
+        self.assertEqual(_reupload_signs(info()), "")
+        self.assertIn("Content ID", _reupload_signs(info(contentDetails={"licensedContent": True})))
+        self.assertIn("Creative Commons", _reupload_signs(info(status={"license": "youtube"})))
+        self.assertTrue(_reupload_signs(info(snippet={"description": "I do not own this video. No copyright infringement intended."})))
+        self.assertTrue(_reupload_signs(info(snippet={"description": "Все права принадлежат каналу X"})))
+        self.assertTrue(_reupload_signs(info(snippet={"description": "", "categoryId": "1"})), "категория «Фильмы»")
+
+    def test_search_drops_unverified_videos(self) -> None:
+        import httpx
+        from engine.slides.source_youtube import YouTubeClient
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.url.path.endswith("/videos"):
+                good = {"id": "good", "status": {"license": "creativeCommon"}, "contentDetails": {"licensedContent": False, "duration": "PT1M30S"}, "snippet": {}}
+                claimed = {"id": "claimed", "status": {"license": "creativeCommon"}, "contentDetails": {"licensedContent": True}, "snippet": {}}
+                return httpx.Response(200, json={"items": [good, claimed]})
+            items = [{"id": {"videoId": v}, "snippet": {"title": "Steppe aerial", "channelTitle": "Nomad"}} for v in ("good", "claimed", "gone")]
+            return httpx.Response(200, json={"items": items})
+
+        yt = YouTubeClient("key")
+        yt._http = httpx.Client(transport=httpx.MockTransport(handler))
+        self.assertEqual([c.id for c in yt.search("steppe")], ["good"])
+        self.assertEqual(yt._video_duration("good"), 90.0, "длительность из проверки — без лишнего запроса")
+
+    def test_search_without_check_takes_nothing(self) -> None:
+        import httpx
+        from engine.slides.source_youtube import YouTubeClient
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.url.path.endswith("/videos"):
+                return httpx.Response(500)
+            return httpx.Response(200, json={"items": [{"id": {"videoId": "x"}, "snippet": {"title": "Steppe", "channelTitle": "N"}}]})
+
+        yt = YouTubeClient("key")
+        yt._http = httpx.Client(transport=httpx.MockTransport(handler))
+        self.assertEqual(yt.search("steppe"), [], "проверить не вышло — лучше без YouTube")
 
     def test_credits_file(self) -> None:
         from engine.slides.publish import write_credits

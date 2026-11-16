@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from engine.core.logutil import log
-from engine.slides.paths import DESKTOP, mkdir_unique
+from engine.slides.paths import DESKTOP, mkdir_unique, output_root
 from engine.slides.theme_plan import THEME_NAME
 
 _BAD = re.compile(r"[\\/:*?\"<>|\n\r\t]+")
@@ -29,17 +29,12 @@ _STOP = frozenset(
     }
 )
 
-# исходник в run → имя в папке ролика
+# исходник в run → имя в папке ролика. Только ролик, озвучка и текст (+ главы.txt пишет рендер);
+# субтитры, источники и служебные списки остаются в запуске (data/runs).
 _PACK = (
     ("final.mp4", "ролик.mp4"),
     ("voice.mp3", "озвучка.mp3"),
     ("script.txt", "сценарий.txt"),
-    ("subs.srt", "субтитры.srt"),
-    ("music.mp3", "музыка.mp3"),
-    ("timings_preview.txt", "тайминги.txt"),
-    ("chunks_preview.txt", "тема.txt"),
-    ("timeline_preview.txt", "кадры.txt"),
-    ("credits.txt", "источники.txt"),
 )
 
 _PROVIDER_NAMES = {
@@ -54,28 +49,72 @@ _PROVIDER_NAMES = {
 }
 
 
-def write_credits(run_dir: Path, *, music_line: str = "") -> Path | None:
-    """credits.txt: авторы YouTube-нарезок (CC BY требует указать) + сводка источников."""
+def _timeline_items(run_dir: Path) -> list[dict]:
     path = run_dir / "timeline.json"
     if not path.is_file():
-        return None
+        return []
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None
+        return []
     items = [*(raw.get("slots") or []), *(raw.get("loop_block") or [])] or [
         *(raw.get("videos") or []),
         *(raw.get("images") or []),
     ]
-    youtube: dict[str, dict] = {}
-    counts: Counter[str] = Counter()
-    for item in items if isinstance(items, list) else []:
-        if not isinstance(item, dict) or item.get("fallback"):
-            continue
-        provider = str(item.get("provider") or "")
-        counts[provider] += 1
-        if provider == "youtube" and item.get("id"):
-            youtube.setdefault(str(item["id"]), item)
+    return [i for i in items if isinstance(i, dict) and not i.get("fallback")] if isinstance(items, list) else []
+
+
+def youtube_clips(run_dir: Path) -> dict[str, dict]:
+    """Нарезки YouTube в ролике: id видео → кадр (source_title, source_author)."""
+    out: dict[str, dict] = {}
+    for item in _timeline_items(run_dir):
+        if item.get("provider") == "youtube" and item.get("id"):
+            out.setdefault(str(item["id"]), item)
+    return out
+
+
+_ATTRIBUTION = {
+    "ru": "Видеофрагменты (лицензия CC BY):",
+    "en": "Video clips (CC BY license):",
+    "es": "Fragmentos de vídeo (licencia CC BY):",
+    "de": "Videoausschnitte (Lizenz CC BY):",
+    "fr": "Extraits vidéo (licence CC BY) :",
+    "pl": "Fragmenty wideo (licencja CC BY):",
+    "it": "Clip video (licenza CC BY):",
+    "ro": "Fragmente video (licență CC BY):",
+}
+# в описании YouTube всего 5000 символов — вместе с главами
+_ATTRIBUTION_BUDGET = 3200
+
+
+def attribution_block(run_dir: Path, language: str = "") -> str:
+    """Авторы нарезок YouTube для описания ролика (CC BY требует их указать). Нет нарезок — пусто."""
+    clips = youtube_clips(run_dir)
+    if not clips:
+        return ""
+    code = (language or "ru").split("-")[0].lower()
+    head = _ATTRIBUTION.get(code, _ATTRIBUTION["en"])
+
+    def line(vid: str, item: dict, with_title: bool) -> str:
+        author = str(item.get("source_author") or "").strip() or "—"
+        title = str(item.get("source_title") or "").strip()
+        if len(title) > 50:
+            title = title[:49].rstrip() + "…"
+        name = f"{author} — «{title}»" if with_title and title else author
+        return f"• {name} — https://youtu.be/{vid}"
+
+    lines = [line(v, it, True) for v, it in clips.items()]
+    if sum(len(x) + 1 for x in lines) > _ATTRIBUTION_BUDGET:
+        lines = [line(v, it, False) for v, it in clips.items()]
+    return "\n".join([head, *lines]) + "\n"
+
+
+def write_credits(run_dir: Path, *, music_line: str = "") -> Path | None:
+    """credits.txt: авторы YouTube-нарезок (CC BY требует указать) + сводка источников."""
+    if not (run_dir / "timeline.json").is_file():
+        return None
+    youtube = youtube_clips(run_dir)
+    counts: Counter[str] = Counter(str(i.get("provider") or "") for i in _timeline_items(run_dir))
     lines: list[str] = []
     if youtube:
         lines += [
@@ -145,7 +184,7 @@ def export_ready_folder(
     when: datetime | None = None,
     language: str = "",
 ) -> Path | None:
-    """Копирует готовые файлы в Desktop/<тема ДД.ММ>/. Россыпь на столе убирает.
+    """Копирует готовые файлы в <папка роликов или Desktop>/<тема ДД.ММ>/. Россыпь на столе убирает.
 
     language — когда есть переводы: «Монголия 14.10 (RU)» рядом с «(EN)», «(DE)».
     """
@@ -153,7 +192,7 @@ def export_ready_folder(
         return None
     stamp = (when or datetime.now()).strftime("%d.%m")
     label = _folder_label(video_keyword(run_dir))
-    folder = _unique_dir(DESKTOP, f"{label} {stamp}{lang_suffix(language)}")
+    folder = _unique_dir(output_root("slides", DESKTOP), f"{label} {stamp}{lang_suffix(language)}")
     copied = 0
     for src_name, dest_name in _PACK:
         src = run_dir / src_name
@@ -178,11 +217,10 @@ def export_dub_folder(
         return None
     stamp = (when or datetime.now()).strftime("%d.%m")
     label = _folder_label(video_keyword(run_dir))
-    folder = _unique_dir(DESKTOP, f"{label} {stamp}{lang_suffix(language)}")
+    folder = _unique_dir(output_root("slides", DESKTOP), f"{label} {stamp}{lang_suffix(language)}")
     copied = 0
     for src_name, dest_name in _PACK:
-        # кадры и их источники — общие с оригиналом, остальное своё у каждого языка
-        src = (run_dir if src_name == "credits.txt" else lang_dir) / src_name
+        src = lang_dir / src_name
         if not src.is_file() or src.stat().st_size < 1:
             continue
         shutil.copy2(src, folder / dest_name)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import random
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -16,7 +17,7 @@ from engine.slides.stocks_base import KeyPool, StockCandidate
 
 CLIP_SEC = 10.0
 MAX_HEIGHT = 1080
-YT_PARALLEL = 6
+YT_PARALLEL = 8
 _YT_SLOTS = threading.BoundedSemaphore(YT_PARALLEL)
 
 
@@ -51,6 +52,8 @@ class YouTubeClient:
         self.api_key = self.keys.next() or ""
         self.min_height = max(0, int(min_height))
         self._http = httpx.Client(timeout=45.0, trust_env=False, follow_redirects=True)
+        # длительности из проверки видео — не тратить на них лишний запрос
+        self._durations: dict[str, float] = {}
 
     def close(self) -> None:
         self._http.close()
@@ -99,6 +102,8 @@ class YouTubeClient:
                 # только Creative Commons: автор разрешил переиспользование
                 # с указанием авторства (список авторов кладём в папку ролика)
                 "videoLicense": "creativeCommon",
+                # только HD: отсекает старое и любительское низкого качества ещё до скачивания
+                "videoDefinition": "high",
                 "safeSearch": "moderate",
             },
         )
@@ -140,6 +145,36 @@ class YouTubeClient:
                     meta={"title": title, "channel": channel, "license": "CC BY"},
                 )
             )
+        return self._verified(out)
+
+    def _verified(self, cands: list[StockCandidate]) -> list[StockCandidate]:
+        """Проверка каждого видео (videos.list, 1 ед. квоты на 50 видео): лицензия, Content ID,
+        признаки перезалива. Проверить не вышло — не берём ничего (лучше без YouTube, чем со страйком)."""
+        if not cands:
+            return []
+        resp = self._get(
+            self.VIDEOS_URL,
+            {"part": "snippet,contentDetails,status", "id": ",".join(c.id for c in cands), "maxResults": 50},
+        )
+        try:
+            items = (resp.json() or {}).get("items") if resp is not None else None
+        except Exception:
+            items = None
+        if not isinstance(items, list):
+            log("youtube: не смог проверить лицензии найденных видео — пропускаю их")
+            return []
+        infos = {str(i.get("id")): i for i in items if isinstance(i, dict) and isinstance(i.get("id"), str)}
+        out: list[StockCandidate] = []
+        for cand in cands:
+            info = infos.get(cand.id)
+            why = _reupload_signs(info) if info is not None else "видео недоступно"
+            if why:
+                log(f"youtube: пропускаю {cand.id} ({cand.meta.get('channel')}: {str(cand.meta.get('title'))[:50]}) — {why}")
+                continue
+            dur = _parse_iso8601(str((info.get("contentDetails") or {}).get("duration") or ""))
+            if dur:
+                self._durations[cand.id] = dur
+            out.append(cand)
         return out
 
     def download_clip(
@@ -186,6 +221,10 @@ class YouTubeClient:
             "no_warnings": True,
             "noprogress": True,
             "logger": _SilentLogger(),
+            # зависшее соединение не держит поток подбора минутами: 20 с тишины — следующий кандидат
+            "socket_timeout": 20,
+            "retries": 2,
+            "fragment_retries": 2,
             "ffmpeg_location": str(Path(ff).parent),
         }
         try:
@@ -241,6 +280,10 @@ class YouTubeClient:
             "no_warnings": True,
             "noprogress": True,
             "logger": _SilentLogger(),
+            # зависшее соединение не держит поток подбора минутами: 20 с тишины — следующий кандидат
+            "socket_timeout": 20,
+            "retries": 2,
+            "fragment_retries": 2,
             "merge_output_format": "mp4",
             "ffmpeg_location": str(Path(ff).parent),
         }
@@ -320,6 +363,8 @@ class YouTubeClient:
         return round(r.uniform(lo, hi), 2)
 
     def _video_duration(self, video_id: str) -> float | None:
+        if video_id in self._durations:
+            return self._durations[video_id]
         if not self.api_key or not video_id:
             return None
         try:
@@ -336,22 +381,61 @@ class YouTubeClient:
 
 
 # Даже среди Creative Commons встречаются чужие перезаливы. Фильмы, сериалы, клипы,
-# спорт и крупные студии/телеканалы — основная причина претензий Content ID.
-_RISKY = (
-    "trailer", "трейлер", "full movie", "movie clip", "фильм", "official video",
-    "official music", "music video", "клип", "vevo", "episode", "серия", "season ",
-    "сезон", "highlights", "full match", "обзор матча", "netflix", "hbo", "disney",
-    "marvel", "pixar", "warner", "paramount", "universal pictures", "sony pictures",
-    "cnn", "bbc", "fox news", "nbc", "abc news", "nfl", "nba", "uefa", "fifa",
-    "premier league", "ufc", "wwe",
+# спорт, игры, документалки крупных студий и телеканалы — основная причина претензий Content ID.
+_RISKY_WORDS = (
+    "trailer", "трейлер", "full movie", "movie clip", "movie", "film", "фильм", "фильма", "official video",
+    "official music", "music video", "клип", "episode", "серия", "season", "сезон", "series", "сериал",
+    "tv show", "tv series", "cartoon", "мультфильм", "мультик", "anime", "аниме", "amv",
+    "highlights", "full match", "обзор матча", "netflix", "hbo", "disney", "marvel", "pixar", "warner",
+    "paramount", "cinemax", "universal pictures", "sony pictures", "cnn", "bbc", "fox news", "nbc", "abc news",
+    "nfl", "nba", "uefa", "fifa", "premier league", "ufc", "wwe",
+    "national geographic", "nat geo", "natgeo", "discovery channel", "history channel", "smithsonian",
+    "documentary", "documentaire", "documental", "dokumentation", "doku", "документальный", "документалка",
+    "lyrics", "karaoke", "караоке", "concert", "концерт", "live performance",
+    "gameplay", "walkthrough", "let's play", "летсплей",
+    "compilation", "подборка", "remastered", "reupload", "re-upload", "перезалив", "excerpt", "отрывок",
     # новостные каналы часто перезаливают чужие съёмки
-    "news", "новости", "новостей", "noticias", "wiadomości", "știri", "新闻", "breaking",
+    "news", "новости", "новостей", "noticias", "wiadomości", "știri", "breaking",
 )
+_RISKY_RE = re.compile(r"(?<!\w)(?:" + "|".join(re.escape(w) for w in _RISKY_WORDS) + r")(?!\w)")
+# внутри слов и без пробелов: «ArtistVEVO», «中国新闻社»
+_RISKY_PARTS = ("vevo", "新闻", "电影", "电视剧")
+# так пишут в описании те, кто выложил чужое: лицензия CC у такого видео ничего не стоит
+_REUPLOAD = re.compile(
+    r"i do ?n[o']?t own|no copyright infringement|copyright infringement (?:is )?(?:not )?intended|"
+    r"copyright disclaimer|section 107|fair use|all rights reserved|all rights (?:go|belong)|"
+    r"rights (?:go|belong) to|credits? (?:go )?to the|re-?upload|не являюсь (?:владельцем|автором)|"
+    r"права принадлежат|все права защищены|добросовестн\w+ использовани|перезалив"
+)
+
+
+# категории YouTube: 1 — фильмы и анимация, 10 — музыка, 20 — игры (там почти всё чужое)
+_RISKY_CATEGORIES = frozenset({"1", "10", "20"})
 
 
 def _risky(title: str, channel: str) -> bool:
     text = f" {title} {channel} ".lower()
-    return any(word in text for word in _RISKY)
+    return bool(_RISKY_RE.search(text)) or any(part in text for part in _RISKY_PARTS)
+
+
+def _reupload_signs(info: dict) -> str:
+    """Почему видео похоже на чужое (пусто — признаков нет). info — элемент videos.list."""
+    status = info.get("status") or {}
+    details = info.get("contentDetails") or {}
+    snip = info.get("snippet") or {}
+    if status.get("license") != "creativeCommon":
+        return "лицензия не Creative Commons"
+    if details.get("licensedContent"):
+        # видео совпало с чужим контентом в Content ID — у него есть правообладатель
+        return "в Content ID у видео есть правообладатель"
+    text = " ".join([str(snip.get("description") or ""), " ".join(map(str, snip.get("tags") or []))]).lower()
+    if _REUPLOAD.search(text):
+        return "в описании признаки перезалива («I do not own», «fair use», «all rights reserved»…)"
+    if str(snip.get("categoryId") or "") in _RISKY_CATEGORIES:
+        return "категория: фильмы/мультфильмы, музыка или игры"
+    if _risky(" ".join(map(str, snip.get("tags") or [])), ""):
+        return "теги: фильмы, сериалы, игры, ТВ"
+    return ""
 
 
 def _clip_ok(path: Path, *, min_sec: float) -> bool:

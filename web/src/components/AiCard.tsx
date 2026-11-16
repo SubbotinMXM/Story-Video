@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type AiModels } from "../lib/api";
 import { useLoadedSettings } from "../lib/store";
-import { Card, Field, Toggle } from "./ui";
+import { Card, Field, NumberInput, Toggle } from "./ui";
 
 /** AI-кадры: по желанию — генерация фото/видео для слабых кусков (≈10–15% ролика). */
 export function AiCard() {
@@ -60,6 +60,14 @@ export function AiCard() {
                 ))}
               </select>
             </Field>
+            <Field
+              label="Бюджет на один ролик, $"
+              hint={`По умолчанию $0.40, максимум $0.50. Вместе с повторными генерациями ролик не потратит больше этой суммы: дальше — только живые кадры (видео, фото, стоки).${
+                image || video ? ` Это ~${Math.floor((settings.ai_budget_usd * 100 * 0.85) / Math.max(1, Math.max(image?.price_cents ?? 0, video?.price_cents ?? 0)))} кадров.` : ""
+              }`}
+            >
+              <NumberInput value={settings.ai_budget_usd} min={0} max={0.5} step={0.05} onChange={(v) => update({ ai_budget_usd: Math.min(0.5, Math.max(0, Math.round(v * 100) / 100)) })} />
+            </Field>
             {video?.low_res && <div className="notice warn small">Эта модель видео — 480p: в ролике 1080p будет заметно мыльнее.</div>}
             {noKey && <div className="notice warn small">Нет ключа RoyalTechno — добавь в Настройки → AI-кадры.</div>}
             {nothing && <div className="notice warn small">Выбери модель для фото, для видео или обе.</div>}
@@ -67,7 +75,8 @@ export function AiCard() {
               <div className="muted small">
                 Обычно до ~{perVideo} AI-кадров на ролик («Строго весь ролик» — ~13 на каждые 10 минут).
                 {image && ` Фото: $${(image.price_cents / 100).toFixed(2)} за кадр.`}
-                {video && ` Видео: $${(video.price_cents / 100).toFixed(2)} за клип.`} Слабых кадров меньше — генерируется меньше.
+                {video && ` Видео: $${(video.price_cents / 100).toFixed(2)} за клип.`} Слабых кадров меньше — генерируется меньше;
+                {" "}упрётся в бюджет — остальное живыми кадрами.
               </div>
             )}
           </div>

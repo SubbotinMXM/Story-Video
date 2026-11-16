@@ -142,3 +142,36 @@ def is_hero_shot(vecs: list[np.ndarray], hero: np.ndarray) -> bool:
 def hero_score(vecs: list[np.ndarray], hero: np.ndarray) -> float:
     """Насколько лицо героя есть среди этих лиц (максимум cosine)."""
     return max((float(v @ hero) for v in vecs), default=-1.0)
+
+
+def face_boxes(path: Path) -> list[tuple[tuple[float, float, float, float], np.ndarray, float]]:
+    """Лица с рамками в координатах исходной картинки: [((x, y, w, h), вектор SFace, анфас 0–1)].
+    Анфас — насколько нос посередине между глазами (1 — смотрит прямо в камеру)."""
+    with _lock:
+        cv2, det, rec = _get()
+        img = cv2.imread(str(path))
+        if img is None:
+            return []
+        h, w = img.shape[:2]
+        scale = min(1.0, _MAX_SIDE / max(h, w))
+        small = cv2.resize(img, (int(w * scale), int(h * scale))) if scale < 1.0 else img
+        det.setInputSize((small.shape[1], small.shape[0]))
+        _ok, faces = det.detect(small)
+        if faces is None:
+            return []
+        short = min(small.shape[:2])
+        out = []
+        for face in faces:
+            fw, fh = float(face[2]), float(face[3])
+            if min(fw, fh) < short * MIN_FACE_FRAC:
+                continue
+            vec = rec.feature(rec.alignCrop(small, face)).flatten().astype(np.float32)
+            norm = float(np.linalg.norm(vec))
+            if norm <= 0:
+                continue
+            (rx, ry), (lx, ly), (nx, _ny) = face[4:6], face[6:8], face[8:10]
+            eyes = abs(lx - rx) or 1.0
+            frontal = max(0.0, 1.0 - abs(nx - (rx + lx) / 2) / (eyes / 2))
+            box = tuple(float(v) / scale for v in face[:4])
+            out.append((box, vec / norm, frontal))
+    return sorted(out, key=lambda f: -f[0][2] * f[0][3])

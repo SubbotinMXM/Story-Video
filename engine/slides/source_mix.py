@@ -46,6 +46,49 @@ GOOGLE_SHARE = {"person": 0.8, "place": 0.35, "nature": 0.3, "history": 0.45, "o
 
 _STOCK_PROVIDERS = {"pexels", "pixabay", "unsplash"}
 
+# Доли контента в ролике по умолчанию, % — как подбор работает сейчас для «обычной» темы
+# (_VIDEO_WEIGHTS/_IMAGE_WEIGHTS «other», видео и фото примерно поровну, AI — AI_SHARE).
+# Пока пользователь их не менял, доли сами сдвигаются под тему ролика (человек, место, природа…);
+# свои цифры (настройка source_mix) применяются как есть ко всем роликам.
+DEFAULT_MIX = {"ai": 12, "stocks": 30, "youtube": 22, "google": 15, "wikimedia": 7, "archive": 14}
+MIX_KEYS = tuple(DEFAULT_MIX)
+_VIDEO_GROUPS = ("youtube", "stocks", "archive")
+_IMAGE_GROUPS = ("google", "stocks", "wikimedia", "archive")
+
+
+def clean_mix(raw: object) -> dict[str, int] | None:
+    """Свои доли из настроек → {источник: %}; пусто или как по умолчанию — None (автоподбор по теме)."""
+    if not isinstance(raw, dict) or not raw:
+        return None
+    out: dict[str, int] = {}
+    for k in MIX_KEYS:
+        try:
+            out[k] = max(0, min(100, int(round(float(raw.get(k, DEFAULT_MIX[k]))))))
+        except (TypeError, ValueError):
+            out[k] = DEFAULT_MIX[k]
+    if out == DEFAULT_MIX or not any(out[k] for k in MIX_KEYS if k != "ai"):
+        return None
+    return out
+
+
+def custom_weights(mix: dict[str, int], *, video: bool) -> dict[str, int]:
+    """Свои доли → веса источников для видео или фото (источник с 0% не ищется)."""
+    groups = _VIDEO_GROUPS if video else _IMAGE_GROUPS
+    weights = {g: mix.get(g, 0) for g in groups if mix.get(g, 0) > 0}
+    return weights or {"stocks": 1}
+
+
+def google_share(mix: dict[str, int]) -> float:
+    """Доля Google среди картинок по своим долям."""
+    total = sum(mix.get(g, 0) for g in _IMAGE_GROUPS)
+    return mix.get("google", 0) / total if total else 0.0
+
+
+def ordered_sources(mix: dict[str, int], *, video: bool) -> list[str]:
+    """Источники пула по убыванию своих долей (0% — не ищем)."""
+    groups = _VIDEO_GROUPS if video else _IMAGE_GROUPS
+    return [g for g in sorted(groups, key=lambda g: -mix.get(g, 0)) if mix.get(g, 0) > 0]
+
 
 def source_group(provider: str) -> str:
     p = (provider or "").lower()
@@ -155,11 +198,13 @@ class Budget:
         self.hard = hard
 
     @classmethod
-    def for_beats(cls, n_beats: int) -> Budget:
+    def for_beats(cls, n_beats: int, *, slow: bool = False) -> Budget:
         """Длинный ролик в режиме «весь ролик» получает время пропорционально кускам."""
         # кадров стало вдвое больше (смена каждые 3–5 с), а общее время держим прежним:
-        # ~3,5 с на кадр до «хватит качества 720p», ~6 с — до «берём лучшее из найденного»
-        return cls(soft=max(SOFT_SEC, 3.5 * n_beats), hard=max(HARD_SEC, 6.0 * n_beats))
+        # ~3,5 с на кадр до «хватит качества 720p», ~6 с — до «берём лучшее из найденного».
+        # slow — каждый кадр ещё смотрит LLM: времени на четверть больше (качество важнее, но в пределах)
+        k = 1.25 if slow else 1.0
+        return cls(soft=max(SOFT_SEC, 3.5 * k * n_beats), hard=max(HARD_SEC, 6.0 * k * n_beats))
 
     @property
     def phase(self) -> str:

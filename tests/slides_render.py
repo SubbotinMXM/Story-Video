@@ -63,7 +63,7 @@ class SubtitlesTests(unittest.TestCase):
             duration=10, seed=1, fade_sec=0.5, w=1920, h=1080, fps=30
         )
         self.assertEqual(frames, 300)
-        self.assertIn("scale=7680:4320", vf)
+        self.assertIn("scale=3840:2160:flags=lanczos", vf)  # движение на 2× кадре (полпикселя на выходе)
         self.assertIn("zoompan=", vf)
         self.assertIn("s=3840x2160", vf)
         self.assertNotIn("-loop", vf)

@@ -3,6 +3,8 @@ import { CheckCircle2, XCircle, Zap } from "lucide-react";
 import { api } from "../lib/api";
 import { useLoadedSettings } from "../lib/store";
 import { ProviderFields, ProviderPicker, useProvider } from "../components/TtsFields";
+import { RewriteSettingsCard } from "../components/Rewrite";
+import { CoverPromptsCard } from "../components/CoverPrompts";
 import { Button, Card, Field, PageHeader, SecretInput, TextInput, Textarea } from "../components/ui";
 
 type PingResult = { ok: boolean; message: string } | null;
@@ -74,12 +76,12 @@ export function SettingsPage() {
               mono
             />
           </Field>
-          <Field label="Модель" hint="Можно выбрать из списка или вписать свою">
+          <Field label="Модель" hint="Пусто — авто: самая дешёвая подходящая модель, недоступна — следующая по цене. Список — от дешёвых к дорогим">
             <input
               className="input mono"
               list="llm-models"
               value={settings.llm_model}
-              placeholder={meta.llm_default_model}
+              placeholder={meta.llm_default_model || "авто — по цене"}
               onChange={(e) => update({ llm_model: e.target.value })}
             />
             <datalist id="llm-models">
@@ -92,6 +94,22 @@ export function SettingsPage() {
         <PingButton service="llm" label="Проверить LLM" />
       </Card>
 
+      <RewriteSettingsCard />
+      <CoverPromptsCard />
+      <Card
+        title="AdsPower"
+        description="Браузерные профили, в которых выполнен вход в каналы YouTube, — для автоматической выкладки роликов. Программа AdsPower должна быть открыта на этом Mac. Ключ и адрес — в AdsPower → API."
+      >
+        <div className="grid grid-2">
+          <Field label="API key" span>
+            <SecretInput value={settings.adspower_api_key} onChange={(v) => update({ adspower_api_key: v })} placeholder="ключ из AdsPower → API" />
+          </Field>
+          <Field label="Адрес Local API">
+            <TextInput value={settings.adspower_url} onChange={(v) => update({ adspower_url: v })} placeholder="http://local.adspower.com:50325" mono />
+          </Field>
+        </div>
+        <PingButton service="adspower" label="Проверить AdsPower" />
+      </Card>
       <Card title="Стоки и YouTube" description="По одному ключу на строку. Когда у ключа кончается лимит, берётся следующий.">
         <div className="grid grid-3">
           {(

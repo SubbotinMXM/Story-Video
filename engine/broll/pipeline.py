@@ -25,8 +25,6 @@ from engine.compositor.defaults import (
     SUBSCRIBE_BLEND,
     SUBSCRIBE_CHROMA,
     SUBSCRIBE_SIMILARITY,
-    SUBSCRIBE_START_MAX,
-    SUBSCRIBE_START_MIN,
 )
 from engine.compositor.pipeline import (
     ComposeRequest,
@@ -35,14 +33,14 @@ from engine.compositor.pipeline import (
     _overlay_subscribe,
     build_and_run,
 )
-from engine.compositor.utils import probe_chromakey_crop
+from engine.compositor.utils import probe_chromakey_crop, probe_duration
 from engine.core.cancel import CancelToken
 from engine.core.logutil import log
 from engine.core.throttle import heavy_stage
 from engine.slides.ffmpeg_util import has_filter
 from engine.slides.render_mux import burn_subtitles
 from engine.slides.speed_copies import write_speed_copies
-from engine.slides.subtitles import mark_script_origin, timings_to_srt
+from engine.slides.subtitles import ORIGIN_NAME, mark_script_origin, timings_to_srt
 from engine.slides.whisper_timings import save_timings_json, transcribe_words
 from engine.tts import DEFAULT_PROVIDER, get_provider
 
@@ -50,6 +48,10 @@ ProgressCb = Callable[[float, str], None]
 
 PROGRESS_NAME = ".progress.json"
 TTS_ORDER_NAME = ".tts_order.json"
+# длина интро (для глав YouTube: рассказ начинается после него)
+INTRO_SEC_NAME = ".intro_sec"
+# служебное, которого не должно остаться в готовой папке: там только ролик(и), озвучка, текст и главы
+_SCRAP = ("timings.json", "subs.srt", ORIGIN_NAME, INTRO_SEC_NAME, "chapters.json")
 
 
 @dataclass
@@ -69,8 +71,12 @@ class BrollRequest:
     tts_provider: str = DEFAULT_PROVIDER
     tts_options: dict = field(default_factory=dict)
     speed_copies: int = 0
+    # LLM (ключ, адрес, модель) — названия глав YouTube; None — главы равными частями
+    llm: tuple[str, str, str] | None = None
     # пусто — язык определит Whisper по аудио
     language: str = ""
+    # перевод ролика: текст оригинала — главы берутся из него (названия переводятся)
+    chapters_base: str = ""
     # рабочая папка: задана — продолжаем в ней, иначе создаём новую на Desktop
     work_dir: Path | None = None
     # озвучка готова (папка результатов) — например, заказать её перевод, пока собирается видео
@@ -195,7 +201,7 @@ def run_broll(
         if "compose" not in stages or not video.is_file():
             check()
             progress(0.58, "Сборка видео…")
-            build_and_run(
+            composed = build_and_run(
                 ComposeRequest(
                     audio=audio_file,
                     broll_dir=req.broll_dir,
@@ -211,6 +217,8 @@ def run_broll(
                 ),
                 on_progress=video_prog,
             )
+            intro_sec = probe_duration(composed.intro) if composed.intro is not None else 0.0
+            (out_dir / INTRO_SEC_NAME).write_text(f"{intro_sec:.3f}", encoding="utf-8")
             for stage in ("compose", "intro", "outro", "subscribe"):
                 stages.mark(stage)
             if subs_srt is not None:
@@ -258,9 +266,9 @@ def run_broll(
             _overlay_subscribe(
                 video,
                 sub_path,
-                start=rng.uniform(SUBSCRIBE_START_MIN, SUBSCRIBE_START_MAX),
                 crop=crop,
                 on_progress=progress,
+                rng=rng,
             )
             stages.mark("subscribe")
 
@@ -277,8 +285,16 @@ def run_broll(
             )
             stages.mark("copies")
 
+    if "chapters" not in stages:
+        check()
+        progress(0.99, "Главы для описания YouTube…")
+        _write_broll_chapters(req, out_dir=out_dir, video=video, audio=audio_file, text_file=text_file)
+        stages.mark("chapters")
+
     # всё готово: убрать служебное и дать папке финальное имя
     check()
+    for name in _SCRAP:
+        (out_dir / name).unlink(missing_ok=True)
     stages.path.unlink(missing_ok=True)
     (out_dir / TTS_ORDER_NAME).unlink(missing_ok=True)
     old_dir = out_dir
@@ -295,6 +311,34 @@ def run_broll(
         text_file=text_file,
         audio_file=audio_file,
     )
+
+
+def _write_broll_chapters(req: BrollRequest, *, out_dir: Path, video: Path, audio: Path, text_file: Path | None) -> None:
+    """главы.txt (+ для копий скорости). Тайминги — Whisper субтитров, если были, иначе по доле текста."""
+    from engine.core.chapters import CHAPTERS_NAME, read_words, write_chapters
+    from engine.slides.speed_copies import copy_filename, copy_percents
+
+    try:
+        offset = float((out_dir / INTRO_SEC_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        offset = 0.0
+    words = read_words(out_dir / "timings.json")
+    text = text_file.read_text(encoding="utf-8") if text_file is not None and text_file.is_file() else ""
+    try:
+        write_chapters(
+            out_dir,
+            text=text,
+            words=words,
+            voice_duration=probe_duration(audio),
+            language=req.language,
+            llm=req.llm,
+            offset=offset,
+            total=probe_duration(video),
+            copies=[(copy_filename(p, CHAPTERS_NAME), p / 100) for p in copy_percents(req.speed_copies)],
+            base_text=req.chapters_base,
+        )
+    except Exception as exc:  # без глав ролик всё равно готов
+        log(f"Главы: не получилось ({exc})")
 
 
 def _make_broll_srt(

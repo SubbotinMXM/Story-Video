@@ -26,6 +26,9 @@ Schema:
   "must_include": ["2-6 English keywords that MUST bias every search (era/place/identity)"],
   "avoid": ["4-10 English anachronism keywords to avoid, e.g. smartphone, modern kitchen, yogurt, jeans, car"],
   "historical": true/false,
+  "brief": "2-3 English sentences: what or who the film is about, where (country, regions, cities) and when",
+  "visual_markers": ["5-10 English visual cues that make a frame recognizably belong to THIS story's place and era: architecture, script on signs, typical people and clothing, landscape and climate, vehicles, landmarks"],
+  "wrong_look": ["3-8 English descriptions of frames that would be WRONG for this story: other countries or cultures that are easy to confuse with it, wrong era, e.g. 'European alpine village', 'Chinese signage', 'modern cars' for a medieval story"],
   "person_era": "only for subject=person: photo if real photos or videos of this person exist (born after ~1830: actors, singers, politicians, athletes of the 19th–21st century, living or recently died); pre_photo if they lived before photography (Caesar, Archimedes, Peter the Great); empty string otherwise"
 }
 
@@ -65,6 +68,10 @@ class StoryContext:
     historical: bool = False
     # для ролика про человека: photo — есть его фото/видео; pre_photo — только статуи и картины
     person_era: str = ""
+    # «паспорт ролика» для проверки кадров: о чём/где/когда, приметы своего места и чужого
+    brief: str = ""
+    visual_markers: list[str] = field(default_factory=list)
+    wrong_look: list[str] = field(default_factory=list)
 
     def clip_positive(self, query: str) -> str:
         parts = [query.strip()]
@@ -127,7 +134,14 @@ class StoryContext:
             person_era=str(raw.get("person_era") or "").strip().lower()
             if str(raw.get("person_era") or "").strip().lower() in ("photo", "pre_photo")
             else "",
+            brief=str(raw.get("brief") or "").strip(),
+            visual_markers=_strs(raw.get("visual_markers")),
+            wrong_look=_strs(raw.get("wrong_look")),
         )
+
+
+def _strs(raw: object) -> list[str]:
+    return [str(x).strip() for x in raw if str(x).strip()] if isinstance(raw, list) else []
 
 
 def extract_story_context(
@@ -140,7 +154,7 @@ def extract_story_context(
     if not text:
         return StoryContext()
     # не раздувать токены
-    snippet = text[:6000]
+    snippet = text[:12000]
     user = (
         "Narration script:\n\n"
         f"{snippet}\n\n"

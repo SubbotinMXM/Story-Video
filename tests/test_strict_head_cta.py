@@ -73,6 +73,62 @@ class HeadMixTests(unittest.TestCase):
         order = [(i % 2 == 0) for i in range(30)]  # _pick_mixed: чётный — видео первым
         self.assertEqual(sum(order), 15)
 
+class CtaSpanTests(unittest.TestCase):
+    """Призыв, разрезанный между кусками, и финальный призыв без «подпишитесь» — кадр по теме ролика."""
+
+    def _words(self, text: str, start: float = 0.0, step: float = 0.4):
+        from engine.slides.whisper_timings import WordTiming
+
+        out, t = [], start
+        for w in text.split():
+            out.append(WordTiming(w, t, t + step * 0.8))
+            t += step
+        return out
+
+    def test_split_cta_and_final_cta(self) -> None:
+        from engine.slides import strict_media as sm
+
+        story = "Города строили одинаковые кварталы, похожих друг на друга. "
+        cta1 = "Дорогие зрители, поставьте лайк этому видео и подпишитесь на наш канал, также включив колокольчик уведомлений. А теперь продолжим. "
+        middle = "Река каждый год приносила новые наводнения в долину. "
+        cta2 = ("Дамы и господа, сейчас на экране перед вами находятся три ссылки: наше самое последнее видео — слева, "
+                "квадратная ссылка на наш канал — в центре и целый плейлист с такими же увлекательными историями — справа. "
+                "Поставьте лайк этому видео, поделитесь своим мнением в комментариях, а затем посмотрите и другие наши видео. Спасибо!")
+        words = self._words(story + cta1 + middle + cta2)
+        spans = sm.cta_spans(words)
+        self.assertEqual(len(spans), 2, spans)
+        # кусок со второй половиной первого призыва — без слова «подпишитесь»
+        second_half = [w for w in words if w.word.startswith("колокольчик")][0]
+        beat = sm.Beat(second_half.start - 1.6, second_half.start + 2.4, "наш канал, также включив колокольчик уведомлений.")
+        self.assertTrue(sm.in_cta(beat, spans))
+        story_beat = sm.Beat(words[1].start, words[6].end, story)
+        self.assertFalse(sm.in_cta(story_beat, spans), "обычный текст — кадр под слова")
+        tail = [w for w in words if w.word.startswith("квадратная")][0]
+        self.assertTrue(sm.in_cta(sm.Beat(tail.start, tail.start + 4, "квадратная ссылка на наш канал"), spans))
+
+    def test_story_mentions_are_not_cta(self) -> None:
+        from engine.slides import strict_media as sm
+
+        words = self._words("Он подписал договор аренды и уехал в другой город. Канал вдоль улицы зарос травой.")
+        self.assertEqual(sm.cta_spans(words), [])
+
+    def test_beats_in_cta_get_theme_video(self) -> None:
+        import json as _json
+        from unittest import mock as _mock
+
+        from engine.slides import strict_media as sm
+        from engine.slides.theme_plan import ThemePlan
+
+        plan = ThemePlan(summary="Pakistan today", video_queries=["Lahore old city aerial cinematic"], image_queries=["Lahore"])
+        beats = [sm.Beat(300, 305, "Река разливалась."), sm.Beat(305, 310, "наш канал, также включив колокольчик уведомлений.")]
+        client = _mock.Mock()
+        client.complete.return_value = _json.dumps({"queries": ["Indus river flood aerial", "bell notification icon"]})
+        q = sm._plan_queries(client, plan, beats, None, all_beats=True, cta=[(304.0, 312.0)])
+        self.assertEqual(q[0], "Indus river flood aerial")
+        self.assertTrue(q[1].startswith(sm.CTA_MARK), q[1])
+        self.assertIn("Lahore", q[1], "на призыве — общий кадр по теме ролика")
+
+
 
 if __name__ == "__main__":
     unittest.main()

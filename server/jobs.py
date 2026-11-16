@@ -37,10 +37,37 @@ HISTORY_LIMIT = 100
 # (job, progress_cb, cancel) -> result dict
 Runner = Callable[["Job", Callable[[float, str], None], CancelToken], dict[str, Any]]
 
+_SAVE_LOCK = threading.Lock()
 _PROGRESS_EVERY = 0.25  # сек между событиями прогресса одной задачи
 # Сколько роликов идёт одновременно. Тяжёлые этапы (рендер, Whisper) всё равно
 # по одному (engine.core.throttle), параллельно идут озвучка, LLM и подбор кадров.
 MAX_PARALLEL = 2
+# выкладка на YouTube — своя полоса: идёт параллельно с монтажом, но по одной (окно браузера в фокусе одно)
+UPLOAD_KINDS = frozenset({"publish", "comments", "polls", "analytics", "scan"})  # профили AdsPower — по одной задаче
+# лёгкие задачи (генерация обложек — только сеть) — своя полоса: не ждут ни монтажа, ни выкладки
+LIGHT_KINDS = frozenset({"cover", "niches"})
+
+
+def lane_of(kind: str) -> str:
+    return "upload" if kind in UPLOAD_KINDS else "light" if kind in LIGHT_KINDS else "main"
+# краткий сбой сети или сервиса (обрыв, 5xx/522, «LLM перегружен») — очередь сама повторит задачу
+# с места падения через столько минут; дальше — ждёт «Продолжить»
+AUTO_RETRY_MIN = (5, 15, 30)
+_TRANSIENT = (
+    "connecttimeout", "connecterror", "readtimeout", "handshake operation timed out", "timed out",
+    "connection reset", "connection refused", "remoteprotocolerror", "server disconnected",
+    "nodename nor servname", "temporary failure in name resolution", "network is unreachable",
+    "сервис llm перегружен", "no upstream accounts", "нет связи", "временно не работает",
+    " 500", " 502", " 503", " 504", " 520", " 521", " 522", " 523", " 524", "cloudflare",
+    # YouTube временно ограничил доступ с этого адреса — обычно проходит само через какое-то время
+    "подтвердить, что это не робот",
+)
+
+
+def is_transient(exc: BaseException) -> bool:
+    """Сбой, который проходит сам (сеть, перегрузка сервиса), а не ошибка настроек или данных."""
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(k in text for k in _TRANSIENT)
 
 
 @dataclass
@@ -79,8 +106,23 @@ class Job:
         if self.on_state:
             self.on_state()
 
+    def _live_view(self):
+        """Живой статус каналов. Задача ждёт очереди — прошлые «ошибка»/«идёт» устарели: канал просто ждёт."""
+        live = self.state.get("live")
+        if self.status != QUEUED or not live:
+            return live
+        return [r if r.get("status") == "done" else
+                {**r, "status": "wait", "pct": 0, "stage": "ждёт очереди — продолжу с места падения"
+                 if r.get("status") in ("failed", "limit", "active") else r.get("stage", "ждёт очереди")}
+                for r in live]
+
     def public(self) -> dict[str, Any]:
-        safe = {k: v for k, v in self.params.items() if k != "text"}
+        # текст и снимок настроек задачи — не для интерфейса (большие)
+        safe = {k: v for k, v in self.params.items() if k not in ("text", "_settings")}
+        if self.kind == "cover":  # какой моделью делалась обложка (из снимка настроек задачи)
+            from engine.publish.cover import model_label
+
+            safe["model"] = model_label(str((self.params.get("_settings") or {}).get("cover_model") or ""))
         if self.params.get("text"):
             safe["chars"] = len(str(self.params["text"]))
         return {
@@ -99,6 +141,11 @@ class Job:
             "created": self.created,
             "started": self.started,
             "finished": self.finished,
+            # выкладка: живой статус по каналам (шаг, процент загрузки, время выхода)
+            "live": self._live_view(),
+            # автосмены инструмента/модели: Claude → Codex → встроенная, модель недоступна → другая
+            "switches": self.state.get("switches") or [],
+            "notice": "",  # предупреждение при постановке (заполняет /api/jobs, например «мало денег RoyalTechno»)
         }
 
     def stored(self) -> dict[str, Any]:
@@ -134,8 +181,13 @@ class JobManager:
         self.awake = KeepAwake()
         self._load()
         set_log_callback(self._on_log)
+        from engine.core import switches
+
+        switches.set_callback(self._on_switch)
         for n in range(MAX_PARALLEL):
-            threading.Thread(target=self._loop, name=f"job-worker-{n + 1}", daemon=True).start()
+            threading.Thread(target=self._loop, args=("main",), name=f"job-worker-{n + 1}", daemon=True).start()
+        threading.Thread(target=self._loop, args=("upload",), name="upload-worker", daemon=True).start()
+        threading.Thread(target=self._loop, args=("light",), name="light-worker", daemon=True).start()
 
     # --- API ---
 
@@ -163,15 +215,54 @@ class JobManager:
         if busy:
             raise ValueError(f"Запуск {name} уже в работе — дождись окончания или останови его")
 
-    def add(self, job: Job) -> Job:
+    def add(self, job: Job, *, after: str | None = None) -> Job:
+        """В очередь. after — id задачи, сразу за которой встать (продолжение цепочки: рерайт → его ролик
+        собирается следующим, а не после всех остальных ссылок)."""
         job.on_state = self._save
         with self._lock:
-            self._jobs.append(job)
+            pos = next((i for i, j in enumerate(self._jobs) if j.id == after), None) if after else None
+            if pos is None:
+                self._jobs.append(job)
+            else:
+                self._jobs.insert(pos + 1, job)
         self._save()
         self._emit(job)
+        self._emit_order()
         log(f"Задача в очереди: {job.title}")
         self._notify()
         return job
+
+    def move(self, job_id: str, to: str) -> bool:
+        """Приоритет в очереди: up / down — на одну ждущую задачу, top / bottom — в начало / конец ожидающих.
+        Работающие и готовые задачи не двигаются; следующей берётся верхняя ждущая."""
+        if to not in ("up", "down", "top", "bottom"):
+            raise ValueError(f"Неизвестное направление: {to}")
+        with self._lock:
+            job = self._find(job_id)
+            if job is None:
+                raise ValueError("Задача не найдена")
+            if job.status != QUEUED:
+                raise ValueError("Двигать можно только задачи, которые ждут в очереди")
+            queued = [j for j in self._jobs if j.status == QUEUED]
+            k = queued.index(job)
+            target = {"up": k - 1, "down": k + 1, "top": 0, "bottom": len(queued) - 1}[to]
+            target = max(0, min(len(queued) - 1, target))
+            if target == k:
+                return False
+            # переставляем среди ждущих, остальные задачи остаются на своих местах в списке
+            slots = [i for i, j in enumerate(self._jobs) if j.status == QUEUED]
+            queued.insert(target, queued.pop(k))
+            for i, j in zip(slots, queued):
+                self._jobs[i] = j
+        self._save()
+        self._emit_order()
+        log(f"Очередь: «{job.title}» — {'выше' if to in ('up', 'top') else 'ниже'}")
+        return True
+
+    def _emit_order(self) -> None:
+        with self._lock:
+            ids = [j.id for j in self._jobs]
+        hub.publish("jobs_order", {"ids": ids})
 
     def resume(self, job_id: str) -> Job:
         """Продолжить упавшую/остановленную задачу с места падения.
@@ -185,6 +276,9 @@ class JobManager:
             if job.status not in RESUMABLE:
                 raise ValueError("Продолжить можно только упавшую или остановленную задачу")
             self._check_run_free(job)
+            # продолжение руками — счётчик автоповторов с нуля
+            job.state.pop("auto_retries", None)
+            job.state.pop("retry_at", None)
             title, runner = self._build(job.kind, job.params, job.state)
             job.runner = runner
             job.title = title
@@ -255,9 +349,10 @@ class JobManager:
             data = [j.stored() for j in self._jobs if j.status != DONE or j.id in keep_done]
         try:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
-            tmp = JOBS_FILE.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-            tmp.replace(JOBS_FILE)
+            with _SAVE_LOCK:  # два потока писали один временный файл — второй падал на переименовании (14.11)
+                tmp = JOBS_FILE.with_suffix(".tmp")
+                tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+                tmp.replace(JOBS_FILE)
         except OSError as exc:
             log(f"Не удалось сохранить очередь: {exc}")
 
@@ -308,25 +403,33 @@ class JobManager:
         with self._lock:
             self._work.notify_all()
 
-    def _claim(self) -> Job:
-        """Ждать задачу в очереди и забрать её (атомарно — два исполнителя не возьмут одну)."""
+    def _claim(self, lane: str = "main") -> Job:
+        """Ждать задачу в очереди и забрать её (атомарно — два исполнителя не возьмут одну).
+        lane — полоса исполнителя (main / upload / light): берёт только задачи своей полосы."""
         with self._lock:
             while True:
-                job = next((j for j in self._jobs if j.status == QUEUED and j.runner is not None), None)
+                now = time.time()
+                job = next((j for j in self._jobs if j.status == QUEUED and j.runner is not None
+                            and lane_of(j.kind) == lane
+                            and float(j.state.get("retry_at") or 0) <= now), None)
                 if job is not None:
+                    job.state.pop("retry_at", None)
                     job.status = RUNNING
                     job.started = time.time()
                     job.attempts += 1
                     job.message = "Продолжаю…" if job.attempts > 1 else "Старт…"
                     return job
-                if not any(j.status == RUNNING for j in self._jobs):
+                waiting = [float(j.state.get("retry_at") or 0) for j in self._jobs if j.status == QUEUED]
+                if not any(j.status == RUNNING for j in self._jobs) and not waiting:
                     # ничего не идёт и не ждёт — Mac снова может засыпать
                     self.awake.release()
-                self._work.wait()
+                # задачи, ждущие автоповтора, — проснуться к ближайшему повтору
+                due = [t for t in waiting if t > now]
+                self._work.wait(timeout=max(1.0, min(due) - now) if due else None)
 
-    def _loop(self) -> None:
+    def _loop(self, lane: str = "main") -> None:
         while True:
-            job = self._claim()
+            job = self._claim(lane)
             self.awake.hold()
             current_job.set(job.id)  # журнал этой задачи — отдельно
             try:
@@ -362,11 +465,46 @@ class JobManager:
             job.message = "Ошибка — можно продолжить с места падения"
             log(traceback.format_exc())
             log(f"✗ {job.title}: {job.error}")
+            self._maybe_retry(job, exc)
         finally:
             job.finished = time.time()
             self._save()
             self._emit(job)
             self._notify()  # исполнитель свободен — проверить сон и очередь
+
+    def _maybe_retry(self, job: Job, exc: BaseException) -> None:
+        """Краткий сбой сети/сервиса — поставить задачу обратно в очередь с паузой (с места падения)."""
+        retry_at = getattr(exc, "retry_at", None)
+        if retry_at:
+            # известно, когда пробовать снова (лимит загрузок YouTube) — ждём до этого времени, без счёта попыток
+            try:
+                title, runner = self._build(job.kind, job.params, job.state)
+            except Exception as build_exc:
+                log(f"Повтор по расписанию не получился: {build_exc}")
+                return
+            job.state["retry_at"] = float(retry_at)
+            job.runner, job.title = runner, title
+            job.status = QUEUED
+            job.cancel = CancelToken()
+            job.message = str(exc)
+            log(f"↻ {job.title}: {job.message}")
+            return
+        n = int(job.state.get("auto_retries") or 0)
+        if not is_transient(exc) or n >= len(AUTO_RETRY_MIN):
+            return
+        try:
+            title, runner = self._build(job.kind, job.params, job.state)
+        except Exception as build_exc:  # настройки сломались — ждём человека
+            log(f"Автоповтор не получился: {build_exc}")
+            return
+        wait = AUTO_RETRY_MIN[n]
+        job.state["auto_retries"] = n + 1
+        job.state["retry_at"] = time.time() + wait * 60
+        job.runner, job.title = runner, title
+        job.status = QUEUED
+        job.cancel = CancelToken()
+        job.message = f"Сбой сети или сервиса — сам повторю через {wait} мин (повтор {n + 1} из {len(AUTO_RETRY_MIN)})"
+        log(f"↻ {job.title}: {job.message}")
 
     def _emit(self, job: Job, *, throttle: bool = False) -> None:
         now = time.monotonic()
@@ -377,6 +515,30 @@ class JobManager:
 
     def _on_log(self, line: str) -> None:
         hub.publish("log", {"line": line, "job_id": current_job.get()})
+
+    SWITCHES_MAX = 30  # столько смен инструмента храним в карточке задачи
+
+    def _on_switch(self, job_id: str | None, item: dict[str, Any]) -> None:
+        """Автосмена инструмента/модели: в карточку задачи (с повторами одной и той же смены — счётчиком)
+        и всплывающим уведомлением, чтобы было видно сразу."""
+        with self._lock:
+            job = self._find(job_id) if job_id else None
+            fresh = True
+            if job is not None:
+                items: list = job.state.setdefault("switches", [])
+                key = (item["task"], item["from"], item["to"])
+                same = next((x for x in items if (x["task"], x["from"], x["to"]) == key), None)
+                if same is not None:  # та же смена ещё раз (модель перегружена снова) — без нового уведомления
+                    same.update(reason=item["reason"], at=item["at"], times=int(same.get("times") or 1) + 1)
+                    fresh = False
+                else:
+                    items.append(item)
+                    del items[:-self.SWITCHES_MAX]
+        if job is not None:
+            self._save()
+            self._emit(job)
+        if fresh:
+            hub.publish("switch", {"job_id": job_id, "title": job.title if job else "", **item})
 
 
 def _remove_owned_dir(job: Job) -> None:
@@ -406,4 +568,10 @@ def get_manager() -> JobManager:
         from server.runners import build
 
         manager = JobManager(build)
+        from engine.core.config import load_config
+        from engine.publish import analytics_auto
+
+        # «Аналитика» → автообновление по расписанию: проверка раз в 30 с, пока работает приложение
+        threading.Thread(target=analytics_auto.loop, args=(manager, load_config), name="analytics-auto",
+                         daemon=True).start()
     return manager

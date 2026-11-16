@@ -1,5 +1,5 @@
 import { useEffect, useId, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { Check, FileAudio, FileVideo, Folder, Loader2, X } from "lucide-react";
+import { Check, ChevronRight, FileAudio, FileVideo, Folder, Loader2, X } from "lucide-react";
 import { api, type PickKind } from "../lib/api";
 
 // ---------- Button ----------
@@ -47,32 +47,108 @@ export function PageHeader({ title, subtitle, actions }: { title: string; subtit
   );
 }
 
+function useRemembered(key: string, initial: boolean): [boolean, (v: boolean) => void] {
+  const [open, setOpen] = useState<boolean>(() => {
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? initial : v === "1";
+    } catch {
+      return initial;
+    }
+  });
+  const set = (v: boolean) => {
+    setOpen(v);
+    try {
+      localStorage.setItem(key, v ? "1" : "0");
+    } catch {
+      /* storage недоступен */
+    }
+  };
+  return [open, set];
+}
+
 export function Card({
   title,
   description,
   actions,
   children,
   className = "",
+  collapsible = false,
+  defaultOpen = true,
+  id,
 }: {
   title?: string;
   description?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
   className?: string;
+  /** Карточку можно свернуть щелчком по заголовку (состояние запоминается). */
+  collapsible?: boolean;
+  defaultOpen?: boolean;
+  id?: string;
 }) {
+  const [open, setOpen] = useRemembered(`card-open:${id ?? title ?? ""}`, defaultOpen);
+  const shown = !collapsible || open;
+  // переход по ссылке на эту карточку («Настройки → Промпты…») — раскрыть её
+  useEffect(() => {
+    if (!collapsible || !id) return;
+    const on = (e: Event) => {
+      if ((e as CustomEvent<{ anchor?: string }>).detail?.anchor === id) setOpen(true);
+    };
+    window.addEventListener("sv-goto", on);
+    return () => window.removeEventListener("sv-goto", on);
+  });
   return (
-    <section className={`card ${className}`}>
+    <section className={`card ${className} ${collapsible ? "collapsible" : ""}`} id={id}>
       {(title || actions) && (
-        <div className="card-head">
+        <div
+          className={`card-head ${collapsible ? "clickable" : ""}`}
+          onClick={collapsible ? () => setOpen(!open) : undefined}
+          role={collapsible ? "button" : undefined}
+          aria-expanded={collapsible ? open : undefined}
+        >
           <div>
-            {title && <h2>{title}</h2>}
+            {title && (
+              <h2>
+                {collapsible && <ChevronRight size={15} className={`chev ${open ? "open" : ""}`} />}
+                {title}
+              </h2>
+            )}
             {description && <p className="muted">{description}</p>}
           </div>
-          {actions && <div className="card-actions">{actions}</div>}
+          {actions && (
+            <div className="card-actions" onClick={(e) => e.stopPropagation()}>
+              {actions}
+            </div>
+          )}
         </div>
       )}
-      <div className="card-body">{children}</div>
+      {shown && <div className="card-body">{children}</div>}
     </section>
+  );
+}
+
+/** Разворачивающийся блок внутри карточки («птичка»): подробности спрятаны, пока не нужны. */
+export function Disclosure({
+  summary,
+  children,
+  defaultOpen = false,
+  id,
+}: {
+  summary: ReactNode;
+  children: ReactNode;
+  defaultOpen?: boolean;
+  id: string;
+}) {
+  const [open, setOpen] = useRemembered(`disclosure:${id}`, defaultOpen);
+  return (
+    <div className="disclosure">
+      <button type="button" className="disclosure-head" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <ChevronRight size={15} className={`chev ${open ? "open" : ""}`} />
+        <span>{summary}</span>
+      </button>
+      {open && <div className="disclosure-body">{children}</div>}
+    </div>
   );
 }
 

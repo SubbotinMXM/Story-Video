@@ -61,6 +61,10 @@ class MediaRequest:
     llm_model: str = ""
     strict_sync: bool = False
     strict_full: bool = False
+    # «Звёзды»: несколько героев, на отрезок каждого — его фото (engine/slides/stars_media)
+    stars: bool = False
+    # свои доли источников {ai, stocks, youtube, google, wikimedia, archive}, %; None — по теме ролика
+    source_mix: dict | None = None
     # AI-кадры (RoyalTechno): None — выключены, ролик только из живых кадров
     ai: "AiConfig | None" = None
 
@@ -86,6 +90,10 @@ def run_media_stage(
     cancel: CancelToken | None = None,
     on_progress: ProgressCb | None = None,
 ) -> MediaStageResult:
+    if req.stars:
+        from engine.slides.stars_media import collect_stars_timeline
+
+        return collect_stars_timeline(req, cancel=cancel, on_progress=on_progress)
     if req.strict_sync:
         from engine.slides.strict_media import collect_strict_timeline
 

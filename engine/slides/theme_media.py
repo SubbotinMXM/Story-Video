@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import json
 import random
 import shutil
@@ -104,6 +106,11 @@ def collect_theme_pool(
     )
 
     clients = _build_clients(req.keys)
+    from engine.slides.judge import make_judge
+
+    judge = make_judge(req.llm_api_key, req.llm_model or "", req.llm_base_url or "", plan)
+    if judge is not None and cancel:
+        cancel.register(judge.client)
     rng = random.Random(req.seed)
     image_need, video_need = pool_targets(rng)
     log(f"На этот ролик: картинок {image_need}, видео {video_need}")
@@ -152,6 +159,7 @@ def collect_theme_pool(
                 video_search_sec=VIDEO_SEARCH_SEC,
                 # 80–100 картинок всего: Google по доле темы + стоки до цели (не сверху — дольше)
                 stocks_on_top_of_google=False,
+                judge=judge,
             )
     finally:
         http.close()
@@ -170,9 +178,16 @@ def collect_theme_pool(
         progress(0.92, "AI-кадры: генерирую для слабых и недостающих кадров…")
         videos, images = fill_pool(
             videos, images, plan, req.ai, pool=pool, image_target=image_need, video_target=video_need,
-            cancel=cancel, progress=lambda p, m: progress(0.92 + 0.06 * p, m),
+            cancel=cancel, progress=lambda p, m: progress(0.92 + 0.06 * p, m), judge=judge,
+            moments=_story_moments(script),
         )
+    if judge is not None:
+        log(f"Проверка кадров LLM: {judge.calls} проверок" + ("" if judge.enabled else " (выключилась по ходу — дальше был CLIP)"))
+        judge.close()
 
+    from engine.slides.hook import add_beauty
+
+    add_beauty([*videos, *images], run_dir)  # первые минуты ролика — красивейшие кадры
     video_sec = sum(float(v.get("duration") or CLIP_SEC) for v in videos)
     if not videos:
         log("Подходящих видео нет. Ролик будет из картинок.")
@@ -274,6 +289,7 @@ def gather_pool(
     video_search_sec: float,
     stocks_on_top_of_google: bool = False,
     exclude: list[dict] | None = None,
+    judge=None,
 ) -> tuple[list[dict], list[dict], int, int]:
     """Пул по теме: видео (до video_search_sec), потом картинки — доля Google по теме,
     остальное стоки/Wikimedia/Archive. Возвращает (videos, images, отбраковано видео, картинок).
@@ -292,17 +308,18 @@ def gather_pool(
         http, clients, plan, rng=rng, pool=pool, trials=trials, frames=frames,
         kind="video", queries=plan.video_queries, req=req, cancel=cancel, progress=progress,
         pct_lo=at(0.0), pct_hi=at(0.4), deadline=time.monotonic() + video_search_sec, need=video_need,
-        exclude=exclude,
+        exclude=exclude, judge=judge,
     )
     images: list[dict] = []
     rejected_g = 0
-    google_need = _google_need(plan, image_need)
-    if "google" in clients:
+    custom = getattr(req, "source_mix", None)
+    google_need = _google_need(plan, image_need, custom)
+    if "google" in clients and google_need > 0:
         progress(at(0.45), "Google Images: браузерный поиск…")
         images, rejected_g = _fill_kind(
             http, clients, plan, rng=rng, pool=pool, trials=trials, frames=frames,
             kind="photo", queries=plan.image_queries, req=req, cancel=cancel, progress=progress,
-            pct_lo=at(0.45), pct_hi=at(0.7), need=google_need, sources=["google"], exclude=exclude,
+            pct_lo=at(0.45), pct_hi=at(0.7), need=google_need, sources=["google"], exclude=exclude, judge=judge,
         )
         progress(at(0.7), f"Google: {sum(1 for x in images if x.get('provider') == 'google')}/{google_need}")
     progress(at(0.72), "Стоки/wikimedia: добираю картинки…")
@@ -314,7 +331,7 @@ def gather_pool(
         http, clients, plan, rng=rng, pool=pool, trials=trials, frames=frames,
         kind="photo", queries=plan.image_queries, req=req, cancel=cancel, progress=progress,
         pct_lo=at(0.72), pct_hi=at(1.0), already=images, need=max(total, len(images)),
-        exclude=exclude,
+        exclude=exclude, judge=judge,
         # современная тема — сначала свежие качественные стоки, старые архивы — в запас
         sources=["wikimedia", "archive", "stocks"] if plan.context.historical else ["stocks", "wikimedia", "archive"],
     )
@@ -342,8 +359,20 @@ def _fill_kind(
     need: int = IMAGE_NEED_MIN,
     sources: list[str] | None = None,
     exclude: list[dict] | None = None,
+    judge=None,
 ) -> tuple[list[dict], int]:
     prefer_video = kind == "video"
+    custom = getattr(req, "source_mix", None)
+    if sources is None and custom:
+        from engine.slides.source_mix import ordered_sources
+
+        sources = ordered_sources(custom, video=prefer_video) or ["stocks"]
+    elif sources is not None and custom and sources != ["google"]:
+        # свои доли: источник с 0% не ищем, остальные — по убыванию доли
+        from engine.slides.source_mix import ordered_sources
+
+        allowed = ordered_sources(custom, video=prefer_video)
+        sources = [s for s in allowed if s in sources] or sources
     if sources is None:
         if prefer_video and plan.context.historical:
             sources = ["youtube", "archive", "stocks"]
@@ -417,16 +446,19 @@ def _fill_kind(
             prefer_video=prefer_video,
             hero=hero,
             min_height=MIN_HEIGHT,
+            judge=judge,
         )
 
-    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool_ex:
+    # проверка LLM отвечает 15–50 с — кандидатов в работе больше, иначе пул собирается вдвое дольше
+    workers = FETCH_WORKERS * 2 if judge is not None and judge.enabled else FETCH_WORKERS
+    with ThreadPoolExecutor(max_workers=workers) as pool_ex:
         while not exhausted or pending:
             if cancel:
                 cancel.check()
             if _over_time() and not pending:
                 log(f"{kind}: прошло {VIDEO_SEARCH_SEC / 60:.0f} мин, поиск стоп")
                 break
-            while not _saturated() and not exhausted and len(pending) < FETCH_WORKERS:
+            while not _saturated() and not exhausted and len(pending) < workers:
                 cand = next(cand_iter, None)
                 if cand is None:
                     exhausted = True
@@ -504,6 +536,8 @@ def _fill_kind(
                         "hero": hit["hero"],
                         "source_title": hit.get("source_title", ""),
                         "source_author": hit.get("source_author", ""),
+                        # качество съёмки по LLM (0–10): первые минуты ролика — из лучших
+                        "quality": hit.get("quality"),
                     }
                 )
                 progress(
@@ -531,6 +565,7 @@ def _evaluate_candidate(
     hero: bool,
     min_height: int,
     youtube=None,
+    judge=None,
 ) -> dict | None:
     ext = ".mp4" if prefer_video else _ext_from_url(cand.download_url)
     trial = trials / f"{kind}_{cand.provider}_{cand.id}{ext}"
@@ -586,6 +621,14 @@ def _evaluate_candidate(
         log(f"Не по смыслу, меняю: {cand.provider} {cand.id} ({cand.query})")
         trial.unlink(missing_ok=True)
         return {"ok": False, "rejected": True}
+    quality = None
+    if judge is not None and judge.enabled:
+        judged = _judge_pool_item(judge, trial, cand, prefer_video=prefer_video)
+        if judged is None:
+            trial.unlink(missing_ok=True)
+            return {"ok": False, "rejected": True}
+        if judged != _CLIP_KEEP:
+            score, quality = judged
     return {
         "ok": True,
         "trial": str(trial),
@@ -597,7 +640,31 @@ def _evaluate_candidate(
         "hero": hero,
         "source_title": str((cand.meta or {}).get("title") or ""),
         "source_author": str((cand.meta or {}).get("channel") or ""),
+        "quality": quality,
     }
+
+
+def _judge_pool_item(judge, trial: Path, cand: StockCandidate, *, prefer_video: bool):
+    """Кадр пула глазами LLM: подходит ли ролику (страна, эпоха, тема) и хороша ли съёмка.
+    → (оценка 0–1, качество съёмки 0–10); None — не берём; _CLIP_KEEP — проверки не было."""
+    from engine.slides.shake import SHAKY, shakiness
+
+    shake = shakiness(trial) if prefer_video else None
+    if shake is not None and shake > 2 * SHAKY:
+        log(f"Пул: {cand.provider} {cand.id} — сильная тряска ({shake:.1f}), не беру")
+        return None
+    v = judge.pool().rate(trial, cand.query or "")
+    if v is None:
+        return _CLIP_KEEP
+    log(f"Пул: {cand.provider} {'видео' if prefer_video else 'фото'} ({cand.query}) — {v.note()}")
+    if not v.ok:
+        return None
+    score = v.score - (1 if shake is not None and shake > SHAKY else 0)
+    quality = v.quality - (2 if shake is not None and shake > SHAKY else 0)
+    return round(max(0.0, score) / 10, 3), max(0, quality)
+
+
+_CLIP_KEEP = -1.0  # метка «проверки не было»: оценку CLIP не трогаем
 
 
 def _gather(
@@ -697,8 +764,13 @@ def _subject(plan: ThemePlan) -> str:
     return subject_of(ctx.subject, visual_style=ctx.visual_style, historical=ctx.historical)
 
 
-def _google_need(plan: ThemePlan, image_need: int) -> int:
-    """Сколько картинок пула брать из Google: про человека — больше, про места — меньше."""
+def _google_need(plan: ThemePlan, image_need: int, custom: dict | None = None) -> int:
+    """Сколько картинок пула брать из Google: про человека — больше, про места — меньше
+    (свои доли источников — по ним)."""
+    if custom:
+        from engine.slides.source_mix import google_share
+
+        return round(image_need * google_share(custom))
     ctx = plan.context
     subject = subject_of(ctx.subject, visual_style=ctx.visual_style, historical=ctx.historical)
     return max(GOOGLE_NEED_MIN, round(image_need * GOOGLE_SHARE[subject]))
@@ -801,6 +873,15 @@ def _extract_frames(video: Path, dest_dir: Path, window_sec: float) -> list[Path
         else:
             dest.unlink(missing_ok=True)
     return out
+
+
+def _story_moments(script: str, limit: int = 60) -> list[str]:
+    """Фразы рассказа равномерно по всему тексту — под них пишутся AI-кадры пула."""
+    sents = [x.strip() for x in re.split(r"(?<=[.!?…])\s+", script or "") if len(x.strip()) > 25]
+    if len(sents) <= limit:
+        return sents
+    step = len(sents) / limit
+    return [sents[int(k * step)] for k in range(limit)]
 
 
 def _llm(req: MediaRequest) -> LLMClient:

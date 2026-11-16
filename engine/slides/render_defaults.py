@@ -8,15 +8,13 @@ OUT_FPS = 30
 VIDEO_PRESET = "veryfast"
 VIDEO_CRF = 20  # плотнее для ≤5ГБ на длинных
 AUDIO_BITRATE = "192k"
-MUSIC_VOLUME = 0.12
+MUSIC_VOLUME = 0.063  # как engine.slides.music.MUSIC_VOLUME (~−24 дБ)
 SUBSCRIBE_VOLUME = 0.8
 SUBSCRIBE_CHROMA = "0x60FB01"
 SUBSCRIBE_SIMILARITY = 0.12
 SUBSCRIBE_BLEND = 0.08
-SUBSCRIBE_MAX_WIDTH_RATIO = 0.55
+SUBSCRIBE_MAX_WIDTH_RATIO = 0.4  # ширина самой плашки (анимация обрезана по ней)
 SUBSCRIBE_BOTTOM_MARGIN = 48
-SUBSCRIBE_START_MIN = 4.0
-SUBSCRIBE_START_MAX = 5.0
 
 
 def rate_cap(height: int) -> list[str]:

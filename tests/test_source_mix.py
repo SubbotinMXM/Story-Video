@@ -113,7 +113,7 @@ class QualityPreferenceTests(unittest.TestCase):
                  mock.patch.object(sm, "_media_height", lambda p, video: heights[p.stem.split("_", 2)[2]]), \
                  mock.patch.object(sm, "_score_file", lambda trial, *a, **k: fits[trial.stem.split("_", 2)[2]]):
                 hit, _rej = sm._try_kind(
-                    None, {}, _plan("other"), sm.Beat(0, 6, "t"), "q", index=0,
+                    None, {}, _plan("other"), sm.Beat(300, 306, "t"), "q", index=0,  # после «крючка» первых минут
                     trials=tmp_path, frames=tmp_path, pool=tmp_path / "pool",
                     prefer_video=True, mix=mix, tries=3, allow_weak=True, keep_any=True, thematic=False,
                 )

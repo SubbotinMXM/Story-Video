@@ -8,7 +8,9 @@
    (dynaudnorm), общий уровень — EBU R128 −16 LUFS, LRA 5.
 
 Запуск: .venv/bin/python tools/prepare_music.py <папка с исходниками> <plan.json>
-plan.json: [{"group", "title", "file", "license"}] (исходники — FreePD, CC0).
+plan.json: [{"group", "title", "file", "license", "source", "artist"}].
+Источник с ноября 2026 — Фонотека YouTube (YouTube Audio Library): на её треки нет претензий Content ID.
+Только инструменталы: перед добавлением — tools/check_vocals.py (треки с пением в библиотеку не идут).
 """
 
 from __future__ import annotations
@@ -30,11 +32,12 @@ OUT = ROOT / "assets" / "music"
 CROSSFADE = 3.0
 TARGET = "I=-16:LRA=5:TP=-1.5"
 GROUPS = {
-    "calm": "Спокойная, атмосферная",
-    "epic": "Эпическая, кинематографичная",
-    "energetic": "Энергичная, вдохновляющая",
-    "ethnic": "Этническая: Восток, пустыня, кочевники",
-    "mystery": "Задумчивая, таинственная",
+    # нейтральная музыка без национального колорита — подходит к ролику про любую страну и тему
+    "ambient": "Эмбиент — нейтральный фон",
+    "classical": "Спокойная классика",
+    "piano": "Мягкое фортепиано",
+    "cinematic": "Кинематографичная, вдохновляющая",
+    "serious": "Задумчивая, серьёзная (тяжёлые темы)",
 }
 
 
@@ -112,8 +115,9 @@ def main() -> None:
             "duration": round(dur, 1),
             "lufs": lufs,
             "lra": lra,
-            "source": "FreePD.com (archive.org/details/abook-music-freepd-cc0)",
+            "source": item.get("source") or "FreePD.com (archive.org/details/freepd)",
             "license": item.get("license") or "https://creativecommons.org/publicdomain/zero/1.0/",
+            **({"artist": item["artist"]} if item.get("artist") else {}),
         })
     (OUT / "catalog.json").write_text(
         json.dumps({"groups": GROUPS, "tracks": catalog}, ensure_ascii=False, indent=1), encoding="utf-8"

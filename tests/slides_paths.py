@@ -71,7 +71,7 @@ class PublishTests(unittest.TestCase):
             self.assertTrue((folder / "ролик.mp4").is_file())
             self.assertTrue((folder / "озвучка.mp3").is_file())
             self.assertTrue((folder / "сценарий.txt").is_file())
-            self.assertTrue((folder / "субтитры.srt").is_file())
+            self.assertFalse((folder / "субтитры.srt").exists(), "субтитры в папку не нужны")
             self.assertFalse(loose.exists())
 
 

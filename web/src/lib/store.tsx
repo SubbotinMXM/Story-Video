@@ -162,6 +162,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
           next[i] = job;
           return next;
         });
+      } else if (data.type === "switch") {
+        // автосмена инструмента/модели — сразу на виду: что, на что, почему, в какой задаче
+        push({
+          kind: "info",
+          title: `${data.title ? `${data.title}: ` : ""}${data.from} → ${data.to}`,
+          text: `${data.task}: ${data.reason}`,
+        });
+      } else if (data.type === "jobs_order") {
+        // порядок очереди (приоритет) — как на сервере
+        const pos = new Map((data.ids as string[]).map((id, i) => [id, i]));
+        setJobs((all) => all.slice().sort((a, b) => (pos.get(a.id) ?? 1e9) - (pos.get(b.id) ?? 1e9)));
       } else if (data.type === "job_removed") {
         prevStatus.current.delete(data.id);
         setJobs((all) => all.filter((j) => j.id !== data.id));
@@ -176,24 +187,38 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => es.close();
   }, [push]);
 
+  // повтор постановки после вопроса «переписать ещё раз?» — тем же enqueue
+  const enqueueRef = useRef<(items: JobIn[]) => Promise<Job[] | null>>(async () => null);
   const enqueue = useCallback(
-    async (items: JobIn[]) => {
+    async (items: JobIn[]): Promise<Job[] | null> => {
       await flush();
       try {
         const added = await api.addJobs(items);
+        // выкладка: даты календаря отданы этому запуску — сервер их очистил, здесь тоже
+        if (items.some((i) => i.kind === "broll" || (i.kind === "rewrite" && (i.params.section ?? "broll") === "broll")))
+          setSettings((s) => (s && s.broll_publish ? { ...s, broll_publish_dates: [] } : s));
         push({
           kind: "info",
           title: added.length === 1 ? "Задача в очереди" : `В очереди: ${added.length}`,
           text: added.map((j) => j.title).join("\n"),
         });
+        const notice = added.find((j) => j.notice)?.notice;
+        if (notice) push({ kind: "error", title: "RoyalTechno: может не хватить денег", text: notice });
         return added;
       } catch (e) {
-        push({ kind: "error", title: "Не запустилось", text: (e as Error).message });
+        const err = e as Error & { status?: number };
+        if (err.status === 409 && window.confirm(`${err.message}\n\nПереписать ещё раз?`)) {
+          return enqueueRef.current(items.map((i) => (i.kind === "rewrite" ? { ...i, params: { ...i.params, force: true } } : i)));
+        }
+        if (err.status !== 409) push({ kind: "error", title: "Не запустилось", text: err.message });
+        else push({ kind: "info", title: "Не запускаю", text: "Повторные ролики пропущены — убери их из списка ссылок" });
         return null;
       }
     },
     [flush, push],
   );
+
+  enqueueRef.current = enqueue;
 
   const toastApi = useMemo(() => ({ toasts, push, dismiss }), [toasts, push, dismiss]);
   const settingsApi = useMemo(

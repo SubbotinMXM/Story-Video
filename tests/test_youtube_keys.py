@@ -20,6 +20,8 @@ from engine.slides.media_pipeline import stock_keys_from_config
 from engine.slides.source_youtube import YouTubeClient
 
 ITEM = {"items": [{"id": {"videoId": "abc"}, "snippet": {"title": "Mongolia steppe", "channelTitle": "Nature"}}]}
+# проверка найденного видео (videos.list): CC, без правообладателя в Content ID
+CHECKED = {"items": [{"id": "abc", "status": {"license": "creativeCommon"}, "contentDetails": {"licensedContent": False, "duration": "PT2M"}, "snippet": {"description": "Shot by me"}}]}
 
 
 class YouTubeKeysTests(unittest.TestCase):
@@ -33,6 +35,8 @@ class YouTubeKeysTests(unittest.TestCase):
         used: list[str] = []
 
         def fake_get(url, params):
+            if url.endswith("/videos"):
+                return httpx.Response(200, json=CHECKED)
             used.append(params["key"])
             if params["key"] == "K1":
                 return httpx.Response(403, json={"error": {"errors": [{"reason": "quotaExceeded"}]}})

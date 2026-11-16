@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 
@@ -37,6 +39,33 @@ def new_run_dir(*, title_hint: str = "") -> Path:
     slug = _slug(title_hint, max_len=40)
     name = f"{stamp}_{slug}" if slug else stamp
     return mkdir_unique(RUNS_DIR, name, sep="_")
+
+
+# папки готовых роликов из снимка настроек выполняемой задачи (server/runners.build); None — из настроек
+job_output_dirs: ContextVar[dict[str, str] | None] = ContextVar("job_output_dirs", default=None)
+
+
+def output_root(section: str, default: Path | None = None) -> Path:
+    """Куда класть папки готовых роликов раздела (broll | slides): выбранная папка, иначе рабочий стол.
+
+    Выбранная папка пропала (отключён внешний диск) — рабочий стол, ролик не теряем.
+    """
+    fallback = default if default is not None else DESKTOP
+    if os.environ.get("STORY_VIDEO_NO_OUTPUT_DIR"):  # тесты: только во временную папку
+        return fallback
+    from engine.core.config import load_config
+
+    dirs = job_output_dirs.get()
+    raw = str((dirs.get(section) if dirs is not None else load_config().get(f"{section}_output_dir")) or "").strip()
+    if not raw:
+        return fallback
+    root = Path(raw).expanduser()
+    if root.is_dir():
+        return root
+    from engine.core.logutil import log
+
+    log(f"Папка для роликов не найдена ({root}) — сохраняю на рабочий стол")
+    return fallback
 
 
 def mkdir_unique(parent: Path, name: str, *, sep: str) -> Path:

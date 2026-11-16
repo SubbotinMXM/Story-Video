@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
 
@@ -109,6 +110,10 @@ def score_image_paths(
             scores = sims.detach().float().cpu().tolist()
             if isinstance(scores, float):
                 scores = [scores]
+            # водяной знак, логотип, надпись поверх, коллаж — в конец (если сам запрос не про текст)
+            if not _TEXTUAL.search(q):
+                junk = _junk_probs(image_features, model, tokenizer, device)
+                scores = [s - junk_penalty(j) for s, j in zip(scores, junk)]
 
     ranked = sorted(
         zip(valid_paths, [float(s) for s in scores], strict=True),
@@ -146,3 +151,118 @@ def score_image_paths_contextual(
 def score_one(query: str, image_path: Path) -> float:
     ranked = score_image_paths(query, [image_path])
     return ranked[0][1] if ranked else 0.0
+
+
+# «Цепляет ли кадр»: похож на профессиональную съёмку (пролёт дрона, золотой час, яркие
+# чёткие виды) больше, чем на любительский, мыльный, скучный снимок или скриншот с текстом.
+_BEAUTY_POS = (
+    "a stunning professional cinematic shot",
+    "breathtaking aerial drone view of a landscape",
+    "beautiful high quality travel photography at golden hour",
+    "award-winning photograph with vivid colors and sharp details",
+)
+_BEAUTY_NEG = (
+    "a blurry low quality amateur photo",
+    "a boring dull snapshot",
+    "a screenshot or a page with text",
+    "a dark noisy pixelated image",
+)
+_beauty_text = None
+
+
+def beauty_scores(image_paths: list[Path]) -> dict[Path, float]:
+    """Красота кадра ≈ −0.08…+0.08 (среднее сходство с «красивым» минус с «плохим»)."""
+    global _beauty_text
+    if not image_paths:
+        return {}
+    bundle = get_clip()
+    torch, model, preprocess, tokenizer, device = (bundle[k] for k in ("torch", "model", "preprocess", "tokenizer", "device"))
+    from PIL import Image
+
+    tensors, valid = [], []
+    for p in image_paths:
+        try:
+            tensors.append(preprocess(Image.open(p).convert("RGB")))
+            valid.append(p)
+        except Exception:
+            continue
+    if not tensors:
+        return {}
+    with _lock:
+        with torch.no_grad():
+            if _beauty_text is None:
+                t = model.encode_text(tokenizer([*_BEAUTY_POS, *_BEAUTY_NEG]).to(device))
+                _beauty_text = t / t.norm(dim=-1, keepdim=True)
+            img = model.encode_image(torch.stack(tensors).to(device))
+            img = img / img.norm(dim=-1, keepdim=True)
+            sims = (img @ _beauty_text.T).float().cpu()
+            junk = _junk_probs(img, model, tokenizer, device)
+    n = len(_BEAUTY_POS)
+    vals = (sims[:, :n].mean(dim=1) - sims[:, n:].mean(dim=1)).tolist()
+    return {p: float(v) - junk_penalty(j) for p, v, j in zip(valid, vals, junk)}
+
+
+# Мусор, который раньше отсеивала только зрячая нейросеть: теперь его видит и локальный CLIP —
+# работает всегда, и когда нейросеть недоступна, подбор остаётся чистым.
+_JUNK = (
+    "a photo with a visible watermark across it",
+    "an image with a TV channel logo in the corner",
+    "a picture with a large text caption or title written over it",
+    "a collage of several different photos side by side",
+    "a screenshot of a video with subtitles and interface",
+    "a meme with text",
+)
+_CLEAN = (
+    "a clean photograph without any text or logos",
+    "a single clean photo of a scene",
+    "a clean portrait photo of a person",
+)
+# запрос сам про текст (газета, письмо, вывеска) — надписи на кадре не минус
+_TEXTUAL = re.compile(r"newspaper|letter|document|poster|sign|book|page|headline|text|map|газет|письм|документ|"
+                      r"плакат|афиш|вывеск|книг|страниц|надпис|карт[аеуы]", re.I)
+# проверено на пулах роликов: надписи, водяные знаки, коллажи — 0.99–1.0; чистые панорамы и групповые
+# фото — до ~0.87. Поэтому штраф только для уверенного мусора
+JUNK_FROM = 0.9
+JUNK_MAX_PENALTY = 0.08
+_junk_text = None
+
+
+def junk_penalty(prob: float) -> float:
+    """Вероятность «мусора» 0…1 → минус к баллу: до 0.9 — 0, дальше до −0.08 (ниже любого чистого кадра)."""
+    return JUNK_MAX_PENALTY * max(0.0, prob - JUNK_FROM) / (1.0 - JUNK_FROM)
+
+
+def _junk_probs(image_features, model, tokenizer, device) -> list[float]:
+    """Для уже посчитанных признаков картинок (нормированных): вероятность «мусор, а не чистый кадр».
+    Вызывать под _lock; текстовые признаки считаются один раз."""
+    global _junk_text
+    if _junk_text is None:
+        t = model.encode_text(tokenizer([*_JUNK, *_CLEAN]).to(device))
+        _junk_text = t / t.norm(dim=-1, keepdim=True)
+    probs = (100.0 * image_features @ _junk_text.T).float().softmax(dim=-1).cpu()
+    return probs[:, : len(_JUNK)].sum(dim=1).tolist()
+
+
+def junk_scores(image_paths: list[Path]) -> dict[Path, float]:
+    """Вероятность, что на картинке водяной знак, логотип, надпись или коллаж (0…1)."""
+    if not image_paths:
+        return {}
+    bundle = get_clip()
+    torch, model, preprocess, tokenizer, device = (bundle[k] for k in ("torch", "model", "preprocess", "tokenizer", "device"))
+    from PIL import Image
+
+    tensors, valid = [], []
+    for p in image_paths:
+        try:
+            tensors.append(preprocess(Image.open(p).convert("RGB")))
+            valid.append(p)
+        except Exception:
+            continue
+    if not tensors:
+        return {}
+    with _lock:
+        with torch.no_grad():
+            img = model.encode_image(torch.stack(tensors).to(device))
+            img = img / img.norm(dim=-1, keepdim=True)
+            probs = _junk_probs(img, model, tokenizer, device)
+    return dict(zip(valid, probs))

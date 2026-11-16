@@ -34,8 +34,6 @@ AUDIO_BITRATE = "192k"
 SUBSCRIBE_PATH = str(
     Path(__file__).resolve().parents[2] / "assets" / "subscribe.mp4"
 )
-SUBSCRIBE_START_MIN = 4.0
-SUBSCRIBE_START_MAX = 5.0
 SUBSCRIBE_VOLUME = 0.8  # на 20% тише оригинала
 SUBSCRIBE_CHROMA = "0x60FB01"  # реальный зелёный из AAA.mp4
 SUBSCRIBE_SIMILARITY = 0.12

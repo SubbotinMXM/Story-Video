@@ -75,8 +75,9 @@ class ApiTestCase(unittest.TestCase):
 class MetaSettingsTests(ApiTestCase):
     def test_meta(self) -> None:
         m = self.client.get("/api/meta").json()
-        self.assertIn("gpt-5.6-terra", m["llm_models"])
-        self.assertNotIn("gpt-5.5", m["llm_models"])
+        self.assertEqual(m["llm_models"][0], "gpt-6-luna", "модели — от дешёвых к дорогим")
+        self.assertEqual(m["llm_models"][-1], "gpt-6-astra")
+        self.assertEqual(m["llm_default_model"], "", "по умолчанию — авто по цене")
         self.assertEqual([p["id"] for p in m["tts_providers"]], ["lumean", "voicegen"])
         fields = {f["key"]: f for f in m["tts_providers"][0]["fields"]}
         self.assertTrue(fields["template"]["hidden"])
@@ -95,22 +96,6 @@ class MetaSettingsTests(ApiTestCase):
         raw = json.loads((self.root / "config.json").read_text(encoding="utf-8"))
         self.assertTrue(raw["subtitles"])
 
-    def test_templates_roundtrip(self) -> None:
-        meta = self.client.get("/api/meta").json()
-        self.assertIn("intro_dir", meta["template_keys"]["broll"])
-        self.assertIn("media_mode", meta["template_keys"]["slides"])
-        self.assertNotIn("llm_api_key", meta["template_keys"]["broll"])
-        tpl = {"id": "t1", "name": "Рассказы с интро", "kind": "broll",
-               "values": {"intro_dir": "/intro", "outro_dir": "", "subtitles": True, "llm_api_key": "утечка"}}
-        s = self.client.patch("/api/settings", json={"templates": [tpl], "active_template": {"broll": "t1", "slides": "t1"}}).json()
-        self.assertEqual(s["templates"][0]["values"], {"intro_dir": "/intro", "outro_dir": "", "subtitles": True})
-        self.assertEqual(s["active_template"], {"broll": "t1", "slides": ""}, "шаблон футажей не выбирается в слайдах")
-        raw = json.loads((self.root / "config.json").read_text(encoding="utf-8"))
-        self.assertEqual(raw["templates"][0]["name"], "Рассказы с интро")
-        # удалили шаблон — выбор сбрасывается на «вручную»
-        s = self.client.patch("/api/settings", json={"templates": []}).json()
-        self.assertEqual(s["active_template"]["broll"], "")
-
     def test_unknown_setting_ignored(self) -> None:
         s = self.client.patch("/api/settings", json={"hack": 1}).json()
         self.assertNotIn("hack", s)
@@ -127,6 +112,7 @@ class JobValidationTests(ApiTestCase):
         super().setUp()
         self.broll = self.root / "broll"
         self.broll.mkdir()
+        (self.broll / "f.mp4").write_bytes(b"")  # папка футажей с видео
         self.audio = self.root / "a.mp3"
         self.audio.write_bytes(b"x" * 2000)
 
@@ -316,3 +302,38 @@ class EventsTests(ApiTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SwitchNoticeTest(unittest.TestCase):
+    """Автосмена инструмента в задаче: в карточку (повтор — счётчиком) и одно событие на смену."""
+
+    def test_switch_goes_to_job_card_and_event(self):
+        from engine.core import switches
+        from engine.core.logutil import current_job
+        from server import jobs as jm
+
+        mgr = jm.JobManager.__new__(jm.JobManager)
+        import threading
+
+        mgr._lock = threading.RLock()
+        job = jm.Job(kind="rewrite", title="Рерайт: тест", params={}, runner=None)
+        mgr._jobs = [job]
+        mgr._last_emit = {}
+        events = []
+        with mock.patch.object(jm.hub, "publish", lambda kind, data: events.append((kind, data))), \
+                mock.patch.object(mgr, "_save", lambda: None):
+            switches.set_callback(mgr._on_switch)
+            self.addCleanup(switches.set_callback, None)
+            tok = current_job.set(job.id)
+            try:
+                switches.report("рерайт", "claude_code", "codex", "кончился лимит подписки")
+                switches.report("рерайт", "claude_code", "codex", "кончился лимит подписки")
+            finally:
+                current_job.reset(tok)
+        card = job.public()["switches"]
+        self.assertEqual(len(card), 1)
+        self.assertEqual(card[0]["times"], 2)
+        self.assertEqual((card[0]["from"], card[0]["to"]), ("Claude", "Codex (ChatGPT)"))
+        toasts = [d for k, d in events if k == "switch"]
+        self.assertEqual(len(toasts), 1, "повтор той же смены — без второго уведомления")
+        self.assertEqual(toasts[0]["title"], "Рерайт: тест")

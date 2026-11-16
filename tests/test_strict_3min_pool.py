@@ -87,7 +87,7 @@ class Strict3MinFlowTests(unittest.TestCase):
             req = MediaRequest(run_dir=run, keys=MediaSourcesConfig(), copy_preview_to_desktop=False, llm_api_key="k", strict_sync=True)
             with mock.patch.object(sm, "_llm", lambda r: mock.MagicMock()), \
                  mock.patch.object(sm, "ensure_theme_plan", lambda *a: plan), \
-                 mock.patch.object(sm, "_plan_queries", lambda c, p, beats, cancel, all_beats=False: ["q"] * len(beats)), \
+                 mock.patch.object(sm, "_plan_queries", lambda c, p, beats, cancel, all_beats=False, cta=None: ["q"] * len(beats)), \
                  mock.patch.object(sm, "_build_clients", lambda keys: {}), \
                  mock.patch.object(sm, "get_clip", lambda: None), \
                  mock.patch.object(sm, "probe_duration", lambda p: 600.0), \

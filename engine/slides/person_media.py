@@ -34,7 +34,7 @@ from engine.slides.theme_plan import ThemePlan, _main_name, hero_era, person_que
 PER_QUERY = 30  # Google отдаёт много фото героя — берём шире обычного
 IMAGE_MIN_SIDE = 480  # старые фото людей часто меньше 720p; 720+ всё равно идут первыми
 VIDEO_TRIALS_PER_NEED = 4
-FETCH_WORKERS = 6
+FETCH_WORKERS = 8  # скачивание фото героя упирается в сеть, а не в процессор
 _STATUE_WORDS = re.compile(r"\b(statue|bust|sculpture|marble|bronze|engraving|ancient)\b", re.I)
 
 
@@ -77,7 +77,8 @@ def person_query_set(plan: ThemePlan, name: str, kind: str) -> tuple[list[str], 
                 out.append(q)
         return out
 
-    return quoted(images + extra_i)[:16], quoted(videos + extra_v)[:8]
+    # запросы плана с уточнением («… советский актёр») — первыми: точнее, тёзка в выдаче реже
+    return quoted(extra_i + images)[:16], quoted(extra_v + videos)[:8]
 
 
 def _search(clients: dict, source: str, queries: list[str], *, video: bool, cancel: CancelToken | None) -> list[StockCandidate]:

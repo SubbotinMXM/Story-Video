@@ -107,15 +107,13 @@ class BrollIntegrationTests(unittest.TestCase):
         names = sorted(p.name for p in res.output_dir.iterdir())
         self.assertIn("тест.mp4", names)
         self.assertIn("99 процентов тест.mp4", names)
-        self.assertIn("subs.srt", names)
-        self.assertNotIn(".progress.json", names, "служебное убрано")
+        for junk in ("subs.srt", "timings.json", "script_origin.txt", ".progress.json", ".intro_sec"):
+            self.assertNotIn(junk, names, "в папке только ролики, озвучка, текст и главы")
         voice = probe_duration(self.voice)
         total = probe_duration(res.video)
         self.assertAlmostEqual(total, voice + 4, delta=1.0)  # интро 2 + рассказ + аутро 2
         self.assertEqual(probe_video_size(res.video), (1280, 720), "футажи — не ниже 720p, вместе с интро и аутро")
         self.assertTrue(has_audio_stream(res.video))
-        srt = (res.output_dir / "subs.srt").read_text(encoding="utf-8")
-        self.assertIn("Огромный", srt, "субтитры — текстом сценария")
         self.assertTrue(res.output_dir.name.startswith("тест_"))
 
     def test_eight_pieces_split_evenly(self) -> None:
@@ -223,9 +221,10 @@ class SlidesRenderIntegrationTests(unittest.TestCase):
         folder = res.desktop_video
         self.assertIsNotNone(folder)
         names = sorted(p.name for p in folder.iterdir())
-        for want in ("ролик.mp4", "озвучка.mp3", "сценарий.txt", "субтитры.srt", "источники.txt"):
-            self.assertIn(want, names)
-        credits = (folder / "источники.txt").read_text(encoding="utf-8")
+        self.assertEqual(names, ["главы.txt", "озвучка.mp3", "ролик.mp4", "сценарий.txt"], "субтитры и источники в папку не нужны")
+        # ролик короткий — глав нет, но автора нарезки YouTube указать обязательно
+        self.assertIn("Автор — «Клип» — https://youtu.be/abc", (folder / "главы.txt").read_text(encoding="utf-8"))
+        credits = (self.run / "credits.txt").read_text(encoding="utf-8")
         self.assertIn("«Клип» — Автор — https://www.youtube.com/watch?v=abc", credits)
         self.assertFalse((self.run / "segments").exists(), "сегменты удалены")
 
@@ -519,21 +518,6 @@ class MuxAndSubscribeTests(unittest.TestCase):
         out = mux_av(video=self.root / "v264.mp4", voice=self.root / "a.mp3", dest=self.root / "o.mp4")
         self.assertEqual(self._video_md5(out), self._video_md5(self.root / "v264.mp4"), "видео должно копироваться без пережатия")
         self.assertTrue(has_audio_stream(out))
-
-    def test_visible_span_of_subscribe(self) -> None:
-        from engine.slides.render_subscribe import visible_span
-
-        sub = make_green_sub(self.root / "s.mp4")
-        lo, hi = visible_span(sub, probe_duration(sub))
-        self.assertAlmostEqual(lo, 1.0, delta=0.15)
-        self.assertAlmostEqual(hi, 2.0, delta=0.15)
-
-    def test_visible_span_fallback_for_unreadable(self) -> None:
-        from engine.slides.render_subscribe import visible_span
-
-        bad = self.root / "bad.mp4"
-        bad.write_bytes(b"x")
-        self.assertEqual(visible_span(bad, 5.0), (0.0, 5.0))
 
     def test_speed_copies(self) -> None:
         from engine.slides.speed_copies import write_speed_copies

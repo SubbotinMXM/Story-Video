@@ -28,6 +28,10 @@ Return ONLY JSON:
 
 Rules:
 - English only, 4–10 words each
+- Every query keeps the film's country/region/city and era ("Japanese fishing village Okinawa",
+  not "fishing village"): a frame from another country is useless for this film
+- For places, cities, nature: prefer professional cinematic footage words ("aerial drone", "cinematic 4K",
+  "timelapse", "golden hour") — not vlogs, news or amateur clips
 - If characters[] has a real person, the film is ABOUT that person: at least 12 of 16
   image queries and 4 of 16 video queries must show THEM, with their full name in the query.
   * Person who lived in the age of photography (after ~1850: actors, singers, politicians,

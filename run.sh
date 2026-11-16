@@ -127,7 +127,34 @@ PY
   fi
 fi
 
-# --- 7. Интерфейс: готовая сборка лежит в репозитории; Node нужен только при правках ---
+# --- 7. Помощник распознавания текста на обложках (Swift, Vision) — собрать заранее ---
+if [[ ! -x data/bin/mac_ocr || tools/mac_ocr.swift -nt data/bin/mac_ocr ]]; then
+  if command -v swiftc >/dev/null 2>&1 || xcode-select -p >/dev/null 2>&1; then
+    step "Собираю помощник распознавания текста на обложках…"
+    "$VENV_PY" -c "from engine.publish.ocr import _binary; raise SystemExit(0 if _binary() else 1)" >/dev/null 2>&1 \
+      || warn "Помощник распознавания не собрался — проверка букв на обложках пойдёт через нейросеть."
+  else
+    warn "Нет Command Line Tools (swiftc) — проверка букв на обложках пойдёт через нейросеть. Поставить: xcode-select --install"
+  fi
+fi
+
+# --- 8. Переписывание по подписке: Claude Code и Codex (ChatGPT). Вход в аккаунты — в Настройках ---
+if [[ ! -x "$HOME/.local/bin/claude" ]] && ! command -v claude >/dev/null 2>&1; then
+  step "Ставлю Claude Code (рерайт по подписке Claude)…"
+  curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 \
+    || warn "Claude Code не поставился — поставишь в Настройки → Переписывание → «Установить и войти»."
+fi
+if ! command -v codex >/dev/null 2>&1; then
+  step "Ставлю Codex (рерайт по подписке ChatGPT)…"
+  "$BREW" install --cask codex >/dev/null 2>&1 \
+    || warn "Codex не поставился — поставишь в Настройки → Переписывание → «Установить и войти»."
+  touch .venv/.codex_ok
+elif [[ -z "$(find .venv/.codex_ok -mtime -7 2>/dev/null)" ]]; then
+  # Codex обновляется часто (модели, вход) — раз в неделю подтягиваем свежий; Claude Code обновляется сам
+  { "$BREW" upgrade --cask codex >/dev/null 2>&1 || true; } && touch .venv/.codex_ok
+fi
+
+# --- 9. Интерфейс: готовая сборка лежит в репозитории; Node нужен только при правках ---
 if [[ ! -f web/dist/index.html ]] || [[ -n "$(find web/src web/index.html web/package.json -newer web/dist/index.html 2>/dev/null | head -1)" ]]; then
   if command -v npm >/dev/null 2>&1; then
     step "Пересобираю интерфейс…"

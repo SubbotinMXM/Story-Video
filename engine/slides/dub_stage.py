@@ -16,13 +16,20 @@ from engine.core.langdetect import detect_language
 from engine.core.logutil import log
 from engine.core.throttle import heavy_stage
 from engine.slides.publish import export_dub_folder
-from engine.slides.render_pipeline import SILENT_NAME, RenderRequest, build_silent, finish_video
+from engine.slides.render_pipeline import SILENT_NAME, RenderRequest, build_silent, export_chapters, finish_video
 from engine.slides.speed_copies import write_speed_copies
 from engine.slides.subtitles import timings_to_srt
 from engine.tts import get_provider
 from engine.tts.base import DubTrack
 
 ProgressCb = Callable[[float, str], None]
+
+
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 def source_language(heard: str, text: str) -> str:
@@ -101,6 +108,12 @@ def render_dub(
             if req.speed_copies > 0:
                 write_speed_copies(final, folder, req.speed_copies, cancel=cancel,
                                    on_progress=lambda p, m: progress(0.9 + p * 0.1, f"{lang}: {m}"))
+            export_chapters(
+                req, folder, script=lang_dir / "script.txt", timings=track.timings, voice=track.audio, video=final,
+                language=track.language, cache=lang_dir / "chapters.json",
+                # главы оригинала: переводим названия, а не размечаем заново (экономия запросов LLM)
+                base_text=_read(run_dir / "script.txt"),
+            )
             final.unlink(missing_ok=True)  # копия уже на Desktop — не держим второй ролик в запуске
     return folder
 

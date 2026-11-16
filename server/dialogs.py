@@ -10,7 +10,7 @@ from typing import Any
 
 AUDIO_EXTS = ["mp3", "wav", "m4a", "aac", "flac", "ogg"]
 VIDEO_EXTS = ["mp4", "mov", "mkv", "webm", "m4v"]
-TEXT_EXTS = ["txt", "md"]
+TEXT_EXTS = ["txt", "md", "srt", "vtt"]
 
 _FILTERS = {
     "audio": ("Аудио", AUDIO_EXTS),

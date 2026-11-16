@@ -21,8 +21,9 @@ export function VoiceCard() {
   );
 }
 
-/** Субтитры, подписка, копии — общие опции ролика. */
-export function VideoOptionsCard() {
+/** Субтитры, подписка, копии — общие опции ролика.
+ * copiesNote — копии задаёт выкладка на YouTube (по числу каналов): своя настройка копий не действует. */
+export function VideoOptionsCard({ copiesNote }: { copiesNote?: string }) {
   const { settings, meta, update } = useLoadedSettings();
   return (
     <Card title="Оформление ролика">
@@ -37,7 +38,7 @@ export function VideoOptionsCard() {
           checked={settings.subscribe}
           onChange={(v) => update({ subscribe: v })}
           label="Призыв подписаться"
-          description="Анимация с хромакеем на 4–5 секунде"
+          description="Анимация с хромакеем внизу кадра, 3 раза: на ~25 секунде, в середине и за 30 секунд до конца"
         />
         {settings.subscribe && (
           <div className="indent">
@@ -49,13 +50,17 @@ export function VideoOptionsCard() {
             />
           </div>
         )}
+        {copiesNote ? (
+          <div className="notice small">{copiesNote}</div>
+        ) : (
         <Toggle
           checked={settings.speed_copies}
           onChange={(v) => update({ speed_copies: v })}
           label="Копии со сдвигом скорости"
           description="1 = 99%, 2 = 99% и 101%, 3 = ещё 98%…"
         />
-        {settings.speed_copies && (
+        )}
+        {settings.speed_copies && !copiesNote && (
           <div className="indent row gap-sm">
             <NumberInput
               value={settings.speed_copies_count}

@@ -42,6 +42,7 @@ class FakeVoiceGen:
         self.posts: list[dict] = []
         self.fail_first = fail_first
         self.auth: set[str] = set()
+        self.paused = False
 
     def __call__(self, req: httpx.Request) -> httpx.Response:
         self.auth.add(req.headers.get("authorization", ""))
@@ -51,6 +52,8 @@ class FakeVoiceGen:
         if path.startswith("/templates/"):
             tpl = next((t for t in TEMPLATES if t["id"] == path.rsplit("/", 1)[1]), None)
             return httpx.Response(200, json=tpl) if tpl else httpx.Response(404, json={"detail": "not found"})
+        if path == "/queue":
+            return httpx.Response(200, json={"ok": True, "queue": {"active": not self.paused, "paused": self.paused}})
         if path == "/me":
             return httpx.Response(200, json={"free_generation_remaining_chars": 5000, "has_active_subscription": True})
         if path == "/tasks" and req.method == "POST":
@@ -97,6 +100,32 @@ class VoiceGenTestCase(unittest.TestCase):
             api_key="k", text="Текст рассказа", template_id="t1", dest=self.dir / "voice.mp3",
             state_file=self.dir / "tts_order.json", poll_sec=0.01, **kw,
         )
+
+
+class QueuePausedTests(VoiceGenTestCase):
+    def test_paused_queue_fails_fast_with_hint(self) -> None:
+        self.fake.paused = True
+        for t in self.fake.tasks.values():
+            t["_seq"] = []
+        with mock.patch.object(vg, "_TRANSPORT", httpx.MockTransport(self.fake)):
+            orig = self.fake.__call__
+
+            def never_starts(req):
+                resp = orig(req)
+                for t in self.fake.tasks.values():
+                    t["_seq"] = []  # задача так и стоит в очереди
+                return resp
+
+            with mock.patch.object(vg, "_TRANSPORT", httpx.MockTransport(never_starts)), \
+                 self.assertRaises(vg.VoiceGenQueuePaused) as err:
+                self.synth()
+        self.assertIn("на паузе", str(err.exception))
+        self.assertIn("Продолжить", str(err.exception))
+        state = json.loads((self.dir / "tts_order.json").read_text(encoding="utf-8"))
+        self.assertTrue(state.get("task_id"), "задача сохранена — «Продолжить» не закажет новую")
+
+    def test_running_queue_is_not_disturbed(self) -> None:
+        self.assertTrue(self.synth().is_file())
 
 
 class ProviderTests(VoiceGenTestCase):

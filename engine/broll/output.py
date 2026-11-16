@@ -1,11 +1,11 @@
-"""Папка результата на Desktop для режима футажей."""
+"""Папка результата режима футажей: в выбранной папке роликов или на Desktop."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
 
-from engine.slides.paths import mkdir_unique
+from engine.slides.paths import mkdir_unique, output_root
 
 
 def desktop_dir() -> Path:
@@ -25,17 +25,15 @@ def sanitize_folder_name(text: str, *, max_len: int = 80) -> str:
 def run_output_dir(title_hint: str, when: datetime | None = None) -> Path:
     when = when or datetime.now()
     name = f"{sanitize_folder_name(title_hint)}_{when.strftime('%Y%m%d-%H%M%S')}"
-    return mkdir_unique(desktop_dir(), name, sep="_")
+    return mkdir_unique(output_root("broll", desktop_dir()), name, sep="_")
 
 
 def finalize_run_dir(
     out_dir: Path, title_hint: str, when: datetime | None = None
 ) -> Path:
     when = when or datetime.now()
-    target = (
-        desktop_dir()
-        / f"{sanitize_folder_name(title_hint)}_{when.strftime('%Y%m%d-%H%M%S')}"
-    )
+    # рядом с рабочей папкой: она уже там, где нужно (переименование без копирования между дисками)
+    target = out_dir.parent / f"{sanitize_folder_name(title_hint)}_{when.strftime('%Y%m%d-%H%M%S')}"
     if out_dir.resolve() == target.resolve():
         return out_dir
     if target.exists():

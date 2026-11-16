@@ -38,6 +38,10 @@ class VoiceGenError(RuntimeError):
     pass
 
 
+class VoiceGenQueuePaused(VoiceGenError):
+    """Очередь озвучки VoiceGen на паузе — ждать бесполезно, нужен запуск очереди."""
+
+
 class VoiceGenTaskFailed(VoiceGenError):
     """Задача на стороне VoiceGen завершилась ошибкой/отменой — можно создать новую."""
 
@@ -98,6 +102,16 @@ class VoiceGenClient:
             raise VoiceGenError(f"Шаблон {template_id[:8]} не найден в боте — нажми «Обновить» и выбери шаблон заново")
         payload = task_payload(text, template, client_task_id)
         return _task(self._request("POST", "/tasks", json=payload))
+
+    def queue_paused(self) -> bool:
+        """Очередь озвучки аккаунта на паузе (её ставят на паузу в боте) — задачи в ней не начнутся.
+        Не смогли узнать — считаем, что не на паузе."""
+        try:
+            data = self._request("GET", "/queue")
+        except (httpx.TransportError, VoiceGenError):
+            return False
+        queue = (data or {}).get("queue") if isinstance(data, dict) else None
+        return isinstance(queue, dict) and bool(queue.get("paused")) and not queue.get("active")
 
     def get_task(self, task_id: str) -> dict:
         return _task(self._request("GET", f"/tasks/{task_id}"))
@@ -446,15 +460,28 @@ def synthesize_resumable(
     return dest
 
 
+# задача долго «в очереди» — раз в столько секунд смотрим, не стоит ли очередь на паузе
+_QUEUE_CHECK_SEC = 60.0
+
+
 def _wait(client: VoiceGenClient, task: dict, *, timeout: float, poll_sec: float, progress, check) -> dict:
     task_id = str(task["task_id"])
     deadline = time.monotonic() + timeout
     errors = 0
     last = ""
+    queue_checked = 0.0
     while True:
         status = str(task.get("status") or "")
         if status == "done":
             return task
+        if status == "queued" and time.monotonic() - queue_checked >= _QUEUE_CHECK_SEC:
+            queue_checked = time.monotonic()
+            if client.queue_paused():
+                raise VoiceGenQueuePaused(
+                    "Очередь озвучки VoiceGen стоит на паузе — задача ждёт и сама не начнётся. "
+                    f"Запусти очередь в боте VoiceGen и нажми «Продолжить»: задача {task_id[:8]} не потеряется "
+                    "и второй раз не оплачивается"
+                )
         if status in ("error", "cancelled"):
             raise VoiceGenTaskFailed(str(task.get("error_message") or status))
         try:

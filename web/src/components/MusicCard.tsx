@@ -42,7 +42,7 @@ export function MusicCard() {
   return (
     <Card
       title="Фоновая музыка"
-      description="Необязательно. Тихо, ровно и по кругу на весь ролик — голос чтеца всегда слышен. Треки в общественном достоянии (CC0): без претензий на YouTube."
+      description="Необязательно. Тихо, ровно и по кругу на весь ролик — голос чтеца всегда слышен. Треки в общественном достоянии (CC0). Если YouTube всё же поставит претензию на трек, программа сама исключит его и дальше возьмёт другой."
     >
       <div className="row gap-sm">
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -60,8 +60,9 @@ export function MusicCard() {
                 {cat!.tracks
                   .filter((t) => t.group === gid)
                   .map((t) => (
-                    <option key={t.id} value={t.id}>
+                    <option key={t.id} value={t.id} disabled={t.claimed && t.id !== settings.music_track}>
                       {t.title} · {Math.floor(t.duration / 60)}:{String(Math.round(t.duration % 60)).padStart(2, "0")}
+                      {t.claimed ? " · ⚠ претензия YouTube — не используется" : ""}
                     </option>
                   ))}
               </optgroup>
@@ -78,6 +79,12 @@ export function MusicCard() {
           {playing ? "Стоп" : "Послушать"}
         </Button>
       </div>
+      {selected?.claimed && (
+        <div className="notice warn small" style={{ marginTop: 10 }}>
+          На «{selected.title}» YouTube ставит претензию (Content ID) — в ролики он не идёт, программа берёт другой
+          трек из той же группы. Выбери другой трек сам.
+        </div>
+      )}
     </Card>
   );
 }

@@ -24,11 +24,28 @@ from engine.slides.story_context import StoryContext
 from engine.slides.theme_plan import ThemePlan
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 4000
-MP4 = b"\0\0\0\x18ftypmp42" + b"\0" * 4000
+def _real_mp4() -> bytes:
+    """Настоящий короткий ролик со звуком — как отдаёт модель видео."""
+    import subprocess
+
+    from engine.slides.ffmpeg_util import find_ffmpeg
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "c.mp4"
+        subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30:d=1",
+                        "-f", "lavfi", "-i", "sine=f=440:d=1", "-shortest", "-pix_fmt", "yuv420p", str(out)], check=True)
+        return out.read_bytes()
+
+
+MP4 = _real_mp4()
 
 
 class FakeRoyal:
-    def __init__(self, *, fail_kind: str = "", status_on_post: int = 201, polls_until_done: int = 2) -> None:
+    def __init__(self, *, fail_kind: str = "", status_on_post: int = 201, polls_until_done: int = 2,
+                 fail_code: str = "", never_done: bool = False) -> None:
+        self.fail_code = fail_code  # failed с error.code (timeout — перегрузка сервиса)
+        self.never_done = never_done  # задачи висят в processing
+        self.canceled: list[str] = []
         self.posts: list[dict] = []
         self.idem: list[str] = []
         self.jobs: dict[str, dict] = {}
@@ -62,7 +79,12 @@ class FakeRoyal:
                 self.conditional += 1
                 return httpx.Response(304)
             job["polls"] += 1
+            if self.never_done:
+                return httpx.Response(200, json={"id": jid, "status": "processing"})
             if job["polls"] >= self.polls_until_done:
+                if self.fail_code:
+                    return httpx.Response(200, json={"id": jid, "status": "failed", "cost_usd_cents": 2,
+                                                     "error": {"code": self.fail_code, "message": "did not complete in time"}})
                 if self.fail_kind == job["kind"]:
                     job["status"] = "failed"
                     return httpx.Response(200, json={"id": jid, "status": "failed", "error": {"message": "content policy"}})
@@ -72,6 +94,7 @@ class FakeRoyal:
                                       headers={"ETag": f'"{jid}-{job["polls"]}"'})
             return httpx.Response(200, json={"id": jid, "status": "processing"}, headers={"ETag": f'"{jid}-{job["polls"]}"'})
         if path.endswith("/cancel"):
+            self.canceled.append(path.split("/")[-2])
             return httpx.Response(200, json={})
         return httpx.Response(404)
 
@@ -149,6 +172,38 @@ class GenerateTests(Base):
         self.assertIsNone(tasks[1].result)
         self.assertIn("content policy", tasks[1].error)
 
+    def test_overloaded_service_stops_new_jobs(self) -> None:
+        """Сбои сервиса подряд (timeout) — остальные задачи не отправляем, за них не платим."""
+        fake = FakeRoyal(fail_code="timeout")
+        self._use(fake)
+        tasks = self.gen([GenTask(key=f"s:{i}", kind="image", prompt=f"p{i}", dest=self.dir / f"{i}.png") for i in range(12)])
+        self.assertLess(len(fake.posts), 12)
+        self.assertTrue(all(t.result is None for t in tasks))
+        self.assertTrue(any(ai_gen.OVERLOADED in (t.error or "") for t in tasks))
+
+    def test_stalled_service_cancels_everything(self) -> None:
+        """За STALL_SEC ни одного готового кадра — отменяем всё (деньги возвращаются)."""
+        fake = FakeRoyal(never_done=True)
+        self._use(fake)
+        with mock.patch.object(ai_gen, "STALL_SEC", 1):
+            tasks = self.gen(self._tasks(3))
+        self.assertEqual(sorted(fake.canceled), sorted(fake.jobs))
+        self.assertTrue(all(ai_gen.OVERLOADED in t.error for t in tasks))
+        state = json.loads((self.dir / "ai_jobs.json").read_text(encoding="utf-8"))
+        self.assertTrue(all(rec.get("failed") for rec in state.values()))
+
+    def test_failed_job_is_resubmitted_with_new_key(self) -> None:
+        """Упавшая задача при повторе — новая задача (старый ключ вернул бы ту же упавшую)."""
+        fake = FakeRoyal(fail_kind="image")
+        self._use(fake)
+        self.gen(self._tasks(1))
+        ok = FakeRoyal()
+        self._use(ok)
+        again = self.gen(self._tasks(1))
+        self.assertEqual(len(ok.posts), 1)
+        self.assertNotEqual(ok.idem[0], fake.idem[0])
+        self.assertIsNotNone(again[0].result)
+
     def test_no_balance_stops_submitting(self) -> None:
         fake = FakeRoyal(status_on_post=402)
         self._use(fake)
@@ -162,7 +217,7 @@ PLAN = ThemePlan(summary="Mongolia documentary", context=StoryContext(era="moder
 
 class FillTests(Base):
     def test_slots_only_weak_and_holes_within_share(self) -> None:
-        slots = [{"kind": "video", "path": f"pool/v{i}.mp4", "fit": 8, "query": f"q{i}", "start": i * 4, "end": i * 4 + 4, "duration": 4}
+        slots = [{"kind": "video", "path": f"pool/v{i}.mp4", "fit": 8, "query": f"q{i}", "start": 200 + i * 4, "end": 204 + i * 4, "duration": 4}
                  for i in range(50)]
         slots[3].update(fit=2, weak=True)
         slots[7].update(fallback=True, fit=8)
@@ -183,7 +238,7 @@ class FillTests(Base):
     def test_zero_balance_video_still_built_from_live_frames(self) -> None:
         """Ноль на балансе (402): кадры остаются живыми, подбор не падает."""
         self._use(FakeRoyal(status_on_post=402))
-        slots = [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 3 if i % 3 == 0 else 8, "text": "ВВП 12%"} for i in range(30)]
+        slots = [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 3 if i % 3 == 0 else 8, "text": "ВВП 12%", "start": 200 + i * 4} for i in range(30)]
         slots[2]["data"] = "chart"
         out = fill_slots(slots, PLAN, AiConfig(api_key="k", image_model="nano-banana-pro"), pool=self.dir / "pool")
         self.assertEqual(out, slots)
@@ -196,17 +251,25 @@ class FillTests(Base):
             raise httpx.ConnectError("нет сети", request=req)
 
         self._use(down)
-        slots = [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 2} for i in range(20)]
+        slots = [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 2, "start": 200 + i * 4} for i in range(20)]
         out = fill_slots(slots, PLAN, AiConfig(api_key="k", image_model="nano-banana-pro"), pool=self.dir / "pool")
         self.assertEqual(out, slots)
 
     def test_bad_key_does_not_break_video(self) -> None:
         self._use(lambda req: httpx.Response(401, json={"error": {"message": "invalid key"}}))
-        slots = [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 2} for i in range(20)]
+        slots = [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 2, "start": 200 + i * 4} for i in range(20)]
         self.assertEqual(fill_slots(slots, PLAN, AiConfig(api_key="k", image_model="nano-banana-pro"), pool=self.dir / "pool"), slots)
 
+    def test_no_ai_in_first_two_minutes(self) -> None:
+        """Первые 2 минуты — только живые кадры, даже слабые и даже с цифрами."""
+        slots = [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 2, "start": i * 4.0, "data": "chart"} for i in range(60)]
+        out = fill_slots(slots, PLAN, AiConfig(api_key="k", image_model="nano-banana-pro"), pool=self.dir / "pool")
+        ai_starts = [s["start"] for s in out if s.get("provider") == "ai"]
+        self.assertTrue(ai_starts)
+        self.assertTrue(all(t >= 120 for t in ai_starts), ai_starts)
+
     def test_no_weak_frames_nothing_generated(self) -> None:
-        slots = [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 8} for i in range(30)]
+        slots = [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 8, "start": 200 + i * 4} for i in range(30)]
         out = fill_slots(slots, PLAN, AiConfig(api_key="k", image_model="nano-banana-pro"), pool=self.dir / "pool")
         self.assertEqual(out, slots)
         self.assertEqual(self.fake.posts, [])
@@ -250,7 +313,8 @@ class DataBeatTests(Base):
     def test_queries_marked_by_llm_or_numbers(self) -> None:
         from engine.slides import strict_media as sm
 
-        beats = [sm.Beat(0, 4, "Степь до горизонта"), sm.Beat(4, 8, "ВВП вырос на 12%"), sm.Beat(8, 12, "Экономика менялась")]
+        # после начала ролика (в первые минуты инфографики нет — там только зрелищные кадры)
+        beats = [sm.Beat(200, 204, "Степь до горизонта"), sm.Beat(204, 208, "ВВП вырос на 12%"), sm.Beat(208, 212, "Экономика менялась")]
         client = mock.Mock()
         client.complete.return_value = json.dumps({"queries": ["steppe horizon", "Mongolia economy growth", "DATA: line chart of mining exports"]})
         q = sm._plan_queries(client, PLAN, beats, None, all_beats=True)
@@ -258,8 +322,18 @@ class DataBeatTests(Base):
         self.assertEqual(q[1], sm.DATA_MARK + "Mongolia economy growth", "цифры в тексте")
         self.assertEqual(q[2], sm.DATA_MARK + "line chart of mining exports", "LLM ответила DATA")
 
+    def test_no_infographics_in_opening(self) -> None:
+        from engine.slides import strict_media as sm
+
+        beats = [sm.Beat(0, 4, "ВВП вырос на 12%"), sm.Beat(4, 8, "Тридцать мифов")]
+        client = mock.Mock()
+        client.complete.return_value = json.dumps({"queries": ["Mongolia economy growth", "DATA: three-panel infographic of myths"]})
+        q = sm._plan_queries(client, PLAN, beats, None, all_beats=True)
+        self.assertFalse(any(x.startswith(sm.DATA_MARK) for x in q), q)
+        self.assertNotIn("infographic", q[1], "вместо графика — общий план по теме ролика")
+
     def test_data_slots_forced_first_even_if_live_frame_ok(self) -> None:
-        slots = [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 8, "query": f"q{i}", "text": f"t{i}"} for i in range(20)]
+        slots = [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 8, "query": f"q{i}", "text": f"t{i}", "start": 200 + i * 4} for i in range(20)]
         slots[4].update(data="bar chart of GDP growth", text="ВВП вырос на 12% и достиг 15,3 млрд")
         slots[9].update(data="pie chart of population", text="3.4 million people")
         slots[15].update(fit=2, weak=True)
@@ -291,7 +365,7 @@ class DataBeatTests(Base):
         self.assertEqual(hit["data"], "bar chart of GDP")
 
     def test_data_raises_cap_to_15_percent(self) -> None:
-        slots = [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 8} for i in range(40)]
+        slots = [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 8, "start": 200 + i * 4} for i in range(40)]
         for i in range(0, 40, 5):  # 8 кусков с цифрами при обычном лимите 12% = 4
             slots[i]["data"] = "chart"
         out = fill_slots(slots, PLAN, AiConfig(api_key="k", image_model="nano-banana-pro"), pool=self.dir / "pool")
@@ -302,7 +376,7 @@ class ReportTests(Base):
     """Оповещение: AI-кадры не получились — сколько и почему, ролик при этом собран."""
 
     def _slots(self, n=20):
-        return [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 2} for i in range(n)]
+        return [{"kind": "image", "path": f"pool/i{i}.jpg", "fit": 2, "start": 200 + i * 4} for i in range(n)]
 
     def test_zero_balance_reported(self) -> None:
         from engine.slides.ai_fill import report_lines
@@ -330,17 +404,98 @@ class ReportTests(Base):
         from engine.slides.ai_fill import report_lines
 
         self._use(FakeRoyal(fail_kind="video"))
-        slots = [{"kind": "video" if i % 2 else "image", "path": f"pool/x{i}", "fit": 2} for i in range(30)]
+        slots = [{"kind": "video" if i % 2 else "image", "path": f"pool/x{i}", "fit": 2, "start": 200 + i * 4} for i in range(30)]
         fill_slots(slots, PLAN, AiConfig(api_key="k", image_model="nano-banana-pro", video_model="veo-3.1-lite"), pool=self.dir / "pool")
         _lines, warnings = report_lines(self.dir)
         self.assertIn("из 3", warnings[0])
         self.assertIn("контент-политика", warnings[0])
 
+    def test_budget_caps_generation_per_video(self) -> None:
+        """$0.06 на ролик при 2 центах за кадр: с запасом на повторы — 2 кадра, остальное живыми."""
+        from engine.slides.ai_fill import report_lines, spent_cents
+
+        slots = [{"kind": "image", "path": f"pool/x{i}", "fit": 2, "start": 200 + i * 4} for i in range(60)]
+        cfg = AiConfig(api_key="k", image_model="nano-banana-pro", budget_cents=6)
+        out = fill_slots(slots, PLAN, cfg, pool=self.dir / "pool")
+        self.assertEqual(sum(1 for x in out if x.get("provider") == "ai"), 2)
+        self.assertLessEqual(spent_cents(cfg, self.dir), 6)
+        lines, _w = report_lines(self.dir)
+        self.assertIn("потрачено $0.04 из $0.06", lines[0])
+        self.assertIn("бюджет ролика", lines[0])
+
+    def test_failed_jobs_do_not_eat_budget(self) -> None:
+        """RoyalTechno возвращает деньги за упавшие и отменённые задачи — в бюджет ролика они не идут."""
+        from engine.slides.ai_fill import fit_budget, spent_cents
+
+        fake = FakeRoyal(fail_kind="image")
+        self._use(fake)
+        cfg = AiConfig(api_key="k", image_model="nano-banana-pro", budget_cents=100)
+        tasks = [GenTask(key=f"s:{i}", kind="image", prompt=f"p{i}", dest=self.dir / f"{i}.png") for i in range(3)]
+        ai_gen.generate(cfg, tasks, state_file=self.dir / "ai_jobs.json", poll_scale=0.001)
+        self.assertEqual(spent_cents(cfg, self.dir), 0)
+        self.assertEqual(len(fit_budget(cfg, tasks, self.dir)), 3, "повтор упавших — снова по прайсу, но влезает")
+
+    def test_budget_hard_cap_50_cents(self) -> None:
+        from engine.core.config import _normalize
+
+        self.assertEqual(AiConfig(api_key="k", budget_cents=100).budget_cents, 50)
+        self.assertEqual(AiConfig(api_key="k").budget_cents, 40)
+        self.assertEqual(_normalize({"ai_budget_usd": 1.0})["ai_budget_usd"], 0.4)
+        self.assertEqual(_normalize({"ai_budget_usd": 0.3})["ai_budget_usd"], 0.3)
+
+    def test_spent_uses_real_price_from_service(self) -> None:
+        from engine.slides.ai_fill import spent_cents
+
+        cfg = AiConfig(api_key="k", image_model="nano-banana-pro-4k", budget_cents=100)  # прайс 6¢, реально 2¢
+        tasks = [GenTask(key=f"s:{i}", kind="image", prompt=f"p{i}", dest=self.dir / f"{i}.png") for i in range(3)]
+        ai_gen.generate(cfg, tasks, state_file=self.dir / "ai_jobs.json", poll_scale=0.001)
+        self.assertEqual(spent_cents(cfg, self.dir), 6)
+
+    def test_budget_shared_with_pool_and_resume_is_free(self) -> None:
+        from engine.slides.ai_fill import fill_pool, fit_budget, spent_cents
+
+        cfg = AiConfig(api_key="k", image_model="nano-banana-pro", budget_cents=10)
+        slots = [{"kind": "image", "path": f"pool/x{i}", "fit": 2, "start": 200 + i * 4} for i in range(60)]
+        fill_slots(slots, PLAN, cfg, pool=self.dir / "pool")
+        before = spent_cents(cfg, self.dir)
+        fill_pool([], [{"path": f"pool/p{i}.jpg", "score": 0.2} for i in range(40)], PLAN, cfg, pool=self.dir / "pool",
+                  image_target=40, video_target=0)
+        self.assertLessEqual(spent_cents(cfg, self.dir), 10, "слоты и пул — один бюджет на ролик")
+        self.assertGreaterEqual(spent_cents(cfg, self.dir), before)
+        # продолжение после сбоя: уже оплаченные задачи в бюджет не считаются заново
+        from engine.slides.ai_gen import GenTask, STATE_NAME
+        import json as _json
+
+        state = _json.loads((self.dir / STATE_NAME).read_text(encoding="utf-8"))
+        paid = [GenTask(key=k, kind="image", prompt="p", dest=self.dir / "x.png") for k in list(state)[:2]]
+        self.assertEqual(len(fit_budget(cfg, paid, self.dir)), 2)
+
+    def test_infographic_ordered_early_is_not_paid_twice(self) -> None:
+        """Инфографику заказали параллельно с подбором — после подбора она подхватывается, не перезаказывается."""
+        from engine.slides.ai_fill import report_lines
+
+        fake = FakeRoyal()
+        self._use(fake)
+        cfg = AiConfig(api_key="k", image_model="nano-banana-pro", video_model="veo-3.1-lite")
+        early = [{"kind": "image", "start": 200.0, "end": 204.0, "text": "ВВП вырос на 12%", "query": "q", "data": "bar chart GDP", "fit": 0, "path": ""}]
+        fill_slots(early, PLAN, cfg, pool=self.dir / "pool", tag="beat", total=50)
+        posts = len(fake.posts)
+        self.assertEqual(posts, 1)
+        # после подбора: тот же кусок оказался видео-слотом, рядом — обычные кадры
+        slots = [{"kind": "video", "path": f"pool/x{i}.mp4", "fit": 9, "start": 120.0 + i * 4, "end": 124.0 + i * 4,
+                  "text": f"t{i}", "query": f"q{i}"} for i in range(50)]
+        slots[20].update(text="ВВП вырос на 12%", query="q", data="bar chart GDP")  # start = 200.0
+        out = fill_slots(slots, PLAN, cfg, pool=self.dir / "pool", tag="beat")
+        self.assertEqual(len(fake.posts), posts, "та же инфографика — без второго заказа")
+        self.assertEqual(out[20]["provider"], "ai")
+        lines, _w = report_lines(self.dir)
+        self.assertTrue(lines[0].startswith("AI-кадры: 1"), lines)
+
     def test_all_ok_is_info_not_warning(self) -> None:
         from engine.slides.ai_fill import report_lines
 
         fill_slots(self._slots(), PLAN, AiConfig(api_key="k", image_model="nano-banana-pro"), pool=self.dir / "pool")
-        self.assertEqual(report_lines(self.dir), (["AI-кадры: 2"], []))
+        self.assertEqual(report_lines(self.dir), (["AI-кадры: 2, потрачено $0.04 из $0.40"], []))
 
     def test_job_result_carries_warning(self) -> None:
         from server.runners import _slides_result
@@ -351,6 +506,48 @@ class ReportTests(Base):
         res = _slides_result(render)
         self.assertIn("AI-кадры не все", res["summary"])
         self.assertIn("не хватает денег", res["warnings"][0])
+
+
+class SilentVideoTests(Base):
+    """Сгенерированное видео — без звука: в ролике звучат только голос и музыка."""
+
+    def test_downloaded_ai_video_has_no_audio(self) -> None:
+        import subprocess
+
+        from engine.slides.ffmpeg_util import find_ffmpeg
+        from engine.slides.ffprobe_util import has_audio_stream
+
+        clip = self.dir / "src.mp4"
+        subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30:d=2",
+                        "-f", "lavfi", "-i", "sine=f=440:d=2", "-shortest", "-pix_fmt", "yuv420p", str(clip)], check=True)
+        self.assertTrue(has_audio_stream(clip))
+        data = clip.read_bytes()
+        fake = FakeRoyal()
+        real = fake.__call__
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.url.host == "cdn.example" and req.url.path.endswith(".mp4"):
+                return httpx.Response(200, content=data)
+            return real(req)
+
+        self._use(handler)
+        task = GenTask(key="v:0", kind="video", prompt="steppe", dest=self.dir / "pool" / "ai.mp4")
+        self.gen([task], cfg=AiConfig(api_key="k", video_model="veo-3.1-lite"))
+        self.assertIsNotNone(task.result)
+        self.assertFalse(has_audio_stream(task.result), "звук из AI-видео вырезан")
+
+    def test_render_segment_is_silent_anyway(self) -> None:
+        import subprocess
+
+        from engine.slides.ffmpeg_util import find_ffmpeg
+        from engine.slides.ffprobe_util import has_audio_stream
+        from engine.slides.render_segment import render_video_cover
+
+        clip = self.dir / "loud.mp4"
+        subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:d=3",
+                        "-f", "lavfi", "-i", "sine=f=440:d=3", "-shortest", "-pix_fmt", "yuv420p", str(clip)], check=True)
+        seg = render_video_cover(media=clip, duration=2.0, dest=self.dir / "seg.mp4")
+        self.assertFalse(has_audio_stream(seg), "кусок видеоряда всегда без звука")
 
 
 class PipelineTests(unittest.TestCase):

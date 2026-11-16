@@ -23,8 +23,6 @@ from engine.compositor.defaults import (
     SUBSCRIBE_MAX_WIDTH_RATIO,
     SUBSCRIBE_PATH,
     SUBSCRIBE_SIMILARITY,
-    SUBSCRIBE_START_MAX,
-    SUBSCRIBE_START_MIN,
     SUBSCRIBE_VOLUME,
     VIDEO_CRF,
     VIDEO_PRESET,
@@ -34,6 +32,7 @@ from engine.slides.render_defaults import rate_cap
 from engine.compositor.onepass import Inputs, edge_filters, join, story_audio
 from engine.compositor.picker import pick_broll, pick_head, pick_intro, pick_outro
 from engine.compositor.text_overlay import render_text_png
+from engine.compositor.subscribe import subscribe_graph, subscribe_starts
 from engine.compositor.utils import (
     find_ffmpeg,
     has_audio_stream,
@@ -116,7 +115,6 @@ def build_and_run(
 
     use_sub = req.subscribe
     sub_path = req.subscribe_path
-    sub_start = 0.0
     sub_dur = 0.0
     sub_crop: tuple[int, int, int, int] | None = None
     if use_sub:
@@ -128,7 +126,6 @@ def build_and_run(
                 on_progress(0.0, msg)
         else:
             sub_dur = probe_duration(sub_path)
-            sub_start = rng.uniform(SUBSCRIBE_START_MIN, SUBSCRIBE_START_MAX)
             sub_crop = probe_chromakey_crop(
                 sub_path,
                 chroma=SUBSCRIBE_CHROMA,
@@ -224,13 +221,15 @@ def build_and_run(
         total += dur
     filters += join(parts)
 
-    # Подписка — поверх всего ролика (интро+рассказ+аутро), на 4–5 с.
+    # Подписка — поверх всего ролика (интро+рассказ+аутро): ~25 с, середина, за 30 с до конца.
     if use_sub and sub_path is not None:
         sub_idx = inputs.add("-i", str(sub_path))
-        filters += _subscribe_graph(sub_idx, has_audio_stream(sub_path), start=sub_start, sub_dur=sub_dur, crop=sub_crop)
+        starts = subscribe_starts(total, sub_dur, rng)
+        filters += _subscribe_graph(sub_idx, has_audio_stream(sub_path), starts=starts, sub_dur=sub_dur, crop=sub_crop)
         if on_progress:
             crop_s = f"crop={sub_crop[2]}x{sub_crop[3]}" if sub_crop else "без crop"
-            on_progress(0.0, f"Подписка: {sub_path.name}, {sub_start:.1f}–{sub_start + sub_dur:.1f}с ({crop_s})")
+            when = ", ".join(f"{t:.0f}с" for t in starts)
+            on_progress(0.0, f"Подписка: {sub_path.name}, показы на {when} ({crop_s})")
     else:
         filters += ["[cat_v]null[vout]", "[cat_a]anull[aout]"]
     cmd += inputs.args
@@ -290,90 +289,47 @@ def _subscribe_graph(
     sub_idx: int,
     sub_audio: bool,
     *,
-    start: float,
+    starts: list[float],
     sub_dur: float,
     crop: tuple[int, int, int, int] | None,
     v_in: str = "cat_v",
     a_in: str = "cat_a",
 ) -> list[str]:
-    """Анимация подписки (хромакей) поверх [v_in]/[a_in] → [vout]/[aout]."""
-    end = start + sub_dur
-    sub_w = int(OUT_WIDTH * SUBSCRIBE_MAX_WIDTH_RATIO)
-    crop_f = ""
-    if crop is not None:
-        cx, cy, cw, ch = crop
-        crop_f = f"crop={cw}:{ch}:{cx}:{cy},"
-    filters = [
-        f"[{sub_idx}:v]fps={OUT_FPS},"
-        f"chromakey={SUBSCRIBE_CHROMA}:{SUBSCRIBE_SIMILARITY}:{SUBSCRIBE_BLEND},"
-        "format=yuva420p,"
-        + crop_f
-        + f"scale={sub_w}:-2:flags=lanczos,"
-        f"setpts=PTS+{start:.3f}/TB[subv]",
-        f"[{v_in}][subv]overlay=(W-w)/2:H-h-{SUBSCRIBE_BOTTOM_MARGIN}:format=auto:"
-        f"eof_action=pass:enable='between(t\\,{start:.3f}\\,{end:.3f})'[vout]",
-    ]
-    if sub_audio:
-        delay_ms = int(start * 1000)
-        filters += [
-            f"[{sub_idx}:a]volume={SUBSCRIBE_VOLUME},aformat=sample_fmts=fltp:channel_layouts=stereo,"
-            f"adelay={delay_ms}|{delay_ms}[suba]",
-            f"[{a_in}][suba]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]",
-        ]
-    else:
-        filters.append(f"[{a_in}]anull[aout]")
-    return filters
+    """Анимация подписки (хромакей) поверх [v_in]/[a_in] → [vout]/[aout] в моменты starts."""
+    return subscribe_graph(
+        sub_idx,
+        sub_audio,
+        starts=starts,
+        sub_dur=sub_dur,
+        crop=crop,
+        width=int(OUT_WIDTH * SUBSCRIBE_MAX_WIDTH_RATIO),
+        margin=SUBSCRIBE_BOTTOM_MARGIN,
+        fps=OUT_FPS,
+        chroma=SUBSCRIBE_CHROMA,
+        similarity=SUBSCRIBE_SIMILARITY,
+        blend=SUBSCRIBE_BLEND,
+        volume=SUBSCRIBE_VOLUME,
+        v_in=v_in,
+        a_in=a_in,
+    )
 
 
 def _overlay_subscribe(
     video: Path,
     sub_path: Path,
     *,
-    start: float,
     crop: tuple[int, int, int, int] | None,
     on_progress: ProgressCb | None,
+    rng: random.Random | None = None,
 ) -> None:
-    """Вклеить анимацию подписки поверх готового ролика на абсолютном таймкоде."""
+    """Вклеить анимацию подписки поверх готового ролика: ~25 с, середина, за 30 с до конца."""
     ffmpeg = find_ffmpeg()
     total = probe_duration(video)
     sub_dur = probe_duration(sub_path)
-    end = start + sub_dur
-    sub_w = int(OUT_WIDTH * SUBSCRIBE_MAX_WIDTH_RATIO)
-    crop_f = ""
-    if crop is not None:
-        cx, cy, cw, ch = crop
-        crop_f = f"crop={cw}:{ch}:{cx}:{cy},"
-    sub_y = f"H-h-{SUBSCRIBE_BOTTOM_MARGIN}"
-    delay_ms = int(start * 1000)
-
+    starts = subscribe_starts(total, sub_dur, rng)
     cmd: list[str] = [ffmpeg, "-y", "-i", str(video), "-i", str(sub_path)]
-    subv = (
-        f"[1:v]fps={OUT_FPS},"
-        + f"chromakey={SUBSCRIBE_CHROMA}:{SUBSCRIBE_SIMILARITY}:{SUBSCRIBE_BLEND},"
-        + "format=yuva420p,"
-        + crop_f
-        + f"scale={sub_w}:-2:flags=lanczos,"
-        + f"setpts=PTS+{start:.3f}/TB[subv]"
-    )
-    overlay = (
-        f"[0:v][subv]overlay=(W-w)/2:{sub_y}:format=auto:"
-        f"eof_action=pass:"
-        f"enable='between(t\\,{start:.3f}\\,{end:.3f})'[vout]"
-    )
-    filters = [subv, overlay]
-    if has_audio_stream(sub_path):
-        filters += [
-            "[0:a]aformat=sample_fmts=fltp:channel_layouts=stereo[a0]",
-            (
-                f"[1:a]volume={SUBSCRIBE_VOLUME},"
-                + "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                + f"adelay={delay_ms}|{delay_ms}[a1]"
-            ),
-            "[a0][a1]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]",
-        ]
-        audio_map = "[aout]"
-    else:
-        audio_map = "0:a"
+    filters = _subscribe_graph(1, has_audio_stream(sub_path), starts=starts, sub_dur=sub_dur, crop=crop, v_in="0:v", a_in="0:a")
+    audio_map = "[aout]"
 
     tmp = video.with_name(video.stem + ".tmp_sub" + video.suffix)
     cmd += [

@@ -13,6 +13,7 @@ from typing import Callable
 
 from engine.core.spread import spread
 from engine.slides.music import MUSIC_VOLUME
+from engine.slides.hook import HOOK_SEC, head_rank, hook_first
 from engine.slides.look import look_groups
 from engine.core.throttle import heavy_stage
 from engine.core.threads import ThreadPoolExecutor
@@ -26,7 +27,7 @@ from engine.slides.speed_copies import write_speed_copies
 from engine.slides.ffmpeg_util import has_filter
 from engine.slides.render_mux import mux_av
 from engine.slides.render_segment import render_image_canvas, render_video_cover
-from engine.slides.render_subscribe import subscribe_filters, subscribe_start, visible_span
+from engine.slides.render_subscribe import subscribe_filters
 from engine.slides.render_mux import subtitles_filter
 from engine.slides.ffmpeg_util import find_ffmpeg
 from engine.slides.ffprobe_util import has_audio_stream, run_ffmpeg
@@ -35,7 +36,6 @@ from engine.slides.render_defaults import (
     OUT_FPS,
     OUT_HEIGHT,
     OUT_WIDTH,
-    SUBSCRIBE_MAX_WIDTH_RATIO,
     VIDEO_CRF,
     VIDEO_PRESET,
 )
@@ -68,6 +68,8 @@ class RenderRequest:
     folder_language: str = ""
     # фоновая музыка (подготовленный трек из assets/music): по кругу под всем рассказом
     music: Path | None = None
+    # LLM (ключ, адрес, модель) — названия глав для описания YouTube; None — главы равными частями
+    llm: tuple[str, str, str] | None = None
 
 
 @dataclass
@@ -158,7 +160,12 @@ def _run_render_stage(
                 on_progress=lambda p, m: progress(0.96 + p * 0.04, m),
             )
         if desktop is not None:
-            progress(0.98, f"Папка: {desktop.name} ({size / 1e6:.1f} MB)")
+            progress(0.98, "Главы для описания YouTube…")
+            export_chapters(
+                req, desktop, script=run_dir / "script.txt", timings=run_dir / TIMINGS_NAME, voice=voice, video=mixed,
+                language=chk_now.language, cache=run_dir / "chapters.json",
+            )
+            progress(0.99, f"Папка: {desktop.name} ({size / 1e6:.1f} MB)")
 
     chk = cp.load(run_dir)
     cp.mark_render_done(
@@ -287,10 +294,27 @@ def build_silent(
         # кадров подряд (в том числе на стыке кругов) — повтор не бросается в глаза.
         # «одинаковые» — по виду, а не по файлу: то же фото с другого сайта тоже не встанет рядом
         groups = look_groups([p for _, p, _ in segments])
-        order = spread(
-            [i for _ in range(copies) for i in range(len(segments))],
+        # «крючок»: первые ~2,5 мин — самые красивые кадры пула (оценка CLIP из подбора)
+        pool_items = {
+            str((run_dir / str(it.get("path") or "")).resolve()): it
+            for it in [*(raw_tl.get("videos") or []), *(raw_tl.get("images") or [])]
+            if isinstance(it, dict)
+        }
+        meta = [pool_items.get(str(p.resolve()), {}) for _, p, _ in segments]
+        # начало: красивейшие видео, потом фото; AI-кадров в первые минуты нет
+        head = hook_first(
+            [head_rank(m) for m in meta], [d for _, _, d in segments], HOOK_SEC,
+            video=[k == "video" for k, _, _ in segments],
+            allowed=[m.get("provider") != "ai" for m in meta],
+        ) if any(m.get("beauty") or m.get("quality") for m in meta) else []
+        pool_left = [i for _ in range(copies) for i in range(len(segments))]
+        for i in head:
+            pool_left.remove(i)
+        order = head + spread(
+            pool_left,
             key=lambda i: groups[segments[i][1]],
             rng=random.Random(req.seed),
+            avoid_first=groups[segments[head[-1]][1]] if head else None,
         )
         progress(
             0.02,
@@ -348,6 +372,71 @@ def build_silent(
     return total
 
 
+def edge_clips(req: RenderRequest) -> tuple[Path | None, Path | None]:
+    """Интро и аутро ролика. Тот же seed — те же файлы (у всех языков одинаковые)."""
+    from engine.compositor.picker import pick_intro, pick_outro
+
+    rng = random.Random(req.seed)
+    intro = pick_intro(req.intro_dir, rng) if req.intro_dir is not None and req.intro_dir.is_dir() else None
+    outro = pick_outro(req.outro_dir, rng) if req.outro_dir is not None and req.outro_dir.is_dir() else None
+    return intro, outro
+
+
+def export_chapters(
+    req: RenderRequest,
+    folder: Path,
+    *,
+    script: Path,
+    timings: Path | None,
+    voice: Path,
+    video: Path,
+    language: str = "",
+    cache: Path | None = None,
+    base_text: str = "",
+) -> Path | None:
+    """главы.txt (и для каждой копии скорости) в папку готового ролика. base_text — оригинал (для перевода)."""
+    from engine.core.chapters import CHAPTERS_NAME, read_words, write_chapters
+    from engine.core.langdetect import detect_language
+    from engine.slides.publish import attribution_block
+    from engine.slides.speed_copies import copy_filename, copy_percents
+
+    text = script.read_text(encoding="utf-8") if script.is_file() else ""
+    intro, _outro = edge_clips(req)
+    try:
+        return write_chapters(
+            folder,
+            text=text,
+            words=read_words(timings),
+            voice_duration=probe_duration(voice),
+            language=language,
+            llm=req.llm,
+            offset=probe_duration(intro) if intro is not None else 0.0,
+            total=probe_duration(video),
+            copies=[(copy_filename(p, CHAPTERS_NAME), p / 100) for p in copy_percents(req.speed_copies)],
+            cache=cache,
+            # авторы нарезок YouTube — сразу под главами: описание вставляется одним куском
+            footer=attribution_block(req.run_dir, language or detect_language(text) or ""),
+            preset=_preset_chapters(req.run_dir, language or detect_language(text) or ""),
+            base_text=base_text,
+        )
+    except Exception as exc:  # без глав ролик всё равно готов
+        log(f"Главы: не получилось ({exc})")
+        return None
+
+
+def _preset_chapters(run_dir: Path, language: str) -> list[tuple[float, str]] | None:
+    """Режим «Звёзды»: главы — по героям («4:10 — Юрий Никулин»), LLM для них не нужен."""
+    try:
+        raw = json.loads((run_dir / TIMELINE_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or raw.get("variant") != "stars":
+        return None
+    from engine.slides.stars_media import star_chapters
+
+    return star_chapters(raw, language) or None
+
+
 def finish_video(
     req: RenderRequest,
     *,
@@ -363,11 +452,8 @@ def finish_video(
     Тот же seed — та же подписка и то же интро, поэтому ролики на разных языках одинаковые.
     """
     from engine.compositor.onepass import Inputs, edge_filters, join, story_audio
-    from engine.compositor.picker import pick_intro, pick_outro
 
-    rng = random.Random(req.seed)
-    intro = pick_intro(req.intro_dir, rng) if req.intro_dir is not None and req.intro_dir.is_dir() else None
-    outro = pick_outro(req.outro_dir, rng) if req.outro_dir is not None and req.outro_dir.is_dir() else None
+    intro, outro = edge_clips(req)
     sub_path = req.subscribe_path if req.subscribe and req.subscribe_path and req.subscribe_path.is_file() else None
     burn = srt_path is not None and srt_path.is_file() and has_filter("subtitles")
     music = req.music if req.music is not None and req.music.is_file() else None
@@ -419,22 +505,11 @@ def finish_video(
     filters += join(parts)
     v_map, a_map = "[cat_v]", "[cat_a]"
     if sub_path is not None:
-        sub_dur = probe_duration(sub_path)
-        start = subscribe_start(req.seed, total, sub_dur)
         sub_idx = inputs.add("-i", str(sub_path))
-        sub_filters, a_map = subscribe_filters(
-            start=start,
-            sub_dur=sub_dur,
-            sub_w=int(OUT_WIDTH * SUBSCRIBE_MAX_WIDTH_RATIO),
-            has_audio=has_audio_stream(sub_path),
-            blur_span=visible_span(sub_path, sub_dur),
-            v_in="cat_v",
-            a_in="cat_a",
-            sub_in=sub_idx,
-        )
+        sub_filters, starts = subscribe_filters(sub_path, sub_idx, total, seed=req.seed)
         filters += sub_filters
-        v_map = "[vout]"
-        log(f"Подписка: {start:.1f}с, в одном проходе со сборкой")
+        v_map, a_map = "[vout]", "[aout]"
+        log("Подписка внизу кадра, показы на " + ", ".join(f"{t:.0f}с" for t in starts))
     what = ", ".join(x for x, on in (("субтитры", burn), ("интро", intro), ("аутро", outro), ("подписка", sub_path), ("музыка", music)) if on)
     progress(0.85, f"Сборка ролика одним проходом: {what}…")
     cmd = [

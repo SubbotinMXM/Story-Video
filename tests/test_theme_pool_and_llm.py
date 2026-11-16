@@ -89,6 +89,7 @@ class ThemePoolTests(unittest.TestCase):
         with mock.patch.object(tm, "_build_clients", lambda keys: clients), \
              mock.patch.object(tm, "_download", fake_download), \
              mock.patch.object(tm, "_llm", lambda req: mock.MagicMock()), \
+             mock.patch("engine.slides.judge.make_judge", lambda *a, **k: None), \
              mock.patch.object(tm, "_accept_samples", lambda *a, **k: 0.9), \
              mock.patch.object(tm, "VIDEO_SEARCH_SEC", 20), \
              mock.patch.object(tm, "pool_targets", lambda rng: (6, 2)):
@@ -121,6 +122,11 @@ class LlmRetryTests(unittest.TestCase):
             def __init__(self, **kw):
                 super().__init__(transport=httpx.MockTransport(handler), **kw)
 
+        # внутренний повтор openai SDK (max_retries) спит ~0.5 с на каждый 503 — в тестах без пауз
+        no_wait = mock.patch("openai._base_client.BaseClient._calculate_retry_timeout", return_value=0)
+        no_wait.start()
+        self.addCleanup(no_wait.stop)
+
         with mock.patch.object(lc.httpx, "Client", MockClient), \
              mock.patch.object(lc, "_retry_delay", lambda exc, attempt: 0):
             return lc.LLMClient(api_key="k", model="m", base_url="https://llm.test/v1")
@@ -145,6 +151,62 @@ class LlmRetryTests(unittest.TestCase):
         with mock.patch.object(lc, "_retry_delay", lambda exc, attempt: 0):
             self.assertEqual(c.complete(label="t", system="s", user="u"), "готово")
         self.assertGreaterEqual(len(calls), 3)
+
+    def test_overloaded_service_waits_longer_instead_of_failing(self) -> None:
+        """«No upstream accounts… retry in a minute» — ждём минутами, а не роняем ролик через 50 секунд."""
+        from engine.slides import llm_client as lc
+
+        busy = {"error": {"message": "No upstream accounts are available right now", "code": "pool_empty"}}
+        calls = []
+
+        def handler(req):
+            calls.append(1)
+            return httpx.Response(503, json=busy) if len(calls) <= 130 else self._ok("готово")
+
+        c = self._client(handler)
+        waits: list[float] = []
+        with mock.patch.object(lc, "_retry_delay", lambda exc, attempt: 0), \
+             mock.patch.object(c, "_sleep", lambda sec: waits.append(sec)):
+            self.assertEqual(c.complete(label="t", system="s", user="u"), "готово")
+        # перегружены все модели — круг по ним, пауза, снова круг; кругов больше обычных 6 попыток
+        self.assertGreater(len(waits), lc._CHAT_ATTEMPTS, "дольше обычных 6 попыток")
+        self.assertIn(60, waits, "раз в минуту, как просит сервис")
+
+    def test_overloaded_tries_other_models_and_returns_to_main(self) -> None:
+        import json as _json
+
+        from engine.slides import llm_client as lc
+
+        busy = {"error": {"message": "No upstream accounts are available right now", "code": "pool_empty"}}
+        models: list[str] = []
+        c = self._client(lambda req: handler(req))
+        c.model = "gpt-5.6-terra"
+        chain = c.chain("t")
+
+        def handler(req):
+            model = _json.loads(req.content)["model"]
+            models.append(model)
+            # запасная ожила только ко второму кругу
+            ok = model == "gpt-6-sol" and models.count("gpt-5.6-terra") >= 3  # библиотека повторяет 503 раз
+
+            return self._ok(f"ответ {model}") if ok else httpx.Response(503, json=busy)
+
+        with mock.patch.object(lc, "_retry_delay", lambda exc, attempt: 0), mock.patch.object(c, "_sleep", lambda sec: None):
+            self.assertEqual(c.complete(label="t", system="s", user="u"), "ответ gpt-6-sol")
+        tried = [m for i, m in enumerate(models) if i == 0 or m != models[i - 1]]  # повтор самой библиотеки — не в счёт
+        self.assertEqual(tried[: len(chain)], chain, "первый круг: основная, потом остальные по цене")
+        self.assertEqual(tried[len(chain)], "gpt-5.6-terra", "после паузы — снова с основной")
+        self.assertEqual(c.model, "gpt-5.6-terra", "основная модель в настройках не меняется")
+
+    def test_overloaded_too_long_gives_clear_error(self) -> None:
+        from engine.slides import llm_client as lc
+
+        c = self._client(lambda req: httpx.Response(503, json={"error": {"message": "No upstream accounts", "code": "pool_empty"}}))
+        c.busy_wait = 0
+        with mock.patch.object(lc, "_retry_delay", lambda exc, attempt: 0), self.assertRaises(RuntimeError) as err:
+            c.complete(label="t", system="s", user="u")
+        self.assertIn("перегружен", str(err.exception))
+        self.assertIn("Продолжить с места падения", str(err.exception))
 
     def test_auth_error_not_retried(self) -> None:
         from engine.slides import llm_client as lc
@@ -184,7 +246,7 @@ class ModelFallbackTests(unittest.TestCase):
 
         calls = []
 
-        def create(model, messages):
+        def create(model, messages, **kw):
             calls.append(model)
             if model == "gpt-5.5":
                 raise Rejected("The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.")
@@ -197,12 +259,16 @@ class ModelFallbackTests(unittest.TestCase):
                 client.complete(label="t2", system="s", user="u")
         finally:
             client.close()
-        self.assertEqual(calls, ["gpt-5.5", lc.DEFAULT_MODEL, lc.DEFAULT_MODEL], "дальше сразу рабочая модель")
+        lc._rejected.clear()
+        nxt = calls[1]
+        self.assertNotEqual(nxt, "gpt-5.5")
+        self.assertEqual(calls, ["gpt-5.5", nxt, nxt], "дальше сразу рабочая модель")
 
     def test_saved_dead_model_reset(self) -> None:
         from engine.core.config import _normalize
 
-        self.assertEqual(_normalize({"llm_model": "gpt-5.5"})["llm_model"], "")
+        self.assertEqual(_normalize({"llm_model": "gpt-5.4"})["llm_model"], "")
+        self.assertEqual(_normalize({"llm_model": "gpt-6.1-sol"})["llm_model"], "gpt-6.1-sol", "живая модель остаётся")
 
 
 if __name__ == "__main__":

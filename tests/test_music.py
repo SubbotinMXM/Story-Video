@@ -28,14 +28,15 @@ def _lufs(path: Path) -> float:
 
 
 class CatalogTests(unittest.TestCase):
-    def test_15_to_20_tracks_in_groups_cc0(self) -> None:
+    def test_youtube_library_neutral_tracks(self) -> None:
+        """Только Фонотека YouTube (на её треки не бывает претензий Content ID), нейтральные группы."""
         cat = music.catalog()
-        self.assertTrue(15 <= len(cat["tracks"]) <= 20, len(cat["tracks"]))
-        self.assertGreaterEqual(len({t["group"] for t in cat["tracks"]}), 4)
+        self.assertTrue(3 <= len(cat["tracks"]) <= 10, len(cat["tracks"]))
         for t in cat["tracks"]:
-            self.assertIn("publicdomain/zero", t["license"])
+            self.assertIn("YouTube Audio Library", t["source"])
             self.assertTrue((music.MUSIC_DIR / t["file"]).is_file())
             self.assertIn(t["group"], cat["groups"])
+            self.assertIn(t["group"], ("ambient", "piano", "classical"))
 
     def test_same_loudness_for_all_tracks(self) -> None:
         levels = [t["lufs"] for t in music.catalog()["tracks"]]
@@ -43,7 +44,7 @@ class CatalogTests(unittest.TestCase):
 
     def test_credit_and_unknown(self) -> None:
         tid = music.catalog()["tracks"][0]["id"]
-        self.assertIn("CC0", music.credit_line(tid))
+        self.assertIn("Фонотека YouTube", music.credit_line(tid))
         self.assertIsNone(music.track_path("нет-такого"))
         self.assertEqual(music.credit_line(""), "")
 
@@ -70,7 +71,7 @@ class MixTests(unittest.TestCase):
             rp.finish_video(rp.RenderRequest(run_dir=root, music=track), silent=root / "silent.mp4", voice=root / "mute.mp3",
                             srt_path=None, dest=root / "music_only.mp4", progress=lambda p, m: None)
             gap = _lufs(root / "voice.mp3") - _lufs(root / "music_only.mp4")
-            self.assertTrue(17 <= gap <= 24, gap)
+            self.assertTrue(21 <= gap <= 28, gap)  # музыка ~−24 дБ под голосом: тихий фон
 
     def test_runner_passes_selected_track(self) -> None:
         from server.runners import _render_flags
@@ -78,12 +79,6 @@ class MixTests(unittest.TestCase):
         tid = music.catalog()["tracks"][1]["id"]
         self.assertEqual(_render_flags({"music_track": tid})["music"], music.track_path(tid))
         self.assertIsNone(_render_flags({"music_track": ""})["music"])
-
-    def test_template_remembers_music(self) -> None:
-        from engine.core.config import TEMPLATE_KEYS
-
-        self.assertIn("music_track", TEMPLATE_KEYS["slides"])
-        self.assertNotIn("music_track", TEMPLATE_KEYS["broll"], "музыка — только в стоковых роликах")
 
 
 if __name__ == "__main__":

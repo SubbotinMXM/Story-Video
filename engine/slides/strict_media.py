@@ -17,6 +17,7 @@ import json
 import random
 import shutil
 import threading
+import time
 from concurrent.futures import as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,6 +67,9 @@ from engine.slides.theme_media import (
     _llm,
     _middle_first,
 )
+from engine.slides.ffmpeg_util import find_ffmpeg
+from engine.slides.hook import HOOK_SEC as HOOK_SEC_COMMON
+from engine.slides.hook import NO_AI_SEC, add_beauty, head_rank, hook_first
 from engine.slides.look import fingerprint, seen
 from engine.slides.theme_plan import _main_name, ThemePlan, ensure_theme_plan
 from engine.slides.vision_ranker import score_fit
@@ -82,12 +86,18 @@ TAIL_MERGE = 2.0
 # длительность «начала» (строго под фразы в обоих строгих режимах)
 HEAD_SEC = 120.0
 VIDEO_PHASE_SEC = HEAD_SEC  # старое имя: так называлось «начало», когда оно было только из видео
+# «Крючок»: первые HOOK_SEC ролика — самые красивые кадры (пролёты, виды, золотой час).
+# Под эти куски перебираем больше кандидатов и выбираем по смыслу + красоте, а не первый годный.
+HOOK_SEC = HOOK_SEC_COMMON
+HOOK_BEAUTY_OK = 0.03  # кадр уже «цепляет» — дальше не ищем
+HOOK_BEAUTY_WEIGHT = 50  # красота ±0.08 → ±4 балла к оценке смысла (0–10)
 # пометка запроса: кусок — призыв подписаться (кадр по теме ролика, не буквальный)
 CTA_MARK = "CTA|"
 # пометка запроса: кусок про цифры/графики/статистику — живой кадр к нему почти не найти,
 # при включённых AI-кадрах сюда обязательно ставится сгенерированная инфографика
 DATA_MARK = "DATA|"
-QUERY_BATCH = 16
+# кусков на один запрос: длинная инструкция и контекст уходят реже (экономия ключа LLM)
+QUERY_BATCH = 32
 IMAGE_TRIES = 3
 VIDEO_TRIES = 3
 CANDIDATE_CAP = 6
@@ -95,6 +105,7 @@ WEAK_FIT = 3  # локальный CLIP мягче — берём best даже 
 # куски независимы — число потоков на выбор кадра не влияет, только на скорость
 # кадры независимы: больше потоков — быстрее (ждём в основном скачивание, не процессор)
 STRICT_FETCH_WORKERS = 10
+STRICT_JUDGE_WORKERS = 16  # куски начала ждут LLM — остальные тем временем подбираются
 
 _QUERY_SYSTEM = """\
 You write one English search query (for a stock photo or video) per narration beat.
@@ -102,6 +113,15 @@ Each query must depict what THAT beat says as filmable B-roll.
 Return ONLY JSON: {"queries": ["...", "..."]} with the same length as the beats.
 If a beat is a call to action — subscribe, like, comment, ring the bell, support the channel —
 return exactly "CTA" for it (that moment gets a general shot about the film's topic).
+Beats ending with ★ open the film and must hook the viewer. For them spectacle beats literal meaning:
+always a visually stunning REAL shot of the story's place, people or nature — aerial/drone flyover, sweeping
+landscape or cityscape, golden hour, timelapse, cinematic close-up (e.g. "aerial drone flyover Mongolian steppe
+golden hour"). An abstract ★ beat (myths, contradictions, numbers, opinions, history in general) gets the most
+stunning establishing shot of the place. Never DATA, charts, maps, flags, documents, museums or archives for ★.
+Beats ending with ★★ are the first 30 seconds — the most important moment of the film: the single most spectacular
+shot possible — iconic aerial/drone views of the place, breathtaking landscapes; and if the film is about the
+people or women of a country, alternate them with "beautiful young <nationality> woman smiling cinematic slow motion
+<place>" style shots (attractive, photogenic, in local or summer clothing).
 If a beat is mainly about numbers, statistics, percentages, money, prices, growth or decline,
 rankings, comparisons, a chart/graph/map or an abstract idea that cannot be filmed, return
 "DATA: <short English description of a chart or infographic that shows it>",
@@ -110,7 +130,13 @@ e.g. "DATA: bar chart of Mongolia GDP growth 2010-2020".
 Rules:
 - 4 to 10 English words, concrete things a camera can film
 - Prefer real places, actions, people, landmarks matching the beat AND story context
-- If the story is about China / a city / a country, keep that place in the query when relevant
+- ALWAYS anchor the query in the film's world from STORY CONTEXT: its country/region/city and era.
+  "village" in a film about Japan → "Japanese mountain village Gifu" or "Hokkaido snowy village", never just
+  "winter village". Only a beat explicitly about another place gets that other place.
+- Use the visual_markers of the story when they help (architecture, signage, clothing, landscape)
+- Prefer queries that find professional, cinematic footage: for places, cities, nature and scenery add
+  words like "aerial", "drone", "cinematic", "4K", "timelapse", "golden hour" when natural; for people and
+  street life — "cinematic", "slow motion", "close-up". Never words that bring amateur vlogs or news.
 - If the beat is about a named person, name them in a filmable way.
   A person of the photography age (20th–21st century actor, singer, politician…):
   "<name> photo", "<name> on stage", "<name> interview", "<name> 1970s" —
@@ -149,7 +175,8 @@ LATE_VIDEO_MAX = 6.0
 
 
 def _late_pool(
-    run_dir: Path, req, plan, *, http, clients, pool: Path, cancel, progress, exclude: list[dict] | None = None
+    run_dir: Path, req, plan, *, http, clients, pool: Path, cancel, progress, exclude: list[dict] | None = None,
+    judge=None,
 ) -> tuple[list[dict], list[dict]]:
     """Пул по теме для всего, что после первых 2 минут. Готовый пул (после сбоя) — с диска."""
     from engine.slides.theme_media import gather_pool
@@ -177,12 +204,52 @@ def _late_pool(
             video_search_sec=LATE_VIDEO_SEARCH_SEC,
             # кадры начала (и похожие на них) в блок не берём — иначе тот же клип дважды за ролик
             exclude=exclude,
+            judge=judge,
         )
     finally:
         shutil.rmtree(trials, ignore_errors=True)
         shutil.rmtree(frames, ignore_errors=True)
     cache.write_text(json.dumps({"videos": videos, "images": images}, ensure_ascii=False), encoding="utf-8")
     return videos, images
+
+
+def _pregenerate_data(side, req, plan: ThemePlan, beats: list[Beat], queries: list[str], *, pool: Path, judge,
+                      cancel: CancelToken | None):
+    """Куски про цифры известны сразу после запросов — их инфографика генерируется параллельно
+    с подбором живых кадров (раньше — после него: +10–15 мин на ролик)."""
+    if req.ai is None or not req.ai.active:
+        return None
+    slots = [
+        {"kind": "image", "start": round(b.start, 3), "end": round(b.end, 3), "duration": round(b.duration, 3),
+         "text": b.text[:240], "query": q, "data": q[len(DATA_MARK):], "fit": 0, "path": ""}
+        for b, q in zip(beats, queries) if q.startswith(DATA_MARK) and b.start >= NO_AI_SEC
+    ]
+    if not slots:
+        return None
+    from engine.slides.ai_fill import fill_slots
+
+    log(f"AI-кадры: {len(slots)} кусков про цифры — инфографика генерируется параллельно с подбором")
+    return side.submit(fill_slots, slots, plan, req.ai, pool=pool, cancel=cancel, tag="beat", judge=judge, total=len(beats))
+
+
+def _make_judge(req, plan: ThemePlan, cancel: CancelToken | None):
+    """Проверка кадров зрячей LLM на весь подбор (свой клиент: запросы идут параллельно)."""
+    from engine.slides.judge import make_judge
+
+    judge = make_judge(req.llm_api_key, req.llm_model or "", req.llm_base_url or "", plan)
+    if judge is not None and cancel:
+        cancel.register(judge.client)
+    return judge
+
+
+def _late_moments(words: list[WordTiming], start: float, limit: int = 60) -> list[str]:
+    """Фразы рассказа после начала ролика — под них пишутся AI-кадры пула (а не под общие темы)."""
+    text = " ".join(w.word for w in words if w.start >= start)
+    sents = [x.strip() for x in re.split(r"(?<=[.!?…])\s+", text) if len(x.strip()) > 25]
+    if len(sents) <= limit:
+        return sents
+    step = len(sents) / limit
+    return [sents[int(k * step)] for k in range(limit)]
 
 
 def _late_slots(
@@ -202,12 +269,19 @@ def _late_slots(
     items += [("video", it, max(1.0, min(float(it.get("duration") or LATE_VIDEO_MAX), LATE_VIDEO_MAX))) for it in videos]
     if not items or duration <= 0.05:
         return []
-    order = spread(
-        list(range(len(items))),
+    # «крючок»: если блок начинается раньше конца первых HOOK_SEC — сначала красивейшие кадры пула
+    head = [i for i in hook_first(
+        [head_rank(it) for _k, it, _d in items], [d for _k, _it, d in items], HOOK_SEC - start,
+        video=[k == "video" for k, _it, _d in items],
+        allowed=[it.get("provider") != "ai" for _k, it, _d in items],
+    ) if str(items[i][1].get("path")) != avoid_first]
+    rest = spread(
+        [i for i in range(len(items)) if i not in set(head)],
         key=lambda i: str(items[i][1].get("path")),
         rng=rng,
-        avoid_first=avoid_first,
+        avoid_first=str(items[head[-1]][1].get("path")) if head else avoid_first,
     )
+    order = head + rest
     end = start + duration
     out: list[dict] = []
     t = start
@@ -301,7 +375,10 @@ def with_shots(beats: list[Beat], shots: int = FULL_SHOTS) -> list[Beat]:
 # однозначные призывы (на языках роликов)
 _CTA_STRONG = re.compile(
     r"subscri|suscr[ií]b|aboneaz|abonea|abonați|abonati|subskryb|abonnier|abonnez|iscrivet|iscriviti|"
-    r"колокольч|лайк|hit the bell|like (?:the|this) video|campanita|campanella|clopo[țt]el|dzwonek|glocke|cloche|dale like",
+    r"колокольч|лайк|hit the bell|like (?:the|this) video|campanita|campanella|clopo[țt]el|dzwonek|glocke|cloche|dale like|"
+    # финальный призыв: «три ссылки на экране, плейлист, поделитесь мнением в комментариях»
+    r"три ссылки|ссылк\w* на экране|плейлист|playlist|links? on (?:the )?screen|link-uri|enlaces en (?:la )?pantalla|"
+    r"liens? à l'écran|link sullo schermo|linki na ekranie|poleć|поделитесь (?:своим )?мнением|напишите в комментари",
     re.I,
 )
 # «подпишитесь…» — только рядом с «канал/видео» (иначе «подписал договор» в истории)
@@ -333,6 +410,31 @@ def is_cta(text: str) -> bool:
     """Кусок — призыв подписаться / лайк / колокольчик (на любом из языков роликов)."""
     t = text or ""
     return bool(_CTA_STRONG.search(t) or (_CTA_SIGN.search(t) and _CTA_CHANNEL.search(t)))
+
+
+def cta_spans(words: list[WordTiming]) -> list[tuple[float, float]]:
+    """Где в озвучке призывы (по целым предложениям): кусок текста может разрезать призыв
+    пополам, и половина без «подпишитесь» иначе получила бы кадр «под слова» (колокольчик, ссылки)."""
+    spans: list[tuple[float, float]] = []
+    sent: list[WordTiming] = []
+    for w in words:
+        sent.append(w)
+        if _sentence_end(w.word) or w is words[-1]:
+            text = " ".join(x.word for x in sent)
+            if is_cta(text):
+                if spans and sent[0].start - spans[-1][1] < 1.5:
+                    spans[-1] = (spans[-1][0], sent[-1].end)  # призыв из нескольких предложений — один
+                else:
+                    spans.append((sent[0].start, sent[-1].end))
+            sent = []
+    return spans
+
+
+def in_cta(beat: "Beat", spans: list[tuple[float, float]]) -> bool:
+    """Кусок хотя бы наполовину приходится на призыв."""
+    dur = max(0.1, beat.end - beat.start)
+    covered = sum(max(0.0, min(beat.end, b) - max(beat.start, a)) for a, b in spans)
+    return covered / dur >= 0.5
 
 
 def split_beats(
@@ -456,7 +558,7 @@ def collect_strict_timeline(
         if saved is not None:
             queries = saved["queries"]
         else:
-            queries = _plan_queries(client, plan, beats, cancel, all_beats=full)
+            queries = _plan_queries(client, plan, beats, cancel, all_beats=full, cta=cta_spans(words))
     finally:
         client.close()
 
@@ -469,19 +571,25 @@ def collect_strict_timeline(
     trials.mkdir(parents=True, exist_ok=True)
     frames.mkdir(parents=True, exist_ok=True)
     http = httpx.Client(timeout=120.0, trust_env=False, follow_redirects=True)
-    workers = STRICT_FETCH_WORKERS
     progress(0.10, "CLIP: гружу локальную модель…")
     get_clip()
     ctx = plan.context
+    judge = _make_judge(req, plan, cancel)
     mix = MixState(
         subject=subject_of(ctx.subject, visual_style=ctx.visual_style, historical=ctx.historical),
         stats=SourceStats(),
+        # LLM смотрит только начало ролика — время подбора остального как раньше
         budget=Budget.for_beats(len(beats)),
         cancel=cancel,
+        judge=judge,
+        custom=req.source_mix,
     )
+    # проверка LLM отвечает 15–50 с — кусков в работе вдвое больше, иначе подбор растянется
+    workers = STRICT_JUDGE_WORKERS if judge is not None else STRICT_FETCH_WORKERS
     log(
-        f"Подбор: тема «{mix.subject}», видео {base_weights(mix.subject, video=True)}, "
-        f"картинки {base_weights(mix.subject, video=False)}, цель {TARGET_HEIGHT}p, не ниже {MIN_HEIGHT}p"
+        f"Подбор: тема «{mix.subject}», видео {mix.weights(video=True)}, картинки {mix.weights(video=False)}"
+        + (" (свои доли)" if mix.custom else " (по теме ролика)")
+        + f", цель {TARGET_HEIGHT}p, не ниже {MIN_HEIGHT}p"
     )
 
     slots: list[dict | None] = [None] * len(beats)
@@ -519,7 +627,16 @@ def collect_strict_timeline(
             ),
         )
 
+    side = ThreadPoolExecutor(max_workers=2)
+    late_fut = None
+    data_fut = _pregenerate_data(side, req, plan, beats, queries, pool=pool, judge=judge, cancel=cancel)
     try:
+        if late_dur > 0.5:
+            # пул на остаток ролика собирается одновременно с началом (раньше — после него: +20 мин)
+            late_fut = side.submit(
+                _late_pool, run_dir, req, plan, http=http, clients=clients, pool=pool, cancel=cancel,
+                progress=lambda _p, m: log(f"Пул после 2 минут: {m}"), exclude=[x for x in slots if x], judge=judge,
+            )
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = [ex.submit(_job, i) for i in range(len(beats)) if slots[i] is None]
             if cancel:
@@ -556,15 +673,26 @@ def collect_strict_timeline(
                         _drop_slot(pool, slots[i], mix)
                     slots[i] = hit
             _save_progress(run_dir, beats, queries, slots, variant)
-        late_pool = (
-            _late_pool(
-                run_dir, req, plan, http=http, clients=clients, pool=pool, cancel=cancel, progress=progress,
-                exclude=[x for x in slots if x],
+        if late_fut is not None:
+            if not late_fut.done():
+                progress(0.68, "Пул для остального ролика: дособираю…")
+            late_pool = _drop_like_head(*late_fut.result(), slots, run_dir)
+            _fill_head_from_pool(beats, slots, *late_pool, run_dir)
+            _upgrade_head(beats, slots, late_pool[0], run_dir)
+        else:
+            late_pool = ([], [])
+            _fill_head_holes_by_theme(
+                http, clients, plan, beats, slots, queries, trials=trials, frames=frames, pool=pool, mix=mix,
             )
-            if late_dur > 0.5
-            else ([], [])
-        )
+        _save_progress(run_dir, beats, queries, slots, variant)
+    except BaseException:
+        if late_fut is not None:
+            late_fut.cancel()
+        if judge is not None:
+            judge.close()
+        raise
     finally:
+        side.shutdown(wait=False, cancel_futures=True)
         http.close()
         for c in clients.values():
             try:
@@ -586,13 +714,18 @@ def collect_strict_timeline(
         q = by_start.get(round(float(slot.get("start") or 0), 3), "")
         if q.startswith(DATA_MARK):
             slot["data"] = q[len(DATA_MARK):]
+    if data_fut is not None:
+        try:
+            data_fut.result()  # инфографика, заказанная параллельно с подбором
+        except Exception as exc:
+            log(f"AI-кадры: инфографика заранее не получилась ({exc}) — закажу вместе с остальными")
     if req.ai is not None and req.ai.active:
         # цифры/графики — в первую очередь; дальше дыры и слабые кадры (≤ ~12–15% ролика)
         from engine.slides.ai_fill import fill_slots
 
         progress(0.9, "AI-кадры: генерирую для кусков без хорошего живого кадра…")
         filled = fill_slots(filled, plan, req.ai, pool=pool, cancel=cancel, tag="beat",
-                            progress=lambda p, m: progress(0.9 + 0.04 * p, m))
+                            progress=lambda p, m: progress(0.9 + 0.04 * p, m), judge=judge, total=len(beats))
     holes = sum(1 for item in filled if item.get("fallback"))
     if holes:
         log(f"Дыр без своего кадра: {holes}, закрыты другими найденными кадрами (не соседними)")
@@ -602,11 +735,13 @@ def collect_strict_timeline(
             from engine.slides.ai_fill import fill_pool
 
             videos, images = fill_pool(videos, images, plan, req.ai, pool=pool, image_target=len(images),
-                                       video_target=len(videos), cancel=cancel, tag="late")
+                                       video_target=len(videos), cancel=cancel, tag="late", judge=judge,
+                                       moments=_late_moments(words, late_start))
         if not videos and not images:
             log("Пул для остального ролика пуст — повторяю кадры первых 2 минут вразбивку")
             videos = [dict(x) for x in filled if x.get("kind") == "video" and not x.get("fallback")]
             images = [dict(x) for x in filled if x.get("kind") == "image" and not x.get("fallback")]
+        add_beauty([*videos, *images], run_dir)
         loop_block = _late_slots(
             videos, images, late_start, late_dur,
             avoid_first=str(filled[-1].get("path")) if filled else None,
@@ -622,6 +757,9 @@ def collect_strict_timeline(
     else:
         loop_block = []
 
+    if judge is not None:
+        log(f"Проверка кадров LLM: {judge.calls} листов" + ("" if judge.enabled else " (выключилась по ходу — дальше был CLIP)"))
+        judge.close()
     payload = {
         "mode": "strict_sync",
         "variant": variant,
@@ -657,6 +795,7 @@ def collect_strict_timeline(
         lines.append(
             f"{item['start']:.1f}-{item['end']:.1f} [{phase}] {item['kind'].upper()} "
             f"fit={item.get('fit')}  {item.get('query')}  {item.get('text')}"
+            + (f"  [LLM: {item['judge']}]" if item.get("judge") else "")
         )
     if loop_block:
         lines.append("")
@@ -776,7 +915,9 @@ def _pick_mixed(
     вперемешку оба вида. Нашлось только слабое (или ничего) — пробуем второй
     вид и берём лучший из двух. Видео нет совсем — остаются фото.
     """
-    video_first = index % 2 == 0
+    # первые 2 минуты — видео в приоритете (пролёты, виды), фото — только если видео не нашлось
+    head = beat.start < NO_AI_SEC
+    video_first = head or index % 2 == 0
     order = (True, False) if video_first else (False, True)
     best: dict | None = None
     rejected = 0
@@ -785,6 +926,8 @@ def _pick_mixed(
             break
         if best is not None and beat.shot > 0:
             break  # второй кадр куска: слабый, но найденный — берём, второй вид не ищем (скорость)
+        if best is not None and head and best.get("kind") == "video":
+            break  # начало ролика: видео есть (пусть не идеальное) — фото не нужно
         if best is not None and mix.budget.phase == "hard":
             break  # время вышло — второй тип не ищем
         hit, rej = _try_kind(
@@ -855,9 +998,19 @@ def _try_kind(
     keep_any: bool,
     thematic: bool,
 ) -> tuple[dict | None, int]:
-    found = _candidates(clients, query, plan, prefer_video=prefer_video, index=index, mix=mix)
+    hook = beat.start < HOOK_SEC
+    # Глазами LLM смотрим только начало ролика (там решается, останется ли зритель): её ответ
+    # 20–45 с на кадр, а кадров в часовом ролике сотни. Дальше — быстрый подбор по запросам,
+    # привязанным к стране и эпохе (+ CLIP). AI-кадры проверяются всегда (ai_quality).
+    if hook and mix.judge is not None and mix.judge.enabled:
+        return _try_kind_judged(
+            http, clients, plan, beat, query, index=index, trials=trials, frames=frames, pool=pool,
+            prefer_video=prefer_video, mix=mix, tries=tries, thematic=thematic,
+        )
+    found = _candidates(clients, query, plan, prefer_video=prefer_video, index=index, mix=mix, hook=hook)
     rejected = 0
     best: tuple[tuple[int, int], int, Path, StockCandidate, int | None] | None = None
+    best_beauty = 0.0
     used = 0
     claimed: list[StockCandidate] = []
     kept: StockCandidate | None = None
@@ -923,24 +1076,28 @@ def _try_kind(
             overused = mix.stats.overused(cand.provider)
             # превью платного фотостока (водяной знак) — только если чистого не нашлось
             marked = bool((cand.meta or {}).get("watermark"))
-            if fit >= IMAGE_FIT_MIN and not overused and not marked and (sharp or phase != "normal"):
+            beauty = _beauty_of(trial, prefer_video) if hook else 0.0
+            # начало ролика: берём сразу, только если кадр и по смыслу, и красивый, и чёткий
+            pretty = not hook or (beauty >= HOOK_BEAUTY_OK and sharp)
+            if fit >= IMAGE_FIT_MIN and not overused and not marked and (sharp or phase != "normal") and pretty:
                 if best is not None:
                     best[2].unlink(missing_ok=True)
                 mix.stats.picked(cand.provider)
                 mix.add_look(fp)
                 kept = cand
-                return (
-                    _keep(
-                        trial, cand, fit, beat, query, index, pool, prefer_video, weak=False
-                    ),
-                    rejected,
-                )
-            # лучший из проверенных: оценка (минус 1 за перекос источника), при равенстве — 1080p
-            key = (fit - (1 if overused else 0) - (2 if marked else 0), 1 if sharp else 0)
+                slot = _keep(trial, cand, fit, beat, query, index, pool, prefer_video, weak=False)
+                if hook:
+                    slot["beauty"] = round(beauty, 4)
+                return slot, rejected
+            # лучший из проверенных: оценка (минус 1 за перекос источника; в начале ролика — плюс
+            # красота кадра), при равенстве — 1080p
+            bonus = round(beauty * HOOK_BEAUTY_WEIGHT) if hook else 0
+            key = (fit - (1 if overused else 0) - (2 if marked else 0) + bonus, 1 if sharp else 0)
             if (allow_weak or keep_any or fit >= IMAGE_FIT_MIN) and (best is None or key > best[0]):
                 if best is not None:
                     best[2].unlink(missing_ok=True)
                 best = (key, fit, trial, cand, fp)
+                best_beauty = beauty
             else:
                 rejected += 1
                 trial.unlink(missing_ok=True)
@@ -952,16 +1109,237 @@ def _try_kind(
         mix.stats.picked(cand.provider)
         mix.add_look(fp)
         kept = cand
-        log(f"Кусок {index + 1}: best fit={fit} {cand.provider} ({'video' if prefer_video else 'image'})")
-        return (
-            _keep(trial, cand, fit, beat, query, index, pool, prefer_video, weak=fit < IMAGE_FIT_MIN),
-            rejected,
-        )
+        log(f"Кусок {index + 1}: best fit={fit} {cand.provider} ({'video' if prefer_video else 'image'})"
+            + (f", красота {best_beauty:+.3f}" if hook else ""))
+        slot = _keep(trial, cand, fit, beat, query, index, pool, prefer_video, weak=fit < IMAGE_FIT_MIN)
+        if hook:
+            slot["beauty"] = round(best_beauty, 4)
+        return slot, rejected
     finally:
         # отбракованные кандидаты снова свободны для других кусков
         for c in claimed:
             if c is not kept:
                 mix.release(c)
+
+
+# проверка зрячей LLM: кандидатов на один лист (начало ролика — больше выбор)
+JUDGE_BATCH = 2
+JUDGE_BATCH_HOOK = 3
+# итоговая оценка (0–10) кадра, после которой второй лист не смотрим
+JUDGE_GOOD = 6.5
+# первые 30 секунд (PRIME_SEC): ищем дольше и строже — до кадра уровня «вау»
+PRIME_SEC = 30.0
+JUDGE_GOOD_PRIME = 8.0
+HEAD_QUALITY_MIN_PRIME = 8
+JUDGE_BEAT_CAP_PRIME = 240.0
+CANDIDATE_CAP_PRIME = 12
+# начало ролика: красота CLIP (±0.08) → ±1.2 балла к оценке LLM (она и так смотрит на качество)
+JUDGE_BEAUTY_WEIGHT = 15
+# потолок времени на кусок (с учётом ожидания LLM): дальше — лучшее из проверенного
+JUDGE_BEAT_CAP_HOOK = 150.0
+# первые минуты: съёмка не ниже этого (0–10), иначе место закрывает лучший кадр пула
+HEAD_QUALITY_MIN = 7
+# кадр пула, которым можно заменить слабый кадр начала
+POOL_QUALITY_FOR_HEAD = 8
+JUDGE_BEAT_CAP = 150.0
+
+
+@dataclass
+class _Trial:
+    cand: StockCandidate
+    path: Path
+    clip_fit: int
+    fp: int | None
+    sharp: bool
+    beauty: float = 0.0
+    shake: float | None = None
+
+
+def _try_kind_judged(
+    http: httpx.Client,
+    clients: dict,
+    plan: ThemePlan,
+    beat: Beat,
+    query: str,
+    *,
+    index: int,
+    trials: Path,
+    frames: Path,
+    pool: Path,
+    prefer_video: bool,
+    mix: MixState,
+    tries: int,
+    thematic: bool,
+) -> tuple[dict | None, int]:
+    """Кандидаты листами по 2–3: CLIP отсеивает совсем мимо, лучший выбирает LLM по смыслу
+    ролика, словам момента и качеству съёмки. Всё мимо (чужая страна, эпоха, брак) — следующий лист;
+    не нашлось — None (кусок добьют другим видом кадра, AI-кадром или повтором)."""
+    from engine.slides.judge import Verdict
+    from engine.slides.shake import SHAKY, shakiness
+
+    judge = mix.judge
+    hook = beat.start < HOOK_SEC
+    prime = beat.start < PRIME_SEC
+    found = _candidates(clients, query, plan, prefer_video=prefer_video, index=index, mix=mix, hook=hook)
+    batch_n = JUDGE_BATCH_HOOK if hook else JUDGE_BATCH
+    rejected = 0
+    used = 0
+    claimed: list[StockCandidate] = []
+    kept: StockCandidate | None = None
+    best: tuple[float, _Trial, Verdict] | None = None
+    queue = iter(found)
+    t0 = time.monotonic()
+    cap_sec = JUDGE_BEAT_CAP_PRIME if prime else JUDGE_BEAT_CAP_HOOK if hook else JUDGE_BEAT_CAP
+    cap_n = CANDIDATE_CAP_PRIME if prime else CANDIDATE_CAP
+
+    def take(k: int) -> list[StockCandidate]:
+        """Следующие k кандидатов (занятые этим куском)."""
+        nonlocal used, rejected
+        out: list[StockCandidate] = []
+        for cand in queue:
+            if used >= max(tries, cap_n):
+                break
+            if prefer_video and not candidate_is_landscape(cand.width, cand.height):
+                rejected += 1
+                continue
+            if not mix.claim(cand):
+                continue
+            claimed.append(cand)
+            used += 1
+            out.append(cand)
+            if len(out) >= k:
+                break
+        return out
+
+    def prepare(cand: StockCandidate) -> _Trial | None:
+        """Скачать и проверить файл (размер, повтор, CLIP). None — кандидат не годится."""
+        if mix.cancel is not None:
+            mix.cancel.check()
+        ext = ".mp4" if prefer_video else _ext_from_url(cand.download_url)
+        trial = trials / f"b{index:04d}_{cand.provider}_{cand.id}{ext}"
+        if not _fetch_candidate(http, clients, cand, trial, prefer_video=prefer_video, index=index) \
+                or not trial.is_file() or trial.stat().st_size < 1000:
+            trial.unlink(missing_ok=True)
+            return None
+        if prefer_video and not is_landscape(trial):
+            trial.unlink(missing_ok=True)
+            return None
+        height = _media_height(trial, video=prefer_video)
+        if height < MIN_HEIGHT:
+            log(f"skip low-res {trial.name} ({height}p < {MIN_HEIGHT}p)")
+            trial.unlink(missing_ok=True)
+            return None
+        fp = fingerprint(trial)
+        if mix.look_taken(fp):
+            trial.unlink(missing_ok=True)
+            return None
+        fit = _score_file(trial, plan, beat, query, frames=frames, prefer_video=prefer_video, thematic=thematic)
+        if fit is None:
+            trial.unlink(missing_ok=True)
+            return None
+        mix.stats.observe(cand.provider, fit)
+        t = _Trial(cand, trial, int(fit), fp, sharp=not prefer_video or height >= TARGET_HEIGHT)
+        if hook:
+            t.beauty = _beauty_of(trial, prefer_video)
+        if prefer_video:
+            t.shake = shakiness(trial)
+        return t
+
+    def next_batch() -> list[_Trial]:
+        """Лист кандидатов: скачиваются одновременно, а не по одному."""
+        nonlocal rejected
+        batch: list[_Trial] = []
+        while len(batch) < batch_n:
+            cands = take(batch_n - len(batch))
+            if not cands:
+                break
+            with ThreadPoolExecutor(max_workers=len(cands)) as ex:
+                for t in ex.map(prepare, cands):
+                    if t is None:
+                        rejected += 1
+                    else:
+                        batch.append(t)
+        return batch
+
+    try:
+        while True:
+            batch = next_batch()
+            if not batch:
+                break
+            verdicts = judge.rate([t.path for t in batch], moment=beat.text, query=query, thematic=thematic,
+                                  label=f"judge_{index + 1}", opening=hook, prime=prime)
+            by_clip = verdicts is None  # проверка недоступна — как раньше, по CLIP
+            for k, t in enumerate(batch):
+                v = Verdict(t.clip_fit, t.clip_fit, t.clip_fit) if by_clip else verdicts[k]
+                if not by_clip:
+                    log(f"Кусок {index + 1}: {t.cand.provider} {'видео' if prefer_video else 'фото'} — {v.note()}"
+                        + (f", тряска {t.shake:.1f}" if t.shake is not None and t.shake > SHAKY else ""))
+                head_min = HEAD_QUALITY_MIN_PRIME if prime else HEAD_QUALITY_MIN
+                if not by_clip and (not v.ok or (hook and v.quality < head_min)):
+                    # начало ролика: только сильная съёмка — слабое место закроет лучший кадр пула
+                    rejected += 1
+                    t.path.unlink(missing_ok=True)
+                    continue
+                # начало ролика: зрелищность важнее буквального смысла фразы
+                key = (0.3 * v.context + 0.15 * v.beat + 0.55 * v.quality) if hook and not by_clip else v.score
+                key -= 1 if mix.stats.overused(t.cand.provider) else 0
+                key -= 2 if (t.cand.meta or {}).get("watermark") else 0
+                key += 0.5 if t.sharp else 0
+                key += t.beauty * JUDGE_BEAUTY_WEIGHT if hook else 0
+                if t.shake is not None and t.shake > SHAKY:
+                    key -= 2 if t.shake > 2 * SHAKY else 1  # съёмка с рук — только если лучше нет
+                if best is None or key > best[0]:
+                    if best is not None:
+                        best[1].path.unlink(missing_ok=True)
+                    best = (key, t, v)
+                else:
+                    t.path.unlink(missing_ok=True)
+            good = JUDGE_GOOD_PRIME if prime else JUDGE_GOOD
+            if best is not None and ((best[2].quality if prime else best[2].score) >= good or by_clip):
+                break
+            if mix.budget.phase == "hard":
+                break
+            if time.monotonic() - t0 > cap_sec:
+                # на кусок ушло слишком много: берём лучшее из проверенного (или дыру закроет пул)
+                log(f"Кусок {index + 1}: {cap_sec / 60:.0f} мин на поиск вышли — дальше не ищу")
+                break
+        if best is None:
+            return None, rejected
+        _key, t, v = best
+        fit = int(round(v.score))
+        mix.stats.picked(t.cand.provider)
+        mix.add_look(t.fp)
+        kept = t.cand
+        slot = _keep(t.path, t.cand, fit, beat, query, index, pool, prefer_video, weak=fit < IMAGE_FIT_MIN)
+        slot["judge"] = v.note()
+        if not by_clip:
+            slot["quality"] = v.quality
+        if hook:
+            slot["beauty"] = round(t.beauty, 4)
+        return slot, rejected
+    finally:
+        for c in claimed:
+            if c is not kept:
+                mix.release(c)
+
+
+def _beauty_of(path: Path, video: bool) -> float:
+    """Красота кадра (CLIP): для видео — по кадру из середины клипа."""
+    from engine.slides.clip_ranker import beauty_scores
+
+    if not video:
+        return beauty_scores([path]).get(path, 0.0)
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        frame = Path(tmp) / "f.jpg"
+        subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-ss", "2", "-i", str(path), "-frames:v", "1", "-q:v", "3", str(frame)],
+                       capture_output=True, timeout=60)
+        if not frame.is_file():
+            subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-i", str(path), "-frames:v", "1", "-q:v", "3", str(frame)],
+                           capture_output=True, timeout=60)
+        return beauty_scores([frame]).get(frame, 0.0) if frame.is_file() else 0.0
 
 
 def _media_height(path: Path, *, video: bool) -> int:
@@ -1122,6 +1500,15 @@ class MixState:
     looks: list = field(default_factory=list)
     # выдача поиска по (источник, запрос, видео?): второй кадр того же куска не ищет заново
     searches: dict = field(default_factory=dict)
+    # проверка кадров зрячей LLM (None — только CLIP)
+    judge: object = None
+    # свои доли источников, % (None — по теме ролика)
+    custom: dict | None = None
+
+    def weights(self, *, video: bool) -> dict[str, int]:
+        from engine.slides.source_mix import custom_weights
+
+        return custom_weights(self.custom, video=video) if self.custom else base_weights(self.subject, video=video)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def look_taken(self, fp: int | None) -> bool:
@@ -1165,10 +1552,18 @@ def _candidates(
     prefer_video: bool,
     index: int,
     mix: MixState,
+    hook: bool = False,
 ) -> list[StockCandidate]:
     """Кандидаты со всех источников сразу: места делятся по долям темы и статистике."""
-    weights = mix.stats.adjusted(base_weights(mix.subject, video=prefer_video))
+    base = mix.weights(video=prefer_video)
+    if hook and prefer_video and mix.subject != "person" and "stocks" in base:
+        # начало ролика: стоковые видео — профессиональная съёмка (дроны, таймлапсы), YouTube CC — чаще любительская
+        base["stocks"] = base["stocks"] + 2
+    weights = mix.stats.adjusted(base)
     groups_on = _available_groups(clients)
+    if hook and mix.subject != "person":
+        # начало ролика: Google Images приносит флаги, графики, афиши, скриншоты — только стоки и YouTube
+        groups_on = [g for g in groups_on if g != "google"] or groups_on
     hero = _main_name(plan.context.characters).lower()
     if hero and hero in query.lower():
         # конкретного человека на Pexels/Pixabay/Unsplash нет — его места отдаём Google/YouTube/Wikimedia
@@ -1243,6 +1638,7 @@ def _plan_queries(
     cancel: CancelToken | None,
     *,
     all_beats: bool = False,
+    cta: list[tuple[float, float]] | None = None,
 ) -> list[str]:
     queries = [""] * len(beats)
     # Запрос на каждый кусок: видео-фаза всегда; «весь ролик» — и все остальные куски.
@@ -1251,11 +1647,11 @@ def _plan_queries(
     video_beats = [(i, b) for i, b in enumerate(beats) if (b.video_phase or all_beats) and b.shot == 0]
     ctx = json.dumps(plan.context.to_dict(), ensure_ascii=False)
 
-    def ask(start: int) -> tuple[list[tuple[int, Beat]], list[str]]:
+    def ask_chunk(chunk: list[tuple[int, Beat]], start: int) -> list[str]:
         if cancel:
             cancel.check()
-        chunk = video_beats[start : start + QUERY_BATCH]
-        lines = [f"{j}. {beat.text}" for j, (_i, beat) in enumerate(chunk, start=1)]
+        lines = [f"{j}. {beat.text}{' ★★' if beat.start < PRIME_SEC else ' ★' if beat.start < HOOK_SEC else ''}"
+                 for j, (_i, beat) in enumerate(chunk, start=1)]
         user = (
             "STORY CONTEXT:\n"
             + ctx
@@ -1266,7 +1662,18 @@ def _plan_queries(
         raw = client.complete(
             label=f"beat_queries_{start}", system=_QUERY_SYSTEM, user=user
         )
-        return chunk, _parse_queries(raw)
+        return _parse_queries(raw)
+
+    def ask(start: int) -> tuple[list[tuple[int, Beat]], list[str]]:
+        chunk = video_beats[start : start + QUERY_BATCH]
+        got = ask_chunk(chunk, start)
+        if len(got) != len(chunk) and len(chunk) > 4:
+            # ответов не столько, сколько кусков — запросы сдвинулись бы на чужие куски; пополам заново
+            log(f"Запросы кадров: на {len(chunk)} кусков пришло {len(got)} ответов — переспрашиваю половинами")
+            mid = len(chunk) // 2
+            a, b = ask_chunk(chunk[:mid], start), ask_chunk(chunk[mid:], start + mid)
+            got = [*a[:mid], *[""] * (mid - len(a[:mid])), *b]
+        return chunk, got
 
     # пачки независимы — спрашиваем LLM одновременно, ответы те же
     starts = list(range(0, len(video_beats), QUERY_BATCH))
@@ -1283,22 +1690,29 @@ def _plan_queries(
     for i, beat in enumerate(beats):
         if beat.shot > 0 and i > 0:
             queries[i] = queries[i - 1]
-        if queries[i].strip().upper() == "CTA" or is_cta(beat.text):
+        if queries[i].strip().upper() == "CTA" or is_cta(beat.text) or in_cta(beat, cta or []):
             # призыв подписаться — не буквально, а видео по теме всего ролика
             queries[i] = CTA_MARK + _theme_video_query(plan, i, fallback=fallback)
             log(f"Кусок {i + 1}: призыв подписаться — беру видео по теме ролика")
             continue
         q = queries[i].strip()
+        if beat.start < HOOK_SEC and (q.upper().startswith("DATA:") or q.startswith(DATA_MARK)):
+            # начало ролика: вместо графика — зрелищный общий план места
+            queries[i] = _theme_video_query(plan, i, fallback=fallback)
+            continue
         if q.upper().startswith("DATA:") or q.startswith(DATA_MARK):
             desc = q.split(":", 1)[1].strip() if q.upper().startswith("DATA:") else q[len(DATA_MARK):]
             queries[i] = DATA_MARK + (desc or fallback)
             continue
-        if q and is_data(beat.text):
+        if q and is_data(beat.text) and beat.start >= HOOK_SEC:
+            # начало ролика — без инфографики: AI-кадров там нет, а графики не цепляют зрителя
             queries[i] = DATA_MARK + q
             continue
         if queries[i]:
             continue
-        if beat.video_phase:
+        if beat.start < HOOK_SEC:
+            queries[i] = _theme_video_query(plan, i, fallback=fallback)
+        elif beat.video_phase:
             queries[i] = fallback
             log(f"Кусок {i + 1}: video-запрос не пришёл, беру тему")
         else:
@@ -1330,6 +1744,127 @@ def _parse_queries(raw: str) -> list[str]:
     return [str(item or "").strip() for item in raw_list]
 
 
+def _drop_like_head(videos: list[dict], images: list[dict], slots: list[dict | None], run_dir: Path) -> tuple[list[dict], list[dict]]:
+    """Пул собирался одновременно с началом: его кадры, совпавшие с кадрами начала
+    (тот же клип или та же картинка с другого сайта), убираем — иначе повтор в первые минуты."""
+    head = [x for x in slots if x]
+    keys = {(str(x.get("provider") or ""), str(x.get("id") or "")) for x in head}
+    looks = [fingerprint(run_dir / str(x.get("path") or "")) for x in head]
+    used = {str(x.get("path") or "") for x in head}
+
+    def keep(items: list[dict]) -> list[dict]:
+        out = []
+        for it in items:
+            path = run_dir / str(it.get("path") or "")
+            if str(it.get("path") or "") in used:
+                continue  # этот файл уже стоит в начале (продолжение после сбоя) — не удалять
+            if (str(it.get("provider") or ""), str(it.get("id") or "")) in keys or seen(fingerprint(path), looks):
+                path.unlink(missing_ok=True)
+                continue
+            out.append(it)
+        return out
+
+    v, i = keep(videos), keep(images)
+    if len(v) + len(i) < len(videos) + len(images):
+        log(f"Пул: убрал {len(videos) + len(images) - len(v) - len(i)} кадров, уже стоящих в начале ролика")
+    return v, i
+
+
+def _fill_head_from_pool(beats: list[Beat], slots: list[dict | None], videos: list[dict], images: list[dict], run_dir: Path) -> None:
+    """Куски начала без своего кадра — лучшими кадрами пула (видео вперёд, по красоте), а не повтором
+    кадров начала. Взятые убираются из пула: в блоке после 2 минут они не повторятся."""
+    holes = [i for i, b in enumerate(beats) if slots[i] is None and b.start < HOOK_SEC]
+    if not holes or not (videos or images):
+        return
+    add_beauty([*videos, *images], run_dir)
+
+    def rank(it: dict) -> tuple[float, float]:
+        return (head_rank(it), float(it.get("score") or 0))
+
+    order = [("video", it) for it in sorted(videos, key=rank, reverse=True)]
+    order += [("image", it) for it in sorted(images, key=rank, reverse=True)]
+    n = 0
+    for i, (kind, it) in zip(holes, order):
+        beat = beats[i]
+        slots[i] = {
+            "kind": kind, "path": it.get("path"), "start": round(beat.start, 3), "end": round(beat.end, 3),
+            "duration": round(beat.duration, 3), "query": it.get("query", ""), "text": beat.text[:240],
+            "provider": it.get("provider", ""), "id": it.get("id", ""),
+            "source_title": it.get("source_title", ""), "source_author": it.get("source_author", ""),
+            "fit": int(round(float(it.get("score") or 0) * 10)), "score": float(it.get("score") or 0),
+            "weak": False, "fallback": False, "phase": "video", "beauty": it.get("beauty", 0.0), "from_pool": True,
+            "quality": it.get("quality"),
+        }
+        (videos if kind == "video" else images).remove(it)
+        n += 1
+    log(f"Начало ролика: {n} кусков без своего кадра — лучшие кадры пула вместо повторов")
+
+
+def _head_weak(slot: dict | None) -> bool:
+    """Кадр начала, который стоит заменить: фото или слабая по оценке LLM съёмка."""
+    if slot is None:
+        return True
+    q = slot.get("quality")
+    return slot.get("kind") != "video" or (isinstance(q, (int, float)) and q < HEAD_QUALITY_MIN)
+
+
+def _upgrade_head(beats: list[Beat], slots: list[dict | None], videos: list[dict], run_dir: Path) -> None:
+    """Страховка первых минут: фото и слабые по съёмке кадры начала — на лучшие видео пула
+    (съёмка от POOL_QUALITY_FOR_HEAD). Взятые видео уходят из пула: после 2 минут не повторятся."""
+    weak = [i for i, b in enumerate(beats) if b.start < HEAD_SEC and slots[i] is not None and _head_weak(slots[i])]
+    strong = sorted(
+        (v for v in videos if isinstance(v.get("quality"), (int, float)) and v["quality"] >= POOL_QUALITY_FOR_HEAD),
+        key=head_rank, reverse=True,
+    )
+    if not weak or not strong:
+        return
+    # сначала самые слабые места начала
+    weak.sort(key=lambda i: (slots[i].get("kind") == "video", float(slots[i].get("quality") or 0)))
+    n = 0
+    for i, it in zip(weak, strong):
+        old = slots[i]
+        beat = beats[i]
+        slots[i] = {
+            **old, "kind": "video", "path": it.get("path"), "query": it.get("query", ""), "provider": it.get("provider", ""),
+            "id": it.get("id", ""), "source_title": it.get("source_title", ""), "source_author": it.get("source_author", ""),
+            "fit": int(round(float(it.get("score") or 0) * 10)), "score": float(it.get("score") or 0),
+            "quality": it.get("quality"), "beauty": it.get("beauty", 0.0), "from_pool": True, "judge": "",
+            "start": round(beat.start, 3), "end": round(beat.end, 3), "duration": round(beat.duration, 3),
+        }
+        videos.remove(it)
+        n += 1
+    log(f"Начало ролика: {n} фото/слабых кадров заменил лучшими видео пула (съёмка ≥ {POOL_QUALITY_FOR_HEAD})")
+
+
+def _fill_head_holes_by_theme(http, clients, plan: ThemePlan, beats: list[Beat], slots: list[dict | None],
+                              queries: list[str], *, trials: Path, frames: Path, pool: Path, mix: MixState) -> None:
+    """«Весь ролик» (пула нет): куски начала без своего кадра — видео по теме ролика, а не повтор."""
+    holes = [i for i, b in enumerate(beats) if b.start < HEAD_SEC and _head_weak(slots[i])]
+    if not holes:
+        return
+    log(f"Начало ролика: {len(holes)} кусков без своего кадра или со слабым кадром — ищу видео по теме ролика")
+
+    def one(i: int) -> tuple[int, dict | None]:
+        hit, _rej = _try_kind(
+            http, clients, plan, beats[i], _theme_video_query(plan, i, fallback=queries[i]),
+            index=i, trials=trials, frames=frames, pool=pool, prefer_video=True, mix=mix,
+            tries=VIDEO_TRIES, allow_weak=True, keep_any=True, thematic=True,
+        )
+        return i, hit
+
+    # параллельно: ждём в основном ответа LLM, а не процессор
+    with ThreadPoolExecutor(max_workers=min(16, len(holes))) as ex:
+        for i, hit in ex.map(one, holes):
+            if hit is None:
+                continue
+            if slots[i] is not None:
+                if _head_weak(hit) and float(hit.get("quality") or 0) <= float(slots[i].get("quality") or 0):
+                    _drop_slot(pool, hit, mix)  # новое не лучше прежнего
+                    continue
+                _drop_slot(pool, slots[i], mix)
+            slots[i] = hit
+
+
 def _fill_holes(beats: list[Beat], slots: list[dict | None]) -> list[dict]:
     """Дыры (кусок без своего кадра) закрываем уже найденным кадром.
 
@@ -1358,10 +1893,14 @@ def _fill_holes(beats: list[Beat], slots: list[dict | None]) -> list[dict]:
             continue
         neighbours = {media(resolved[i - 1]) if i > 0 else None, media(resolved[i + 1]) if i + 1 < len(beats) else None}
         donor: dict | None = None
-        for allow_neighbour in (False, True):
+        # начало ролика: повтор кадра оттуда же бросается в глаза — сначала берём кадры из дальних частей
+        late_only = beat.start < HOOK_SEC and any(float(x.get("start") or 0) >= HOOK_SEC for x in originals)
+        for far, allow_neighbour in ((late_only, False), (False, False), (False, True)):
             for kind in kinds_for(beat):
                 pool: dict[str, dict] = {}
                 for slot in originals:
+                    if far and float(slot.get("start") or 0) < HOOK_SEC:
+                        continue
                     if slot.get("kind") == kind and (allow_neighbour or media(slot) not in neighbours):
                         pool.setdefault(str(slot.get("path")), slot)
                 if pool:

@@ -32,9 +32,18 @@ BASE_URL = "https://api.royaltechno.cc"
 # доля сгенерированных кадров в ролике: «примерно 10–15%» — не больше 15, цель 12
 AI_SHARE = 0.12
 AI_SHARE_MAX = 0.15
+# траты на AI-кадры одного ролика: по умолчанию 40 центов, жёсткий потолок 50 — больше нельзя даже вручную
+AI_BUDGET_DEFAULT_CENTS = 40
+AI_BUDGET_MAX_CENTS = 50
 # сколько ждём генерацию на весь ролик; не успело — остаются живые кадры (задачи отменяем)
 WAIT_SEC = 25 * 60
 MAX_IN_FLIGHT = 20
+# сервис перегружен: за столько минут не готово ни одной задачи — отменяем всё (деньги возвращаются)
+STALL_SEC = 10 * 60
+# столько сбоев сервиса подряд (timeout, перегрузка) без единого успеха — новые задачи не шлём
+OVERLOAD_FAILS = 4
+_UPSTREAM_CODES = {"timeout", "rate_limited", "provider_error", "internal_error"}
+OVERLOADED = "сервис RoyalTechno перегружен"
 POLL_SEC = {"image": 5.0, "video": 10.0}
 STATE_NAME = "ai_jobs.json"
 _RES_SUFFIX = re.compile(r"-(480p|720p|1080p|2k|4k)$")
@@ -62,6 +71,10 @@ FALLBACK_MODELS: list[dict] = [
     {"model_id": "nano-banana-2-2k", "api_name": "nano-banana-2", "display_name": "Nano Banana 2.1 2K", "maker": "Google", "media_type": "image", "unit": "per_image", "price_cents": 4, "variable_duration": False},
     {"model_id": "nano-banana-2-4k", "api_name": "nano-banana-2", "display_name": "Nano Banana 2.1 4K", "maker": "Google", "media_type": "image", "unit": "per_image", "price_cents": 6, "variable_duration": False},
     {"model_id": "seedream-4.6", "api_name": "seedream-4.6", "display_name": "Seedream 4.6", "maker": "ByteDance", "media_type": "image", "unit": "per_image", "price_cents": 3, "variable_duration": False},
+    {"model_id": "gpt-image-2", "api_name": "gpt-image-2", "display_name": "GPT Image 2", "maker": "OpenAI", "media_type": "image", "unit": "per_image", "price_cents": 3, "variable_duration": False},
+    {"model_id": "gpt-image-2-4k", "api_name": "gpt-image-2", "display_name": "GPT Image 2 4K", "maker": "OpenAI", "media_type": "image", "unit": "per_image", "price_cents": 6, "variable_duration": False},
+    {"model_id": "gpt-image-2.5", "api_name": "gpt-image-2.5", "display_name": "GPT Image 2.5", "maker": "OpenAI", "media_type": "image", "unit": "per_image", "price_cents": 3, "variable_duration": False},
+    {"model_id": "gpt-image-2.5-4k", "api_name": "gpt-image-2.5", "display_name": "GPT Image 2.5 4K", "maker": "OpenAI", "media_type": "image", "unit": "per_image", "price_cents": 6, "variable_duration": False},
 ]
 # длина клипа: наши видеокуски ≤ 6 с — берём самый короткий разрешённый вариант (дешевле)
 _CLIP_SEC = {"omni-flash": 6, "grok-imagine-1.5": 6, "grok-imagine-1.5-720p": 6}
@@ -148,8 +161,10 @@ def model_options() -> dict[str, list[dict]]:
     return out
 
 
-def entry(model_id: str) -> dict | None:
-    return next((e for e in catalog() if e.get("model_id") == model_id), None)
+def entry(model_id: str, *, offline: bool = False) -> dict | None:
+    """offline — без запроса в сеть: прайс из кеша, а нет его — из документации (для подписей в интерфейсе)."""
+    models = (_catalog_cache[1] if _catalog_cache else FALLBACK_MODELS) if offline else catalog()
+    return next((e for e in models if e.get("model_id") == model_id), None)
 
 
 # ---------- клиент API ----------
@@ -162,6 +177,19 @@ class AiConfig:
     api_key: str
     image_model: str = ""
     video_model: str = ""
+    # потолок трат на AI-кадры одного ролика, центы (вместе с повторными генерациями)
+    budget_cents: int = AI_BUDGET_DEFAULT_CENTS
+    # доля AI-кадров в ролике (цель) и потолок ради кусков с цифрами
+    share: float = AI_SHARE
+    share_max: float = AI_SHARE_MAX
+
+    def __post_init__(self) -> None:
+        self.budget_cents = max(0, min(AI_BUDGET_MAX_CENTS, int(self.budget_cents)))
+
+    def cost(self, kind: str) -> int:
+        """Цена одного кадра этого вида в центах по прайсу (не знаем — 2 цента)."""
+        e = entry(self.video_model if kind == "video" else self.image_model)
+        return price_of(e) if e else 2
 
     @property
     def active(self) -> bool:
@@ -275,6 +303,27 @@ def _explain(resp: httpx.Response) -> str:
     return f"{text} — {hint}" if hint else text
 
 
+def balance_cents(api_key: str, *, timeout: float = 10.0) -> int | None:
+    """Баланс RoyalTechno в центах. None — узнать не вышло (нет связи, ключ не тот)."""
+    import os
+
+    if os.environ.get("STORY_VIDEO_ROYAL_OFFLINE"):  # тесты в сеть не ходят
+        return None
+    client = RoyalClient(api_key)
+    try:
+        client._http.timeout = httpx.Timeout(timeout)
+        acc = client.account()
+    except Exception as exc:  # noqa: BLE001 — проверка необязательна
+        log(f"RoyalTechno: баланс узнать не вышло ({str(exc)[:120]})")
+        return None
+    finally:
+        client.close()
+    if acc.get("balance_usd_cents") is not None:
+        return int(acc["balance_usd_cents"])
+    m = re.search(r"[\d.]+", str(acc.get("balance_usd") or ""))
+    return round(float(m.group(0)) * 100) if m else None
+
+
 def ping(api_key: str) -> str:
     client = RoyalClient(api_key)
     try:
@@ -379,6 +428,8 @@ def generate(
 
     Задачи и их id пишутся в state_file сразу после отправки: после сбоя «Продолжить»
     дожидается тех же задач (и Idempotency-Key тот же), второй раз не платим.
+    Деньги списываются при отправке; упавшие и отменённые задачи RoyalTechno возвращает —
+    такие помечаем failed (в бюджет ролика не идут, при повторе — новая задача).
     Возвращает задачи с result (файл) или error.
     """
     if not tasks:
@@ -411,6 +462,14 @@ def generate(
         deadline = time.monotonic() + wait_sec
         stop_submit = False
         done = 0
+        started = time.monotonic()
+        succeeded = 0
+        upstream_fails = 0  # сбои сервиса подряд после последнего успеха
+        overloaded = False
+
+        def mark_failed(key: str) -> None:
+            state.setdefault(key, {})["failed"] = True
+            save()
 
         def model_for(t: GenTask) -> dict | None:
             return entry(cfg.image_model if t.kind == "image" else cfg.video_model)
@@ -419,7 +478,7 @@ def generate(
             if cancel is not None:
                 cancel.check()
             # отправка: окно в полёте ≤ window; уже отправленные (после сбоя) — сразу в опрос
-            while todo and len(flying) < window and not stop_submit:
+            while todo and len(flying) < window and not stop_submit and not overloaded:
                 t = todo.pop(0)
                 rec = state.get(t.key)
                 if rec and rec.get("prompt") == t.prompt and rec.get("done") and t.dest.is_file():
@@ -427,7 +486,7 @@ def generate(
                     t.meta.update(job_id=rec.get("job_id"))
                     done += 1
                     continue
-                if rec and rec.get("prompt") == t.prompt and rec.get("job_id"):
+                if rec and rec.get("prompt") == t.prompt and rec.get("job_id") and not rec.get("failed"):
                     flying[rec["job_id"]] = t
                     next_poll[rec["job_id"]] = 0.0
                     continue
@@ -442,7 +501,9 @@ def generate(
                 secs = clip_seconds(e)
                 if secs:
                     inp["duration_sec"] = secs
-                idem = (rec or {}).get("idempotency") if rec and rec.get("prompt") == t.prompt else None
+                # упавшая задача: тот же ключ вернул бы её же — нужен новый
+                same = rec and rec.get("prompt") == t.prompt and not rec.get("failed")
+                idem = (rec or {}).get("idempotency") if same else None
                 idem = idem or str(uuid.uuid4())
                 state[t.key] = {"prompt": t.prompt, "idempotency": idem, "kind": t.kind}
                 save()
@@ -471,6 +532,11 @@ def generate(
                 next_poll[job["id"]] = time.monotonic() + POLL_SEC[t.kind] * poll_scale
 
             if not flying:
+                if overloaded:
+                    for t in todo:
+                        t.error = OVERLOADED
+                    todo.clear()
+                    break
                 if todo and stop_submit:
                     time.sleep(5 * poll_scale)
                     stop_submit = False
@@ -492,34 +558,53 @@ def generate(
                 if status == "succeeded":
                     url = _output_url(job)
                     t.dest.parent.mkdir(parents=True, exist_ok=True)
-                    if url and client.download(url, t.dest):
+                    if url and client.download(url, t.dest) and (t.kind != "video" or strip_audio(t.dest)):
                         t.result = t.dest
                         t.meta.update(job_id=jid, cost_cents=job.get("cost_usd_cents"))
-                        state.setdefault(t.key, {})["done"] = True
+                        rec = state.setdefault(t.key, {})
+                        rec["done"] = True
+                        if job.get("cost_usd_cents") is not None:
+                            rec["cost"] = int(job["cost_usd_cents"])  # реально списано
                         save()
                     else:
                         t.error = "готовый файл не скачался"
                     del flying[jid]
                     stop_submit = False
                     done += 1
+                    succeeded += 1
+                    upstream_fails = 0
                     if progress:
                         progress(done / len(tasks), f"AI-кадры: готово {done}/{len(tasks)}")
                 elif status in ("failed", "canceled", "cancelled"):
                     err = job.get("error") or {}
                     t.error = str(err.get("message") or status)
                     log(f"AI-кадры: не сгенерировалось ({t.error})")
+                    mark_failed(t.key)  # деньги вернулись
+                    if err.get("code") in _UPSTREAM_CODES:
+                        upstream_fails += 1
+                        if upstream_fails >= OVERLOAD_FAILS and not overloaded:
+                            overloaded = True
+                            log(f"AI-кадры: {OVERLOADED} ({upstream_fails} сбоев подряд) — новые задачи не отправляю, "
+                                "там живые кадры")
                     del flying[jid]
                     stop_submit = False
                     done += 1
                 else:
                     next_poll[jid] = now + POLL_SEC[t.kind] * poll_scale
-            if time.monotonic() > deadline:
-                log(f"AI-кадры: время вышло, отменяю {len(flying)} незавершённых — остаются живые кадры")
+            stalled = not succeeded and time.monotonic() - started > STALL_SEC * poll_scale
+            if time.monotonic() > deadline or stalled:
+                why = OVERLOADED if stalled else "не успело сгенерироваться"
+                if stalled:
+                    log(f"AI-кадры: за {STALL_SEC // 60} мин не готово ни одного кадра — {OVERLOADED}, "
+                        f"отменяю {len(flying)} задач (деньги вернутся), остаются живые кадры")
+                else:
+                    log(f"AI-кадры: время вышло, отменяю {len(flying)} незавершённых — остаются живые кадры")
                 for jid, t in flying.items():
-                    client.cancel(jid)
-                    t.error = "не успело сгенерироваться"
+                    client.cancel(jid)  # отмена возвращает деньги
+                    mark_failed(t.key)
+                    t.error = why
                 for t in todo:
-                    t.error = "не успело сгенерироваться"
+                    t.error = why
                 break
             time.sleep(max(0.01, min(1.0, min(POLL_SEC.values()) * poll_scale / 5)))
     finally:
@@ -527,6 +612,29 @@ def generate(
     ok = sum(1 for t in tasks if t.result)
     log(f"AI-кадры: сгенерировано {ok} из {len(tasks)}")
     return tasks
+
+
+def strip_audio(path: Path) -> bool:
+    """Убрать звук из сгенерированного видео: в ролике звучат только голос (и музыка).
+
+    Картинка копируется без пережатия, качество не меняется.
+    """
+    import subprocess
+
+    from engine.slides.ffmpeg_util import find_ffmpeg
+
+    tmp = path.with_name(path.stem + ".silent" + path.suffix)
+    proc = subprocess.run(
+        [find_ffmpeg(), "-v", "error", "-y", "-i", str(path), "-map", "0:v:0", "-c:v", "copy", "-an", str(tmp)],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not tmp.is_file() or tmp.stat().st_size < 1000:
+        tmp.unlink(missing_ok=True)
+        log(f"AI-кадры: не удалось убрать звук из {path.name} ({proc.stderr[-200:]})")
+        return False
+    tmp.replace(path)
+    return True
 
 
 def _output_url(job: dict) -> str:

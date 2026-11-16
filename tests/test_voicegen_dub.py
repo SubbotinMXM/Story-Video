@@ -282,7 +282,7 @@ class DubRenderTests(unittest.TestCase):
             folder = render_dub(self._req(), self.track)
         self.assertTrue(folder.name.endswith("(EN)"), folder.name)
         self.assertAlmostEqual(probe_duration(folder / "ролик.mp4"), 8.0, delta=0.4)
-        self.assertIn("Hello world.", (folder / "субтитры.srt").read_text(encoding="utf-8"))
+        self.assertFalse((folder / "субтитры.srt").exists(), "субтитры в папку не нужны")
         self.assertEqual((folder / "сценарий.txt").read_text(encoding="utf-8"), "Hello world.")
         self.assertFalse((self.track.audio.parent / "final.mp4").exists(), "копия ролика уже на Desktop")
 

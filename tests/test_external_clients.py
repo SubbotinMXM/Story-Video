@@ -117,6 +117,9 @@ class StockClientsTests(unittest.TestCase):
         seen: dict = {}
 
         def handler(req: httpx.Request) -> httpx.Response:
+            if req.url.path.endswith("/videos"):
+                ok = {"id": "ok1", "status": {"license": "creativeCommon"}, "contentDetails": {"licensedContent": False}, "snippet": {}}
+                return httpx.Response(200, json={"items": [ok]})
             seen.update(dict(req.url.params))
             items = [
                 {"id": {"videoId": "ok1"}, "snippet": {"title": "City &amp; lights", "channelTitle": "Drone Guy", "thumbnails": {}}},
@@ -251,7 +254,7 @@ class LlmPlanningTests(unittest.TestCase):
         self.assertEqual(q[35], "ti", "без «весь ролик» после 2 мин — запрос темы")
         q_full = sm._plan_queries(llm, plan, beats, None, all_beats=True)
         self.assertEqual(q_full[35], "q35")
-        self.assertEqual(sum(1 for l in llm.labels if l.startswith("beat_queries")), 2 + 3)
+        self.assertEqual(sum(1 for l in llm.labels if l.startswith("beat_queries")), 1 + 2, "по 32 куска на запрос")
 
 
 class FullPipelineOrchestrationTests(unittest.TestCase):
@@ -373,3 +376,29 @@ class WatermarkStockFilterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LlmQuotaTests(unittest.TestCase):
+    def test_quota_error_is_readable_and_not_retried(self) -> None:
+        import httpx
+        import openai
+
+        from engine.slides import llm_client
+        from server.jobs import is_transient
+
+        calls = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(403, json={"error": {"message": "This API key has reached its token quota.",
+                                                       "type": "insufficient_quota", "code": "quota_exceeded"}})
+
+        client = llm_client.LLMClient("k", "m", "https://apistore.example/v1")
+        client._http = httpx.Client(transport=httpx.MockTransport(handler))
+        client.client = openai.OpenAI(api_key="k", base_url="https://apistore.example/v1", http_client=client._http, max_retries=0)
+        with self.assertRaises(llm_client.LLMQuotaError) as ctx:
+            client.complete(label="t", system="s", user="u")
+        self.assertIn("закончилась квота", str(ctx.exception))
+        self.assertIn("apistore.example", str(ctx.exception))
+        self.assertEqual(len(calls), 1, "квоту не ждём и не повторяем")
+        self.assertFalse(is_transient(ctx.exception), "автоповтор очереди тоже бесполезен")
