@@ -1,16 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink, Flame, Search, Trash2, X } from "lucide-react";
 import { useJobs, useToasts } from "../lib/store";
-import { Badge, Button, Card, Disclosure, Field, PageHeader, Select } from "../components/ui";
+import { Badge, Button, Card, Disclosure, Field, NumberInput, PageHeader, Select } from "../components/ui";
 
 type Niche = { name: string; why: string; keywords: string[] };
 type Channel = {
   id: string; title: string; url: string; subs: number; videos: number; age_days: number;
   best_title: string; best_url: string; best_views: number; ratio: number; recent_median: number;
-  recent_count: number; hit_share?: number; per_week: number; avg_minutes: number; anomaly: boolean;
+  recent_count: number; hit_share?: number; hit_count?: number; top_views?: number; per_week: number; avg_minutes: number; anomaly: boolean;
 };
 type Run = {
   id: string; niche: string; keywords?: string[]; subniches?: string[]; queries: string[]; at: number;
+  filters?: { max_subs?: number };
   stats: { videos: number; channels: number; checked?: number; passed: number; dropped?: Record<string, number> };
   channels: Channel[];
 };
@@ -25,12 +26,25 @@ const DROP_LABELS: Record<string, string> = {
   short: "короткие ролики (Shorts)",
   hidden: "скрыто число подписчиков",
   small_views: "мало просмотров у найденного ролика",
+  big: "больше подписчиков, чем потолок",
   skew: "просмотры ниже числа подписчиков",
-  unstable: "нет стабильных 100 тыс.+",
-  low_ratio: "просмотры меньше чем ×3 к подписчикам",
+  unstable: "ни стабильных 30 тыс.+, ни залётов",
+  low_ratio: "просмотры меньше чем ×3 к подписчикам, залётов нет",
   few_long: "мало длинных роликов",
   not_checked: "не дошла очередь разбора",
 };
+
+const MAX_SUBS_KEY = "niches-max-subs";
+const MAX_SUBS_DEFAULT = 10000;
+
+function savedMaxSubs(): number {
+  try {
+    const v = Number(localStorage.getItem(MAX_SUBS_KEY));
+    return Number.isFinite(v) && v > 0 ? v : MAX_SUBS_DEFAULT;
+  } catch {
+    return MAX_SUBS_DEFAULT;
+  }
+}
 
 const num = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)} млн` : n >= 1e4 ? `${Math.round(n / 1e3)} тыс.` : n.toLocaleString("ru-RU"));
 const when = (ts: number) => new Date(ts * 1000).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -49,11 +63,20 @@ function dropped(r: Run): string[] {
     .map(([k, n]) => `${DROP_LABELS[k]} — ${n}`);
 }
 
-/** Поиск ниш: ниша из списка или свои ключевые слова → каналы-ориентиры (молодые, стабильно много просмотров). */
+/** Поиск ниш: ниша из списка или свои ключевые слова → каналы-ориентиры (небольшие, много просмотров: стабильно или залётами). */
 export function NichesPage({ active }: { active: boolean }) {
   const { enqueue, jobs } = useJobs();
   const { push } = useToasts();
   const [language, setLanguage] = useState("ru");
+  const [maxSubs, setMaxSubsState] = useState(savedMaxSubs);
+  const setMaxSubs = (v: number) => {
+    setMaxSubsState(v);
+    try {
+      localStorage.setItem(MAX_SUBS_KEY, String(v));
+    } catch {
+      /* без запоминания */
+    }
+  };
   const [evergreen, setEvergreen] = useState<Niche[]>([]);
   const [picked, setPicked] = useState("");
   const [keywords, setKeywords] = useState<string[]>([]);
@@ -111,7 +134,7 @@ export function NichesPage({ active }: { active: boolean }) {
 
   const run = async () => {
     setBusy(true);
-    await enqueue([{ kind: "niches", params: { niche: picked, keywords: all, filters: { language } } }]);
+    await enqueue([{ kind: "niches", params: { niche: picked, keywords: all, filters: { language, max_subs: maxSubs } } }]);
     setDraft("");
     setBusy(false);
   };
@@ -138,7 +161,7 @@ export function NichesPage({ active }: { active: boolean }) {
     <div className="page">
       <PageHeader
         title="Поиск ниш"
-        subtitle="Каналы-ориентиры: ролики стабильно набирают сотни тысяч просмотров — в разы больше, чем у канала подписчиков. До 15 каналов — формат оцениваешь сам."
+        subtitle="Каналы-ориентиры: небольшие каналы, ролики которых набирают десятки и сотни тысяч просмотров — в разы больше, чем у канала подписчиков. До 15 каналов — формат оцениваешь сам."
       />
       <div className="niche-layout">
         <div className="stack">
@@ -172,9 +195,14 @@ export function NichesPage({ active }: { active: boolean }) {
                     />
                   </div>
                 </Field>
-                <Field label="Язык аудитории">
-                  <Select value={language} onChange={setLanguage} options={LANGS} />
-                </Field>
+                <div className="niche-side">
+                  <Field label="Язык аудитории">
+                    <Select value={language} onChange={setLanguage} options={LANGS} />
+                  </Field>
+                  <Field label="Подписчиков до" hint={`с запасом: до ${Math.round(maxSubs * 1.15).toLocaleString("ru-RU")}`}>
+                    <NumberInput value={maxSubs} min={100} max={10000000} step={1000} onChange={setMaxSubs} width={180} />
+                  </Field>
+                </div>
               </div>
               <Field label={`Вечнозелёные ниши (${evergreen.length})`}>
                 <div className="niche-grid" role="radiogroup">
@@ -209,9 +237,10 @@ export function NichesPage({ active }: { active: boolean }) {
           </div>
           <Disclosure id="niche-rules" summary="Какие каналы подходят">
             <ul className="muted small niche-rules">
-              <li>Стабильно много просмотров: медиана последних длинных роликов — от 100 тыс.</li>
-              <li>Просмотры сильно перевешивают подписчиков: медиана минимум в 3 раза больше числа подписчиков.</li>
-              <li>Выше в списке — у кого больше просмотров на подписчика, стабильнее просмотры и меньше роликов на канале.</li>
+              <li>Небольшой канал: подписчиков не больше потолка (по умолчанию 10 тыс.; на 15% выше — ещё берём, вдвое — уже нет).</li>
+              <li>Стабильно много просмотров: медиана последних длинных роликов — от 30 тыс. и минимум в 3 раза больше подписчиков.</li>
+              <li>Или канал «стреляет»: за ~полгода минимум 2 ролика набрали от 50 тыс. — в 10+ раз больше подписчиков.</li>
+              <li>Выше в списке — у кого больше просмотров на подписчика, больше залётов и меньше роликов на канале.</li>
               <li>Только длинные ролики (от 5 минут), Shorts не считаются. Возраст канала и сложность формата не учитываются.</li>
             </ul>
           </Disclosure>
@@ -272,7 +301,13 @@ export function NichesPage({ active }: { active: boolean }) {
                   <span><b>{num(c.subs)}</b> подп.</span>
                   <span>медиана <b>{num(c.recent_median)}</b></span>
                   <span><b>×{c.ratio}</b> просм./подп.</span>
-                  {c.hit_share != null && <span><b>{Math.round(c.hit_share * 100)}%</b> роликов 100 тыс.+</span>}
+                  {c.hit_count != null ? (
+                    <span title="Длинные ролики за ~полгода: от 50 тыс. просмотров и в 10+ раз больше подписчиков">
+                      залётов <b>{c.hit_count}</b>{c.top_views ? <>, лучший <b>{num(c.top_views)}</b></> : null}
+                    </span>
+                  ) : (
+                    c.hit_share != null && <span><b>{Math.round(c.hit_share * 100)}%</b> роликов 100 тыс.+</span>
+                  )}
                   <span>канал <b>{c.age_days}</b> дн.</span>
                   <span><b>{c.videos}</b> роликов</span>
                   <span><b>{c.per_week}</b> в неделю</span>

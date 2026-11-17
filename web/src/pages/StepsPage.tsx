@@ -10,8 +10,8 @@ import { MixCard } from "../components/MixCard";
 import { MusicCard } from "../components/MusicCard";
 import { PublishCard, usePublishCount } from "../components/PublishCard";
 import { useProvider, useTtsNeedsSetup } from "../components/TtsFields";
-import { api, type MusicCatalog, type PublishProfile } from "../lib/api";
-import { useLoadedSettings } from "../lib/store";
+import { api, type MusicCatalog } from "../lib/api";
+import { useLoadedSettings, useProfiles } from "../lib/store";
 
 type Section = "broll" | "slides";
 type StepId = "section" | "source" | "voice" | "texts" | "video" | "look" | "publish" | "summary";
@@ -72,7 +72,7 @@ export function StepsPage() {
   const publishCount = usePublishCount(section);
   const { spec, values } = useProvider();
   const ttsMissing = useTtsNeedsSetup();
-  const [profiles, setProfiles] = useState<PublishProfile[]>([]);
+  const { profiles } = useProfiles();
   const [music, setMusic] = useState<MusicCatalog | null>(null);
 
   const setSection = (s: Section) => {
@@ -88,7 +88,6 @@ export function StepsPage() {
 
   useEffect(() => {
     if (step !== "summary") return;
-    void api.publishProfiles().then((r) => setProfiles(r.profiles)).catch(() => undefined);
     if (section === "slides") void api.music().then(setMusic).catch(() => undefined);
   }, [step, section]);
 

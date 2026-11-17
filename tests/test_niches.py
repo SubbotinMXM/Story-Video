@@ -1,5 +1,5 @@
-"""Поиск ниш: каналы-ориентиры — стабильно 100 тыс.+ просмотров на длинных роликах и минимум в 3 раза больше
-подписчиков; возраст канала и формат не важны; 40 вечнозелёных ниш; запросы; история и удаление из неё."""
+"""Поиск ниш: каналы-ориентиры — небольшие (потолок подписчиков + 15%), просмотры стабильно в 3+ раза больше
+подписчиков или ролики «стреляют»; возраст канала и формат не важны; 40 вечнозелёных ниш; запросы; история."""
 
 from __future__ import annotations
 
@@ -114,15 +114,40 @@ class NicheTests(unittest.TestCase):
         d = self._find(FakeApi())["stats"]["dropped"]
         self.assertEqual(d["short"], 1)  # шортс не берём вовсе
         self.assertNotIn("old", d)
-        self.assertGreaterEqual(d["low_ratio"], 1)  # UCbig — 100 тыс. подписчиков, по 20 тыс. просмотров
-        self.assertGreaterEqual(d["unstable"], 2)  # UCbig и UCluck (один залёт)
+        self.assertEqual(d["big"], 1)  # UCbig — 100 тыс. подписчиков при потолке 10 тыс.
+        self.assertGreaterEqual(d["unstable"], 1)  # UCluck: один залёт, остальное по 5 тыс.
+        d = self._find(FakeApi(), max_subs=0)["stats"]["dropped"]  # без потолка — отсеивается по просмотрам
+        self.assertNotIn("big", d)
+        self.assertGreaterEqual(d["low_ratio"], 1)
 
     def test_views_must_beat_subscribers_three_times(self) -> None:
         api = FakeApi()
-        api.channels = {"UCx": {"subs": 50_000, "created": 30, "found": (300_000, 20), "uploads": every(10, 3, 120_000)}}
-        self.assertEqual(self._find(api)["channels"], [])  # 120 тыс. при 50 тыс. подписчиков — всего ×2,4
-        api.channels["UCx"]["uploads"] = every(10, 3, 160_000)  # ×3,2 — подходит
+        api.channels = {"UCx": {"subs": 9_000, "created": 30, "found": (300_000, 20), "uploads": every(10, 3, 25_000)}}
+        self.assertEqual(self._find(api)["channels"], [])  # 25 тыс. при 9 тыс. подписчиков — всего ×2,8
+        api.channels["UCx"]["uploads"] = every(10, 3, 30_000)  # ×3,3 и 30 тыс. — подходит
         self.assertEqual([c["id"] for c in self._find(api)["channels"]], ["UCx"])
+
+    def test_subscriber_ceiling_with_small_slack(self) -> None:
+        def chan(subs):
+            return {"subs": subs, "created": 30, "found": (900_000, 20), "uploads": every(10, 3, 400_000)}
+
+        api = FakeApi()
+        api.channels = {"UC10k": chan(10_000), "UC11k": chan(11_000), "UC20k": chan(20_000)}
+        self.assertEqual({c["id"] for c in self._find(api)["channels"]}, {"UC10k", "UC11k"})  # 11 тыс. — ещё да
+        self.assertEqual({c["id"] for c in self._find(api, max_subs=20_000)["channels"]}, {"UC10k", "UC11k", "UC20k"})
+        self.assertEqual(len(self._find(api, max_subs=0)["channels"]), 3)  # 0 — без потолка
+
+    def test_breakout_videos_pass_with_modest_median(self) -> None:
+        # как @TrofeiniyArhiv: 2,7 тыс. подписчиков, медиана ~26 тыс., но ролики по 280 и 270 тыс.
+        api = FakeApi()
+        ups = every(14, 4, 20_000)
+        ups[3], ups[9] = (16, 280_000, 100), (40, 273_000, 120)
+        api.channels = {"UCburst": {"subs": 2_700, "created": 5000, "found": (280_000, 100), "uploads": ups}}
+        got = self._find(api)["channels"]
+        self.assertEqual([c["id"] for c in got], ["UCburst"])
+        self.assertEqual((got[0]["hit_count"], got[0]["top_views"]), (2, 280_000))
+        ups[9] = (40, 40_000, 120)  # залёт один — это случайность, не ниша
+        self.assertEqual(self._find(api)["channels"], [])
 
     def test_shorts_in_uploads_ignored(self) -> None:
         api = FakeApi()
@@ -205,8 +230,10 @@ class NicheTests(unittest.TestCase):
 
     def test_filters_tolerate_old_and_bad_values(self) -> None:
         f = niches.Filters.of({"max_subs": "5000", "results": 99, "judge": "false", "language": "en"})
-        self.assertEqual((f.results, f.language), (30, "en"))  # старые поля из истории просто игнорируются
-        self.assertEqual(niches.Filters().results, 15)
+        self.assertEqual((f.results, f.language, f.max_subs), (30, "en", 5000))  # лишние поля просто игнорируются
+        self.assertEqual(f.subs_limit, 5750)
+        self.assertEqual((niches.Filters().results, niches.Filters().max_subs), (15, 10_000))
+        self.assertEqual(niches.Filters.of({"max_subs": -5}).subs_limit, 0)
 
     def test_no_keys_is_error(self) -> None:
         with self.assertRaises(ValueError):

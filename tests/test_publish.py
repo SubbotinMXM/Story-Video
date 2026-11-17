@@ -289,8 +289,18 @@ class RegistryTests(Fixture):
 
 
 class FakeAds:
+    # управление из тестов: отвечает ли AdsPower и открыт ли браузер профиля
+    up = True
+    browser_open = True
+
     def __init__(self, *a, **kw) -> None:
         self.started: list[str] = []
+
+    def alive(self) -> bool:
+        return FakeAds.up
+
+    def is_open(self, pid) -> bool:
+        return FakeAds.browser_open
 
     def __enter__(self):
         return self
@@ -391,6 +401,29 @@ class RunTests(Fixture):
         self.assertEqual(sorted(p.name for p in folder.iterdir()),
                          ["Архимед 30.09 — озвучка.mp3", "Архимед 30.09 — сценарий.txt", "обложки"])
 
+    def test_run_copy_removed_after_publish(self) -> None:
+        runs = self.tmp / "runs"
+        run = runs / "20261117_091529_куба"
+        (run / "pool").mkdir(parents=True)
+        (run / "pool" / "beat_0001_pexels.mp4").write_bytes(b"x" * 10)
+        (run / ".dub" / "en").mkdir(parents=True)
+        for name in ("final.mp4", ".dub/en/final.mp4", "voice.mp3", "script.txt", "timeline.json"):
+            (run / name).write_bytes(b"y")
+        outside = self.tmp / "чужая" / "final.mp4"
+        outside.parent.mkdir()
+        outside.write_bytes(b"z")
+        with mock.patch("engine.slides.paths.RUNS_DIR", runs):
+            line = pub.remove_run_copy(run)
+            self.assertEqual(pub.remove_run_copy(outside.parent), "", "не папка запуска — не трогаем")
+            self.assertEqual(pub.remove_run_copy(runs), "", "саму папку запусков не трогаем")
+        self.assertIn("Рабочая копия", line)
+        self.assertFalse((run / "final.mp4").exists())
+        self.assertFalse((run / ".dub" / "en" / "final.mp4").exists())
+        self.assertFalse((run / "pool").exists(), "старые стоки — тоже")
+        for name in ("voice.mp3", "script.txt", "timeline.json"):
+            self.assertTrue((run / name).exists(), f"{name} остаётся")
+        self.assertTrue(outside.exists())
+
     def test_failures_retry_by_themselves_with_growing_pause(self) -> None:
         def upload(cdp, channel, job, cancel=None, progress=None, **kw):
             exc = youtube.StudioError("Studio не открылась: обрыв сети")
@@ -423,6 +456,82 @@ class RunTests(Fixture):
             res = self.run_job(self.request(["p1/UCa"]), {}, upload)
         self.assertEqual(len(calls), 2, "после падения профиля — тот же канал ещё раз")
         self.assertTrue(any("лишний черновик" in line for line in res["lines"]))
+
+    def _reset_ads(self) -> None:
+        FakeAds.up, FakeAds.browser_open = True, True
+        self.addCleanup(lambda: (setattr(FakeAds, "up", True), setattr(FakeAds, "browser_open", True)))
+
+    def test_adspower_down_at_start_waits_without_spending_attempts(self) -> None:
+        self._reset_ads()
+        FakeAds.up = False
+        calls = []
+        state: dict = {}
+        with self.assertRaises(pub.PublishLimit) as ctx:
+            self.run_job(self.request(["p1/UCa"]), state, lambda *a, **kw: calls.append(1))
+        self.assertEqual(calls, [], "AdsPower нет — в Studio не идём")
+        self.assertNotIn("retries", state, "попытка не потрачена")
+        self.assertLess(ctx.exception.retry_at - pub.time.time(), pub.ADSPOWER_POLL_SEC + 5)
+        self.assertIn("AdsPower не отвечает", str(ctx.exception))
+
+    def test_adspower_dies_mid_upload_then_continues_same_draft(self) -> None:
+        """17.11: AdsPower завис посреди загрузки и его перезапустили — шаг «не для детей» упал. Канал не провален:
+        ждём AdsPower и продолжаем тот же черновик."""
+        self._reset_ads()
+        seen = []
+
+        def upload(cdp, channel, job, cancel=None, progress=None, draft_url="", on_draft=None):
+            seen.append(draft_url)
+            if not draft_url:
+                on_draft("https://youtu.be/draft1")
+                FakeAds.up = False  # в этот момент AdsPower закрыли
+                raise youtube.StudioError("шаг «не для детей»: нет элемента «not_for_kids»")
+            return youtube.Uploaded(draft_url, [], None, True)
+
+        state: dict = {}
+        req = self.request(["p1/UCa"])
+        with self.assertRaises(pub.PublishLimit):
+            self.run_job(req, state, upload)
+        rec = state["channels"]["p1/UCa"]
+        self.assertEqual(rec["status"], pub.WAITING, "не ошибка канала, а ожидание AdsPower")
+        self.assertEqual(rec["draft_url"], "https://youtu.be/draft1")
+        self.assertNotIn("retries", state)
+        FakeAds.up = True  # AdsPower снова открыт
+        res = self.run_job(req, state, upload)
+        self.assertEqual(seen, ["", "https://youtu.be/draft1"], "тот же черновик, без дубля")
+        self.assertTrue(any(line.startswith("✓ Канал") for line in res["lines"]), res["lines"])
+
+    def test_step_error_with_closed_browser_restarts_profile(self) -> None:
+        """Браузер профиля закрылся, а упал «шаг» — это пропажа браузера: перезапуск, а не ошибка канала."""
+        self._reset_ads()
+        calls = []
+
+        def upload(cdp, channel, job, cancel=None, progress=None, **kw):
+            calls.append(1)
+            if len(calls) == 1:
+                FakeAds.browser_open = False
+                raise youtube.StudioError("шаг «название»: нет элемента")
+            FakeAds.browser_open = True
+            return youtube.Uploaded("https://youtu.be/ok", [], None, True)
+
+        with mock.patch.object(pub.time, "sleep", lambda s: None):
+            res = self.run_job(self.request(["p1/UCa"]), {}, upload)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(any(line.startswith("✓ Канал") for line in res["lines"]), res["lines"])
+
+    def test_real_step_error_with_live_browser_is_still_an_error(self) -> None:
+        self._reset_ads()
+        calls = []
+
+        def upload(cdp, channel, job, cancel=None, progress=None, **kw):
+            calls.append(1)
+            raise youtube.StudioError("шаг «название»: нет элемента")
+
+        state: dict = {}
+        with self.assertRaises(pub.PublishLimit):
+            self.run_job(self.request(["p1/UCa"]), state, upload)
+        self.assertEqual(len(calls), 1, "браузер жив — профиль не перезапускаем")
+        self.assertEqual(state["channels"]["p1/UCa"]["status"], pub.FAILED)
+        self.assertEqual(state["retries"], 1, "обычная ошибка — обычный счёт повторов")
 
     def test_retry_continues_previous_video_not_duplicate(self) -> None:
         seen = []

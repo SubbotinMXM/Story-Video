@@ -463,7 +463,8 @@ class JobManager:
             job.status = FAILED
             job.error = f"{exc}" if _is_user_error(exc) else f"{type(exc).__name__}: {exc}"
             job.message = "Ошибка — можно продолжить с места падения"
-            log(traceback.format_exc())
+            if not getattr(exc, "retry_at", None):  # ожидание по расписанию (лимит, AdsPower) — без трассировки
+                log(traceback.format_exc())
             log(f"✗ {job.title}: {job.error}")
             self._maybe_retry(job, exc)
         finally:

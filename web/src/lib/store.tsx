@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { api, type Job, type JobIn, type LogLine, type Meta, type Settings } from "./api";
+import { api, type Job, type JobIn, type LogLine, type Meta, type PublishProfile, type Settings } from "./api";
 
 // ---------- toasts ----------
 
@@ -66,6 +66,30 @@ export function useJobs() {
   if (!ctx) throw new Error("JobsCtx");
   return ctx;
 }
+
+// ---------- профили AdsPower и каналы — один список на всё приложение ----------
+
+type ProfilesApi = {
+  profiles: PublishProfile[];
+  loaded: boolean;
+  /** перечитать с сервера */
+  reload: () => Promise<void>;
+  /** свежий список, который уже вернул сервер (синхронизация, смена языка) */
+  setProfiles: (p: PublishProfile[]) => void;
+};
+
+const ProfilesCtx = createContext<ProfilesApi | null>(null);
+
+/** Профили и их каналы. Где бы ни прошла синхронизация (вручную, по расписанию, «Найти каналы»),
+ *  список обновляется сразу во всех разделах: выкладка, комментарии, голосования. */
+export function useProfiles() {
+  const ctx = useContext(ProfilesCtx);
+  if (!ctx) throw new Error("ProfilesCtx");
+  return ctx;
+}
+
+/** Задачи, которые меняют учёт каналов: синхронизация «Аналитики» (в т. ч. по расписанию) и поиск каналов профиля. */
+const REGISTRY_KINDS = new Set(["analytics", "scan"]);
 
 const LOG_LIMIT = 2000;
 const SAVE_DELAY = 500;
@@ -187,6 +211,42 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => es.close();
   }, [push]);
 
+  // профили и каналы
+  const [profiles, setProfilesState] = useState<PublishProfile[]>([]);
+  const [profilesLoaded, setProfilesLoaded] = useState(false);
+  const setProfiles = useCallback((p: PublishProfile[]) => {
+    setProfilesState(p);
+    setProfilesLoaded(true);
+  }, []);
+  const reloadProfiles = useCallback(async () => {
+    try {
+      setProfiles((await api.publishProfiles()).profiles);
+    } catch {
+      /* сервер недоступен — оставляем прежний список */
+    }
+  }, [setProfiles]);
+  // синхронизация началась или закончилась — перечитать
+  const registryKey = jobs
+    .filter((j) => REGISTRY_KINDS.has(j.kind))
+    .map((j) => `${j.id}:${j.status}`)
+    .join(",");
+  useEffect(() => {
+    void reloadProfiles();
+  }, [registryKey, reloadProfiles]);
+  // пока идёт — новые каналы появляются по ходу (профиль за профилем)
+  const registryRunning = jobs.some((j) => REGISTRY_KINDS.has(j.kind) && j.status === "running");
+  useEffect(() => {
+    if (!registryRunning) return;
+    const t = window.setInterval(() => void reloadProfiles(), 15000);
+    return () => window.clearInterval(t);
+  }, [registryRunning, reloadProfiles]);
+  // вернулись в окно приложения — вдруг что-то менялось
+  useEffect(() => {
+    const onFocus = () => void reloadProfiles();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [reloadProfiles]);
+
   // повтор постановки после вопроса «переписать ещё раз?» — тем же enqueue
   const enqueueRef = useRef<(items: JobIn[]) => Promise<Job[] | null>>(async () => null);
   const enqueue = useCallback(
@@ -226,11 +286,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [meta, settings, saveState, update, flush],
   );
   const jobsApi = useMemo(() => ({ jobs, logs, connected, enqueue }), [jobs, logs, connected, enqueue]);
+  const profilesApi = useMemo(
+    () => ({ profiles, loaded: profilesLoaded, reload: reloadProfiles, setProfiles }),
+    [profiles, profilesLoaded, reloadProfiles, setProfiles],
+  );
 
   return (
     <ToastCtx.Provider value={toastApi}>
       <SettingsCtx.Provider value={settingsApi}>
-        <JobsCtx.Provider value={jobsApi}>{children}</JobsCtx.Provider>
+        <JobsCtx.Provider value={jobsApi}>
+          <ProfilesCtx.Provider value={profilesApi}>{children}</ProfilesCtx.Provider>
+        </JobsCtx.Provider>
       </SettingsCtx.Provider>
     </ToastCtx.Provider>
   );

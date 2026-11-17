@@ -1742,9 +1742,9 @@ code {
 /* ---------- голосования ---------- */
 
 .polls-setup {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 12px 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
   align-items: end;
 }
 .polls-plan {
@@ -1805,12 +1805,6 @@ code {
   gap: 6px;
 }
 @media (max-width: 720px) {
-  .polls-setup {
-    grid-template-columns: 1fr 1fr;
-  }
-  .polls-setup > :first-child {
-    grid-column: 1 / -1;
-  }
   .poll-option,
   .poll-add {
     margin-left: 0;
@@ -1964,3 +1958,47 @@ code {
   }
 }
 .nowrap { white-space: nowrap; }
+.niche-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+/* выбор каналов по профилям AdsPower (комментарии, голосования) */
+.cp { display: flex; flex-direction: column; gap: 10px; }
+.cp-toolbar { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; }
+.cp-search { position: relative; flex: 1 1 240px; max-width: 360px; display: flex; align-items: center; }
+.cp-search svg { position: absolute; left: 10px; color: var(--text-3); pointer-events: none; }
+.cp-search .input { width: 100%; padding-left: 30px; }
+.cp-count { color: var(--text-2); white-space: nowrap; }
+.cp-bulk { display: flex; gap: 12px; margin-left: auto; }
+.cp-bulk .link-btn:disabled { color: var(--text-3); text-decoration: none; cursor: default; }
+/* столбцы как в газете: карточки разной высоты ложатся плотно, без дыр */
+/* длинный список — прокрутка внутри, кнопка запуска остаётся рядом */
+.cp-scroll { max-height: min(64vh, 720px); overflow-y: auto; margin-bottom: -10px; padding-right: 2px; }
+.cp-groups { columns: 2 340px; column-gap: 10px; }
+.cp-group { border: 1px solid var(--border); border-radius: 10px; min-width: 0; transition: border-color 0.15s; break-inside: avoid; margin-bottom: 10px; }
+.cp-group.has-picked { border-color: var(--accent); }
+.cp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  min-height: 38px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.cp-head input, .cp-row input { margin: 0; flex: 0 0 auto; }
+.cp-prof { font-weight: 600; font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-n { margin-left: auto; white-space: nowrap; }
+.cp-rows { display: flex; flex-direction: column; padding: 2px 12px; }
+.cp-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 10px;
+  padding: 6px 0 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  cursor: pointer;
+}
+.cp-row:last-child { border-bottom: none; }
+.cp-row input { justify-self: center; }
+.cp-row .subs-count { white-space: nowrap; color: var(--text-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cp-empty { line-height: 1.5; }

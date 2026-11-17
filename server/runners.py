@@ -451,6 +451,7 @@ def _publish_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
         titles_file=str(params.get("titles_file") or ""), descs_file=str(params.get("descs_file") or ""),
         plan_id=str(params.get("plan_id") or ""), visible=bool(params.get("visible", True)),
         keep_files=bool(params.get("keep_files", True)), comment=str(params.get("comment") or ""),
+        run_dir=str(params.get("run_dir") or ""),
         llm=_llm_opt(cfg),
         adspower=(_s(cfg, "adspower_api_key"), _s(cfg, "adspower_url")),
     )
@@ -1086,6 +1087,9 @@ def _slides_render(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
 
     def run(job: Job, progress, cancel: CancelToken) -> dict[str, Any]:
         res = run_render_stage(req, cancel=cancel, on_progress=progress)
+        from engine.slides.resume import drop_stock
+
+        drop_stock(run_dir)  # ролик собран — скачанные кадры больше не нужны
         out = _slides_result(res, [f"Сегментов: {res.segments}"])
         out["run"] = run_dir.name
         return out

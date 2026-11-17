@@ -281,6 +281,7 @@ class FullPipelineOrchestrationTests(unittest.TestCase):
         for name in files:
             p = self.run / name
             if name == "timeline.json":
+                (self.run / "pool").mkdir(exist_ok=True)  # кадры запуска на месте
                 p.write_text(json.dumps({"mode": "strict_sync", "variant": "3min", "slots": [{}]}), encoding="utf-8")
             elif name == "final.mp4":
                 p.write_bytes(b"x" * 2000)

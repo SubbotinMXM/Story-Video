@@ -112,6 +112,7 @@ class RoutingTests(unittest.TestCase):
                  mock.patch("engine.slides.theme_media.collect_theme_pool", return_value="POOL") as pool:
                 self.assertEqual(sm.collect_strict_timeline(req), "POOL")
             pool.assert_called_once()
+            (run / "pool").mkdir(exist_ok=True)
             (run / "timeline.json").write_text(json.dumps({"mode": "theme_pool", "person": "Anda Călugăreanu", "images": [{"path": "x"}]}))
             self.assertTrue(timeline_matches(run, strict=True, full=False), "«Продолжить» не пересобирает пул героя")
 

@@ -133,14 +133,25 @@ class SyncOnlyGroupTest(unittest.TestCase):
         def collect(cdp, chans, **kw):
             read.extend(c.id for c in chans)
 
+        saved = {}
+
+        def set_channels(pid, found, studio=None):
+            saved[pid] = [c.id for c in found]
+            return mock.Mock(channels=found)
+
+        scanned = [ch("UC1"), ch("UCx"), ch("UCnew")]  # в профиле группы появился новый канал
         with mock.patch.object(registry, "load", return_value=profs), \
+                mock.patch.object(registry, "set_channels", set_channels), \
+                mock.patch("engine.publish.youtube.scan_channels", lambda *a, **k: scanned), \
                 mock.patch("engine.publish.scan.in_profile", in_profile), \
                 mock.patch.object(analytics, "collect", collect), \
-                mock.patch.object(analytics, "_refresh_profiles") as refresh:
-            analytics.sync("k", "u", channel_ids=["UC1"])
-        refresh.assert_not_called()  # новых каналов не ищем
-        self.assertEqual(opened, ["p1"])
-        self.assertEqual(read, ["UC1"])
+                mock.patch.object(analytics, "_refresh_profiles", return_value="") as refresh:
+            res = analytics.sync("k", "u", channel_ids=["UC1"])
+        refresh.assert_called_once()  # список профилей из AdsPower — свежий (это дёшево)
+        self.assertEqual(opened, ["p1"])  # профили без каналов группы не открываем
+        self.assertEqual(saved, {"p1": ["UC1", "UCx", "UCnew"]})  # новый канал — в общий учёт, во все разделы
+        self.assertEqual(read, ["UC1"])  # цифры — только по каналам группы
+        self.assertIn("UCnew", str(res))
 
 
 if __name__ == "__main__":

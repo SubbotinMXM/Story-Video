@@ -112,6 +112,8 @@ def _run_render_stage(
     voice = run_dir / AUDIO_NAME
     if not (run_dir / TIMELINE_NAME).is_file():
         raise RenderError(f"Нет {TIMELINE_NAME}")
+    if not (run_dir / "pool").is_dir():
+        raise RenderError("Кадры этого запуска удалены после сборки — подбери кадры заново (шаг 2), они скачаются снова")
     if not voice.is_file():
         raise RenderError(f"Нет {AUDIO_NAME}")
 

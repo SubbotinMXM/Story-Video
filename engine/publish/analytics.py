@@ -293,9 +293,12 @@ def sync(api_key: str, url: str, *, profile_ids: list[str] | None = None, cancel
 
     notes: list[str] = []
     only = set(channel_ids or [])
-    if only:  # только эти каналы (группа «Аналитики»): новых не ищем, профили без них не открываем
+    # только эти каналы (группа «Аналитики»): профили без них не открываем, но в открытых каналы перечитываем —
+    # новый аккаунт или канал в таком профиле сразу появится во всех разделах (выкладка, комментарии, опросы)
+    rescan = discover or bool(only)
+    if only:
         discover = False
-    if discover and not profile_ids:
+    if rescan and not profile_ids:
         if progress:
             progress(0.0, "Аналитика: обновляю список профилей из AdsPower")
         note = _refresh_profiles(api_key, url)
@@ -319,7 +322,7 @@ def sync(api_key: str, url: str, *, profile_ids: list[str] | None = None, cancel
             cancel.check()
         share = 1 / len(profiles)
         chans = [c for c in p.channels if not only or c.id in only]
-        state = {"channels": chans, "done": 0, "scanned": not discover}
+        state = {"channels": chans, "done": 0, "scanned": not rescan}
 
         def tick(msg: str, frac: float = 0.0, n=n, share=share) -> None:
             if progress:
@@ -349,11 +352,11 @@ def sync(api_key: str, url: str, *, profile_ids: list[str] | None = None, cancel
                     notes.append(f"{p.label()}: каналы не перечитались ({str(exc).splitlines()[0][:150]}) — "
                                  "цифры по известным")
                 if found:
-                    before = {c.id for c in state["channels"]}
+                    before = {c.id for c in p.channels}
                     entry = registry.set_channels(p.id, found, studio=env or None)
-                    state["channels"] = list(entry.channels)
+                    state["channels"] = [c for c in entry.channels if not only or c.id in only]
                     added.extend(f"{c.name} ({c.handle}) — {p.label()}" for c in entry.channels if c.id not in before)
-                elif found is not None and state["channels"]:
+                elif found is not None and p.channels:
                     # пусто, а раньше каналы были — скорее сбой чтения, чем удаление: список не трогаем
                     notes.append(f"{p.label()}: каналов не нашлось — оставил прежний список, проверь «Обновить каналы»")
                 state["scanned"] = True
@@ -363,7 +366,7 @@ def sync(api_key: str, url: str, *, profile_ids: list[str] | None = None, cancel
                     on_channel=lambda st: (keep(st), pulse.touch()), pulse=pulse)
 
         tick(f"Аналитика: открываю профиль {p.label()}")
-        timeout = CHANNEL_TIMEOUT * max(1, len(state["channels"])) + 120 + (SCAN_TIMEOUT if discover else 0)
+        timeout = CHANNEL_TIMEOUT * max(1, len(state["channels"])) + 120 + (SCAN_TIMEOUT if rescan else 0)
         try:
             in_profile(api_key, url, p.id, work, headless=True, timeout=timeout, cancel=cancel, what="аналитика",
                        again="запусти синхронизацию ещё раз")

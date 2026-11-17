@@ -98,9 +98,29 @@ class ModeMappingTests(unittest.TestCase):
         self.assertEqual(custom_weights(mix, video=True), {"stocks": 60, "archive": 5}, "YouTube 0% — не ищем")
         self.assertEqual(custom_weights(mix, video=False), {"google": 20, "stocks": 60, "wikimedia": 10, "archive": 5})
 
+    def test_dropped_stock_means_media_again(self) -> None:
+        from engine.slides.resume import detect_stage, drop_stock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "pool").mkdir()
+            (run / "pool" / "a.mp4").write_bytes(b"x" * 100)
+            (run / "segments").mkdir()
+            (run / "voice.mp3").write_bytes(b"v")
+            (run / "chunks.json").write_text("{}")
+            (run / "timeline.json").write_text(json.dumps({"mode": "strict_sync", "slots": [{"path": "pool/a.mp4"}]}))
+            self.assertEqual(detect_stage(run), "media_done")
+            self.assertEqual(drop_stock(run), 100)
+            self.assertFalse((run / "pool").exists() or (run / "segments").exists())
+            self.assertTrue((run / "voice.mp3").exists() and (run / "timeline.json").exists())
+            self.assertEqual(detect_stage(run), "chunks_done", "кадров нет — «Продолжить» скачает их заново")
+            self.assertFalse(timeline_matches(run, strict=True))
+            self.assertEqual(drop_stock(run), 0)
+
     def test_resume_requires_same_variant(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
+            (run / "pool").mkdir()
             (run / "timeline.json").write_text(json.dumps({"mode": "strict_sync", "slots": [{}]}))
             self.assertTrue(timeline_matches(run, strict=True))  # старый запуск = «3 мин»
             self.assertFalse(timeline_matches(run, strict=True, full=True))

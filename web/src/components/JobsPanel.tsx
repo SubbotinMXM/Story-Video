@@ -75,7 +75,7 @@ function resultFile(job: Job) {
   return path.split("/").filter(Boolean).pop() || "";
 }
 
-const LIVE_ICON: Record<string, string> = { done: "✓", failed: "✗", limit: "⏸", active: "⏳", wait: "•" };
+const LIVE_ICON: Record<string, string> = { done: "✓", failed: "✗", limit: "⏸", waiting: "⏸", active: "⏳", wait: "•" };
 
 /** Выкладка: по каждому каналу — шаг Studio, процент загрузки, время выхода; обновляется само. */
 function LiveTable({ job, now }: { job: Job; now: number }) {

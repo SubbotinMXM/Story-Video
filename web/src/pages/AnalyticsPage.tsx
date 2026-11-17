@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, BarChart3, Check, Clock, Pencil, Plus, RefreshCw, Tags, Trash2, X } from "lucide-react";
 import { Badge, Button, Card, Empty, PageHeader, Progress, Select, Toggle } from "../components/ui";
 import { api, type AnalyticsAuto, type AnalyticsGroup, type AnalyticsRow } from "../lib/api";
-import { useJobs, useLoadedSettings, useToasts } from "../lib/store";
+import { useJobs, useLoadedSettings, useProfiles, useToasts } from "../lib/store";
 
 type SortKey = "name" | "subscribers" | "watch_hours" | "views_48h" | "synced_at";
 const SORTS: { key: SortKey; label: string }[] = [
@@ -74,12 +74,14 @@ export function AnalyticsPage({ active }: { active: boolean }) {
 
   const sync = () => void enqueue([{ kind: "analytics", params: {} }]);
   const { push } = useToasts();
+  const { setProfiles } = useProfiles();
   const [adsBusy, setAdsBusy] = useState(false);
   // «Только AdsPower»: список профилей без открытия — у новых профилей каналов ещё нет, их найдёт «Синхронизировать всё»
   const syncAds = async () => {
     setAdsBusy(true);
     try {
       const { profiles } = await api.publishSync();
+      setProfiles(profiles); // список профилей — сразу во всех разделах
       const live = profiles.filter((p) => !p.missing);
       const fresh = live.filter((p) => !p.scanned_at).length;
       const gone = profiles.length - live.length;

@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Play, Plus, Sparkles, Trash2, X } from "lucide-react";
-import { api, type PublishProfile } from "../lib/api";
 import { useJobs, useToasts } from "../lib/store";
-import { Button, Card, Field, NumberInput, PageHeader, Select } from "../components/ui";
+import { Button, Card, Field, NumberInput, PageHeader } from "../components/ui";
+import { ChannelPicker } from "../components/ChannelPicker";
 
 type Poll = { question: string; options: string[] };
 type Past = Poll & { at: string; status: string };
@@ -31,23 +31,15 @@ function planned(count: number, step: number): string[] {
 export function PollsPage() {
   const { enqueue } = useJobs();
   const { push } = useToasts();
-  const [profiles, setProfiles] = useState<PublishProfile[]>([]);
-  const [channel, setChannel] = useState("");
+  const [picked, setPicked] = useState<string[]>([]);
+  // посмотреть и поправить опросы до запуска — когда канал один; на несколько каналов нейросеть пишет их в задаче
+  const channel = picked.length === 1 ? picked[0] : "";
   const [count, setCount] = useState(3);
   const [step, setStep] = useState(2);
   const [polls, setPolls] = useState<Poll[]>([]);
   const [titles, setTitles] = useState<string[]>([]);
   const [past, setPast] = useState<Past[]>([]);
   const [busy, setBusy] = useState<"" | "gen" | "run">("");
-
-  useEffect(() => {
-    void api.publishProfiles().then((r) => setProfiles(r.profiles)).catch(() => undefined);
-  }, []);
-
-  const channels = useMemo(
-    () => profiles.filter((p) => !p.missing).flatMap((p) => p.channels.map((c) => ({ key: `${p.id}/${c.id}`, label: `${c.name} · ${c.handle} · №${p.number}` }))),
-    [profiles],
-  );
 
   useEffect(() => {
     setPolls([]);
@@ -90,7 +82,8 @@ export function PollsPage() {
   const run = async () => {
     setBusy("run");
     const clean = polls.map((p) => ({ question: p.question.trim(), options: p.options.map((o) => o.trim()).filter(Boolean) }));
-    await enqueue([{ kind: "polls", params: { channel, count: total, step_days: step, polls: clean } }]);
+    // каждый канал — своя задача: опросы по теме именно этого канала
+    await enqueue(picked.map((ch) => ({ kind: "polls", params: { channel: ch, count: total, step_days: step, polls: channel ? clean : [] } })));
     setBusy("");
   };
 
@@ -100,15 +93,15 @@ export function PollsPage() {
         title="Голосования"
         subtitle="Текстовые опросы в сообществе канала: нейросеть смотрит, о чём канал, и пишет вопросы к опыту зрителей. Первый опрос выходит сразу после запуска, остальные — по расписанию."
       />
-      <Card title="Канал и расписание">
+      <Card
+        title="Каналы"
+        description="Отметь один канал — опросы можно посмотреть и поправить до запуска. Несколько — на каждом нейросеть напишет свои опросы по теме канала прямо в задаче."
+      >
+        <ChannelPicker value={picked} onChange={setPicked} />
+      </Card>
+
+      <Card title="Расписание">
         <div className="polls-setup">
-          <Field label="Канал">
-            <Select
-              value={channel}
-              onChange={setChannel}
-              options={[{ value: "", label: channels.length ? "— выбери канал —" : "Каналов нет — синхронизируй в «Аналитике»" }, ...channels.map((c) => ({ value: c.key, label: c.label }))]}
-            />
-          </Field>
           <Field label="Сколько опросов">
             <NumberInput value={count} min={1} max={30} onChange={setCount} width={88} />
           </Field>
@@ -121,12 +114,20 @@ export function PollsPage() {
           {when.length > 8 ? " · …" : ""}
         </div>
         <div className="row gap-sm polls-actions">
-          <Button icon={<Sparkles size={16} />} disabled={!channel} loading={busy === "gen"} onClick={() => void generate()}>
+          <Button
+            icon={<Sparkles size={16} />}
+            disabled={!channel}
+            loading={busy === "gen"}
+            title={picked.length > 1 ? "Посмотреть заранее можно, когда выбран один канал" : undefined}
+            onClick={() => void generate()}
+          >
             {polls.length ? "Сгенерировать заново" : "Сгенерировать и посмотреть"}
           </Button>
-          <Button variant="primary" icon={<Play size={16} />} disabled={!channel || bad} loading={busy === "run"} onClick={() => void run()}>
-            Запустить ({total})
+          <Button variant="primary" icon={<Play size={16} />} disabled={!picked.length || bad} loading={busy === "run"} onClick={() => void run()}>
+            {picked.length > 1 ? `Запустить на ${picked.length} каналах (по ${total})` : `Запустить (${total})`}
           </Button>
+          {picked.length === 0 && <span className="muted small">выбери канал выше</span>}
+          {picked.length > 1 && <span className="muted small">опросы для каждого канала нейросеть напишет в его задаче</span>}
           {!polls.length && channel && <span className="muted small">без просмотра — нейросеть напишет опросы прямо в задаче</span>}
         </div>
       </Card>

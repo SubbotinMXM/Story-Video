@@ -128,6 +128,7 @@ class TimelineModeTests(unittest.TestCase):
     def test_strict_counts_as_media(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
+            (run / "pool").mkdir()
             (run / "timeline.json").write_text(
                 json.dumps({"mode": "strict_sync", "slots": [{"path": "a.jpg"}]}),
                 encoding="utf-8",

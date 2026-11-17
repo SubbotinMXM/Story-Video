@@ -123,6 +123,7 @@ class TimelineMatchTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
+            (run / "pool").mkdir()
             (run / "timeline.json").write_text(json.dumps({"mode": "strict_sync", "variant": "stars", "slots": [{"x": 1}]}))
             self.assertTrue(timeline_matches(run, strict=False, stars=True))
             self.assertFalse(timeline_matches(run, strict=True, full=True))

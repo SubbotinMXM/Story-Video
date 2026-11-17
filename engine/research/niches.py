@@ -4,12 +4,15 @@
 1. Запросы: ключевые слова (+ нейросеть добавит похожие, если их мало или язык аудитории не русский).
 2. YouTube API: средние и длинные ролики по запросам за последние полгода (Shorts отсекает сам YouTube).
 3. Каналы этих роликов → у самых перспективных — последние длинные ролики.
-4. Подходит канал, у которого просмотры стабильно и сильно перевешивают подписчиков:
-   • медиана просмотров последних длинных роликов — от 100 тыс.;
-   • эта медиана — минимум в 3 раза больше числа подписчиков.
+4. Подходит небольшой канал, у которого просмотры стабильно и сильно перевешивают подписчиков:
+   • подписчиков — не больше потолка из интерфейса (по умолчанию 10 тыс.; чуть выше — до +15% — ещё берём:
+     10,5 или 11 тыс. при хороших просмотрах подходят, 20 тыс. — нет);
+   • и ЛИБО стабильно: медиана просмотров последних длинных роликов — от 30 тыс. и минимум в 3 раза больше
+     подписчиков, ЛИБО «стреляет»: среди длинных роликов за ~полгода минимум 2 залёта — от 50 тыс. просмотров
+     и в 10+ раз больше подписчиков (канал на 2,7 тыс. с роликами по 280 и 270 тыс. при медиане 26 тыс.).
    Возраст канала и сложность формата не учитываются — формат пользователь оценивает сам.
-5. Порядок: больше просмотров на подписчика, стабильнее просмотры, меньше роликов на канале — выше.
-→ до 15 каналов. Пороги — в коде (константы ниже), в интерфейсе настраивается только язык.
+5. Порядок: больше просмотров на подписчика, стабильнее и больше просмотры, меньше роликов на канале — выше.
+→ до 15 каналов. Пороги — в коде (константы ниже), в интерфейсе — язык и потолок подписчиков.
 """
 
 from __future__ import annotations
@@ -35,11 +38,16 @@ SEARCH_PASSES = (("relevance", "medium"), ("relevance", "long"), ("viewCount", "
 MAX_QUERIES = 8
 WINDOW_DAYS = 180  # ролики по запросам — за последние полгода
 MIN_MINUTES = 5.0  # короче — Shorts, не наш формат
-PRE_MIN_VIEWS = 30_000  # найденный ролик канала набрал хотя бы столько — иначе канал не разбираем
+PRE_MIN_VIEWS = 15_000  # найденный ролик канала набрал хотя бы столько — иначе канал не разбираем
 DEEP_MAX = 100  # у скольких каналов смотреть последние ролики (2–3 единицы квоты на канал)
 UPLOADS_PAGE = 50  # последние загрузки канала — из них берутся длинные ролики
 RECENT = 15  # медиана — по стольким последним длинным роликам
-STABLE_VIEWS = 100_000  # медиана просмотров последних длинных роликов — не меньше
+STABLE_VIEWS = 30_000  # медиана просмотров последних длинных роликов — не меньше (десятки тысяч)
+HIT_VIEWS = 50_000  # «залёт»: длинный ролик набрал хотя бы столько…
+HIT_RATIO = 10.0  # …и в столько раз больше подписчиков
+MIN_HITS = 2  # столько залётов за ~полгода — канал «стреляет», даже если медиана скромная
+MAX_SUBS = 10_000  # потолок подписчиков по умолчанию (настраивается в интерфейсе)
+SUBS_SLACK = 0.15  # сверх потолка ещё берём столько (10 тыс. → до 11,5 тыс.)
 MIN_RATIO = 3.0  # медиана просмотров / подписчики — не меньше (просмотры сильно перевешивают)
 MIN_LONG = 3  # хотя бы столько длинных роликов — иначе «стабильно» не про него
 RESULTS = 15
@@ -50,10 +58,17 @@ LANG_REGION = {"ru": "RU", "en": "US", "es": "ES", "pt": "BR", "de": "DE", "fr":
 
 @dataclass
 class Filters:
-    """Что настраивается из интерфейса: язык аудитории (регион — по языку). Остальное — константы выше."""
+    """Что настраивается из интерфейса: язык аудитории (регион — по языку) и потолок подписчиков
+    (0 — без потолка). Остальное — константы выше."""
     language: str = "ru"
     region: str = ""
     results: int = RESULTS
+    max_subs: int = MAX_SUBS
+
+    @property
+    def subs_limit(self) -> int:
+        """Сколько подписчиков ещё берём: потолок + небольшой запас (0 — без ограничения)."""
+        return int(self.max_subs * (1 + SUBS_SLACK)) if self.max_subs > 0 else 0
 
     @classmethod
     def of(cls, raw: dict | None) -> Filters:
@@ -68,6 +83,7 @@ class Filters:
                 except (TypeError, ValueError):
                     pass
         f.results = max(1, min(30, f.results))
+        f.max_subs = max(0, f.max_subs)
         return f
 
 
@@ -89,7 +105,9 @@ class Found:
     recent_avg: int = 0
     recent_median: int = 0
     recent_count: int = 0  # по скольким длинным роликам медиана
-    hit_share: float = 0.0  # доля последних длинных роликов от 100 тыс. просмотров
+    hit_share: float = 0.0  # доля залётов среди последних длинных роликов
+    hit_count: int = 0  # залётов среди длинных роликов из последних загрузок (~полгода)
+    top_views: int = 0  # самый просматриваемый из них
     per_week: float = 0.0
     avg_minutes: float = 0.0
     recent_titles: list[str] = field(default_factory=list)
@@ -314,12 +332,15 @@ def search(api, queries: list[str], f: Filters, *, now: datetime | None = None,
     return channels, videos
 
 
-def prefilter(c: Found) -> list[str]:
+def prefilter(c: Found, f: Filters | None = None) -> list[str]:
     """Дешёвый отсев по найденным роликам — до разбора последних роликов канала."""
     if c.title == "":
         return ["missing"]
     if c.hidden:
         return ["hidden"]
+    limit = (f or Filters()).subs_limit
+    if limit and c.subs > limit:
+        return ["big"]  # уже крупный канал — конкурентов на нём не найти
     if c.best_views < PRE_MIN_VIEWS:
         return ["small_views"]
     if c.best_views < c.subs:
@@ -329,16 +350,27 @@ def prefilter(c: Found) -> list[str]:
 
 def rejects(c: Found, f: Filters | None = None) -> list[str]:
     """Каким условиям канал не прошёл после разбора последних роликов (пусто — подходит)."""
-    out = prefilter(c)
+    out = prefilter(c, f)
     if out:
         return out
     if c.recent_count < MIN_LONG:
         out.append("few_long")
+    if steady(c) or c.hit_count >= MIN_HITS:
+        return out
     if c.recent_median < STABLE_VIEWS:
         out.append("unstable")
     if c.recent_median < MIN_RATIO * max(1, c.subs):
         out.append("low_ratio")
     return out
+
+
+def steady(c: Found) -> bool:
+    """Стабильно сильные просмотры: медиана от 30 тыс. и в 3+ раза больше подписчиков."""
+    return c.recent_median >= STABLE_VIEWS and c.recent_median >= MIN_RATIO * max(1, c.subs)
+
+
+def is_hit(views: int, subs: int) -> bool:
+    return views >= HIT_VIEWS and views >= HIT_RATIO * max(1, subs)
 
 
 def passes(c: Found, f: Filters | None = None) -> bool:
@@ -363,13 +395,16 @@ def deepen(api, c: Found, f: Filters | None = None) -> None:
                          (v.get("snippet") or {}).get("title") or ""))
     # Shorts не считаем; свежие (меньше 3 дней) ещё не набрали — в медиану не берём
     fresh = time.time() - 3 * 86400
-    long_ = sorted((r for r in rows if r[2] >= MIN_MINUTES and (not r[1] or r[1] < fresh)), key=lambda r: -r[1])[:RECENT]
+    all_long = sorted((r for r in rows if r[2] >= MIN_MINUTES and (not r[1] or r[1] < fresh)), key=lambda r: -r[1])
+    long_ = all_long[:RECENT]
     if not long_:
         return
+    hits = [r[0] for r in all_long if is_hit(r[0], c.subs)]
+    c.hit_count, c.top_views = len(hits), max(r[0] for r in all_long)
     views = [r[0] for r in long_]
     c.recent_count = len(views)
     c.recent_avg, c.recent_median = int(statistics.mean(views)), int(statistics.median(views))
-    c.hit_share = round(sum(1 for v in views if v >= STABLE_VIEWS) / len(views), 2)
+    c.hit_share = round(sum(1 for v in views if is_hit(v, c.subs)) / len(views), 2)
     stamps = sorted(r[1] for r in long_ if r[1])
     if len(stamps) >= 2:
         weeks = max(1 / 7, (stamps[-1] - stamps[0]) / (7 * 86400))
@@ -380,7 +415,9 @@ def deepen(api, c: Found, f: Filters | None = None) -> None:
 
 def score(c: Found, f: Filters | None = None) -> float:
     """Выше — у кого больше просмотров на подписчика, стабильнее и больше просмотры и меньше роликов на канале."""
-    return round(math.log10(1 + c.ratio) * 2 + math.log10(1 + c.recent_median) + c.hit_share
+    reach = max(c.recent_median, c.top_views // 3)  # «стреляющий» канал — по его залётам, не только по медиане
+    return round(math.log10(1 + reach / max(1, c.subs)) * 2 + math.log10(1 + reach) + c.hit_share
+                 + 0.15 * min(c.hit_count, 6)
                  - 0.5 * math.log10(1 + c.videos / 50) + 0.1 * min(c.hits, 5), 3)
 
 
@@ -404,7 +441,7 @@ def find(niche: str, keywords: list[str], f: Filters, keys: list[str], llm: tupl
         dropped["short"] = sum(1 for v in videos.values() if v["minutes"] < MIN_MINUTES)
         cands = []
         for c in channels.values():
-            why = prefilter(c)
+            why = prefilter(c, f)
             if why:
                 dropped[why[0]] = dropped.get(why[0], 0) + 1
             else:
@@ -435,7 +472,8 @@ def find(niche: str, keywords: list[str], f: Filters, keys: list[str], llm: tupl
     log(f"Ниши: роликов {len(videos)}, каналов {len(channels)}, разобрано {len(deep)}, подошли {len(good)}, "
         f"отсеяно {dropped}")
     for c in good:
-        c.anomaly = c.recent_median >= 10 * max(1, c.subs)  # в 10+ раз больше подписчиков
+        # в 10+ раз больше подписчиков стабильно, или ролик-миллионник
+        c.anomaly = c.recent_median >= 10 * max(1, c.subs) or c.top_views >= 1_000_000
         c.score = score(c, f)
     good.sort(key=lambda c: -c.score)
     top = good[:f.results]

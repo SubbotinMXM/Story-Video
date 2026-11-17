@@ -33,6 +33,10 @@ class AdsPowerError(RuntimeError):
     pass
 
 
+class AdsPowerDown(AdsPowerError):
+    """Программа AdsPower не отвечает (закрыта, зависла, перезапускается) — ждём её, а не считаем это ошибкой выкладки."""
+
+
 class ProfileBusy(AdsPowerError):
     """Профиль открыт у другого пользователя/на другом компьютере (командный AdsPower) — открыть нельзя."""
 
@@ -102,7 +106,7 @@ class AdsPower:
                     resp = self._http.request(method, path, params=params, json=body,
                                               headers={"Authorization": f"Bearer {self.api_key}"})
                 except httpx.TransportError as exc:
-                    raise AdsPowerError(
+                    raise AdsPowerDown(
                         f"AdsPower не отвечает ({self.base_url}) — открой программу AdsPower на этом Mac "
                         "и проверь, что Local API включён"
                     ) from exc
@@ -134,6 +138,14 @@ class AdsPower:
     def status(self) -> bool:
         resp = self._call("GET", "/status")
         return resp is not None
+
+    def alive(self) -> bool:
+        """AdsPower сейчас отвечает (быстрая проверка, без исключений)."""
+        try:
+            self._call("GET", "/status", retries=1)
+            return True
+        except AdsPowerError:
+            return False
 
     # ---------- профили ----------
 

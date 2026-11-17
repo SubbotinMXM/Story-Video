@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 
 from engine.slides import checkpoint as cp
@@ -43,7 +45,7 @@ def detect_stage(run_dir: Path) -> str:
     if final.is_file() and final.stat().st_size > 1000:
         return "render_done"
     timeline = run_dir / TIMELINE_NAME
-    if timeline.is_file():
+    if timeline.is_file() and has_stock(run_dir):
         try:
             raw = json.loads(timeline.read_text(encoding="utf-8"))
             if isinstance(raw, dict) and _timeline_done(raw):
@@ -63,9 +65,9 @@ def detect_stage(run_dir: Path) -> str:
 
 
 def timeline_matches(run_dir: Path, *, strict: bool, full: bool = False, stars: bool = False) -> bool:
-    """Уже собранный timeline подходит под текущий режим подбора."""
+    """Уже собранный timeline подходит под текущий режим подбора (и его кадры ещё на диске)."""
     raw = _read_timeline(run_dir)
-    if raw is None:
+    if raw is None or not has_stock(run_dir):
         return False
     if stars or raw.get("variant") == "stars":
         return stars and raw.get("variant") == "stars" and bool(raw.get("slots"))
@@ -81,6 +83,41 @@ def timeline_matches(run_dir: Path, *, strict: bool, full: bool = False, stars: 
             and len(slots) > 0
         )
     return raw.get("mode") == "theme_pool" and bool(raw.get("images"))
+
+
+# скачанные под ролик кадры: после сборки не нужны — удаляем, при повторной сборке скачаются заново
+STOCK_DIRS = ("pool", "segments")
+STOCK_FILES = ("late_pool.json",)
+
+
+def has_stock(run_dir: Path) -> bool:
+    """Кадры запуска на месте: без папки pool timeline ссылается на удалённые файлы."""
+    return (run_dir / "pool").is_dir()
+
+
+def drop_stock(run_dir: Path) -> int:
+    """Удаляет скачанные стоки и промежуточные куски запуска, возвращает освобождённые байты.
+    Озвучка, тексты, субтитры и timeline остаются: по ним видно, из чего собран ролик."""
+    freed = 0
+    for name in STOCK_DIRS:
+        d = run_dir / name
+        if not d.is_dir():
+            continue
+        for root, _, files in os.walk(d):
+            for f in files:
+                try:
+                    freed += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    pass
+        shutil.rmtree(d, ignore_errors=True)
+    for name in STOCK_FILES:
+        f = run_dir / name
+        if f.is_file():
+            freed += f.stat().st_size
+            f.unlink(missing_ok=True)
+    if freed:
+        log(f"Стоки запуска удалены: {freed / 1e9:.1f} ГБ ({run_dir.name})")
+    return freed
 
 
 def _timeline_done(raw: dict) -> bool:

@@ -20,10 +20,15 @@ from typing import Any
 from engine.core.cancel import CancelToken
 from engine.core.logutil import log
 from engine.publish import materials, registry, schedule, youtube
-from engine.publish.adspower import AdsPower
+from engine.publish.adspower import AdsPower, AdsPowerDown
 
 ProgressCb = Callable[[float, str], None]
 DONE, FAILED, LIMIT, SKIPPED = "done", "failed", "limit", "skipped"
+# AdsPower закрыт/завис/перезапускается: канал не провален — ждём программу и продолжаем с того же места
+WAITING = "waiting"
+ADSPOWER_POLL_SEC = 60  # как часто проверять, вернулся ли AdsPower (попытки при этом не тратятся)
+ADSPOWER_DOWN = ("AdsPower не отвечает (закрыт, завис или перезапускается) — жду его и продолжу сам с того же места, "
+                 "проверяю раз в минуту. Если AdsPower закрыт — просто открой его")
 
 
 @dataclass
@@ -47,6 +52,7 @@ class PublishRequest:
     plan_id: str = ""  # свои даты/время запуска (schedule.create_plan)
     visible: bool = True
     keep_files: bool = True
+    run_dir: str = ""  # рабочая папка запуска (слайды): при keep_files=False удаляем и её копию ролика
     comment: str = ""  # комментарий-призыв под вышедшими роликами канала (закрепляется)
     reply_comments: bool = True  # ответить зрителям (сердечко + ответ) на канале выкладки
     llm: tuple[str, str, str] | None = None  # нейросеть для ответов зрителям
@@ -216,6 +222,9 @@ def run_publish(req: PublishRequest, state: dict[str, Any], save: Callable[..., 
     done_n = len(targets) - len(todo)
     key, url = req.adspower
     with AdsPower(key, url) as ap:
+        if todo and not ap.alive():
+            # AdsPower ещё не поднялся — не начинаем (попытки не тратим), проверим через минуту
+            raise PublishLimit(ADSPOWER_DOWN, time.time() + ADSPOWER_POLL_SEC)
         for pid, group in by_profile.items():
             session = None
             try:
@@ -280,8 +289,9 @@ def run_publish(req: PublishRequest, state: dict[str, Any], save: Callable[..., 
                                                     draft_url=rec.get("draft_url", ""), on_draft=keep_draft)
                                 break
                             except Exception as exc:
-                                if (cancel is not None and cancel.is_cancelled()) or not youtube.browser_lost(exc) \
-                                        or attempt > PROFILE_RESTARTS:
+                                if cancel is not None and cancel.is_cancelled():
+                                    raise
+                                if not _profile_lost(ap, pid, exc) or attempt > PROFILE_RESTARTS:
                                     raise
                                 # профиль закрылся посреди загрузки — перезапустить и пройти канал заново
                                 session = _restart_profile(ap, pid, t.label(), attempt)
@@ -317,6 +327,14 @@ def run_publish(req: PublishRequest, state: dict[str, Any], save: Callable[..., 
                                     raise
                                 rec["notes"].append(f"ответы на комментарии не получились: {str(exc).splitlines()[0][:300]}")
                         done_n += 1
+                    except AdsPowerDown:
+                        # канал не провален: ссылка на черновик уже сохранена — продолжим его, когда AdsPower вернётся
+                        rec.update(status=WAITING, error=ADSPOWER_DOWN)
+                        results[t.key] = rec
+                        save(channels=results)
+                        live.finish(t, rec)
+                        log(f"Выкладка: {t.label()} — {ADSPOWER_DOWN}")
+                        raise PublishLimit(ADSPOWER_DOWN, time.time() + ADSPOWER_POLL_SEC) from None
                     except youtube.UploadLimit as exc:
                         rec.update(status=LIMIT, error=str(exc), retry_at=exc.until)
                     except Exception as exc:
@@ -373,6 +391,9 @@ def run_publish(req: PublishRequest, state: dict[str, Any], save: Callable[..., 
             r = remove_videos(v.folder, [Path(f) for f, _ in v.files])
             if r:
                 removed_lines.append(r)
+        r = remove_run_copy(Path(req.run_dir)) if req.run_dir else ""
+        if r:
+            removed_lines.append(r)
     removed = " ".join(removed_lines)
     done = sum(1 for t in targets if (results.get(t.key) or {}).get("status") == DONE)
     step(1.0, f"Выкладка готова: {done} канал(а/ов)")
@@ -401,6 +422,21 @@ def run_publish(req: PublishRequest, state: dict[str, Any], save: Callable[..., 
 
 
 PROFILE_RESTARTS = 2  # профиль AdsPower упал посреди канала — столько раз перезапускаем сразу (дальше — повтор позже)
+
+
+def _profile_lost(ap, pid: str, exc: BaseException) -> bool:
+    """Шаг упал, потому что пропал браузер профиля (ошибка шага вроде «нет элемента» — лишь следствие)?
+    AdsPower сам не отвечает — AdsPowerDown: ждём программу, а не перезапускаем профиль впустую."""
+    if isinstance(exc, AdsPowerDown) or not ap.alive():
+        raise AdsPowerDown(ADSPOWER_DOWN) from exc
+    if youtube.browser_lost(exc):
+        return True
+    try:
+        return not ap.is_open(pid)
+    except AdsPowerDown:
+        raise
+    except Exception:
+        return False  # не узнать — считаем ошибкой шага, как раньше
 
 
 def _restart_profile(ap, pid: str, label: str, attempt: int):
@@ -509,7 +545,8 @@ class _Live:
 
     def finish(self, t, rec: dict) -> None:
         status = rec.get("status")
-        stage = {"done": "выложено ✓", "limit": "лимит YouTube — продолжу позже"}.get(status) or \
+        stage = {"done": "выложено ✓", "limit": "лимит YouTube — продолжу позже",
+                 WAITING: "жду AdsPower — продолжу сам"}.get(status) or \
             f"ошибка: {str(rec.get('error') or '')[:160]}"
         self.set(t, status=status or "failed", stage=stage, pct=100 if status == DONE else self.rows[t.key]["pct"])
         self.current = ""
@@ -532,6 +569,8 @@ def _accept_coauthors(req: PublishRequest, targets: list, coauthors: list, resul
     (ролик уже выложен, его не трогаем)."""
     key, url = req.adspower
     with AdsPower(key, url) as ap:
+        if not ap.alive():
+            raise PublishLimit(ADSPOWER_DOWN, time.time() + ADSPOWER_POLL_SEC)
         for co in coauthors:
             pending = [t for t in targets if (results.get(t.key) or {}).get("status") == DONE
                        and co.key not in (results[t.key].get("coauthors_ok") or [])]
@@ -539,6 +578,8 @@ def _accept_coauthors(req: PublishRequest, targets: list, coauthors: list, resul
                 continue
             try:
                 session = ap.start(co.profile_id, headless=not req.visible)
+            except AdsPowerDown:
+                raise PublishLimit(ADSPOWER_DOWN, time.time() + ADSPOWER_POLL_SEC) from None
             except Exception as exc:
                 for t in pending:
                     _coauthor_failed(results[t.key], co, f"профиль не запустился: {exc}")
@@ -566,14 +607,18 @@ def _accept_coauthors(req: PublishRequest, targets: list, coauthors: list, resul
                                         + "), а этого ролика среди ждущих нет — проверь соавторство в Studio")
                                 break
                             except Exception as exc:
-                                if (cancel is not None and cancel.is_cancelled()) or not youtube.browser_lost(exc) \
-                                        or attempt > PROFILE_RESTARTS:
+                                if cancel is not None and cancel.is_cancelled():
+                                    raise
+                                if not _profile_lost(ap, co.profile_id, exc) or attempt > PROFILE_RESTARTS:
                                     raise
                                 _restart_profile(ap, co.profile_id, f"соавтор {co.channel.name}", attempt)
                                 session = ap.start(co.profile_id, headless=not req.visible)
                         rec.setdefault("coauthors_ok", []).append(co.key)
                         rec["coauthors_failed"] = [f for f in rec.get("coauthors_failed") or []
                                                    if f.get("key") != co.key]
+                    except AdsPowerDown:
+                        save(channels=results)  # принятое уже записано; остальное — когда AdsPower вернётся
+                        raise PublishLimit(ADSPOWER_DOWN, time.time() + ADSPOWER_POLL_SEC) from None
                     except Exception as exc:
                         if cancel is not None and cancel.is_cancelled():
                             raise
@@ -664,6 +709,8 @@ def _line(t: registry.Target, rec: dict) -> str:
         return f"✗ {t.label()}: {rec.get('error')}"
     if status == SKIPPED:
         return f"— {t.label()}: {rec.get('error')}"
+    if status == WAITING:
+        return f"⏸ {t.label()}: жду AdsPower"
     return f"… {t.label()}: не выкладывался"
 
 
@@ -694,6 +741,32 @@ def remove_videos(folder: Path, uploaded: list[Path]) -> str:
     log(f"Выкладка: удалено видео ({gone} файл(а/ов), {size / 1e9:.1f} ГБ) из «{folder.name}», остальное оставлено")
     return (f"Видео удалено с компьютера: {gone} файл(а/ов), {size / 1e9:.1f} ГБ. Текст, озвучка и главы остались "
             f"в папке «{folder.name}»" + (f" (переименованы понятно: {renamed})" if renamed else ""))
+
+
+def remove_run_copy(run_dir: Path) -> str:
+    """«Не оставлять ролики» для слайдов: в рабочей папке запуска лежит своя копия ролика (final.mp4, переводы)
+    и, у старых запусков, скачанные стоки — после выкладки они только занимают место. Озвучка и тексты остаются."""
+    from engine.slides.paths import RUNS_DIR
+    from engine.slides.resume import drop_stock
+
+    try:
+        run_dir.resolve().relative_to(RUNS_DIR.resolve())
+    except (OSError, ValueError):
+        return ""  # не рабочая папка программы — не трогаем
+    if not run_dir.is_dir() or run_dir.resolve() == RUNS_DIR.resolve():
+        return ""
+    size = drop_stock(run_dir)
+    for f in run_dir.glob("**/final.mp4"):
+        try:
+            if f.is_file():
+                size += f.stat().st_size
+                f.unlink()
+        except OSError as exc:
+            log(f"Выкладка: не удалил {f} ({exc})")
+    if not size:
+        return ""
+    log(f"Выкладка: рабочая копия ролика удалена ({size / 1e9:.1f} ГБ, {run_dir.name})")
+    return f"Рабочая копия ролика в программе тоже удалена: {size / 1e9:.1f} ГБ."
 
 
 def topic_and_date(folder: Path) -> str:

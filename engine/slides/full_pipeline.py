@@ -19,6 +19,7 @@ from engine.slides.media_pipeline import (
 )
 from engine.slides.render_pipeline import RenderRequest, RenderResult, run_render_stage
 from engine.slides.resume import (
+    drop_stock,
     describe_resume,
     detect_stage,
     load_chunks_result,
@@ -277,6 +278,9 @@ def run_full_pipeline(
             cancel=cancel,
             on_progress=lambda p, m: span(0.90, 1.0, p, m),
         )
+
+    # ролик и переводы собраны — скачанные кадры больше не нужны (повторная сборка скачает заново)
+    drop_stock(run_dir)
 
     return FullRunResult(
         tts=tts,
