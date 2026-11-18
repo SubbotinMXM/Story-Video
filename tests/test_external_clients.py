@@ -403,3 +403,13 @@ class LlmQuotaTests(unittest.TestCase):
         self.assertIn("apistore.example", str(ctx.exception))
         self.assertEqual(len(calls), 1, "квоту не ждём и не повторяем")
         self.assertFalse(is_transient(ctx.exception), "автоповтор очереди тоже бесполезен")
+
+
+class NetworkTransientTests(unittest.TestCase):
+    def test_page_timeout_after_sleep_is_retried(self) -> None:
+        from server.jobs import is_transient
+
+        err = RuntimeError('TimeoutError: Page.goto: Timeout 30000ms exceeded.\nnavigating to "https://www.youtube.com/channel_switcher"')
+        self.assertTrue(is_transient(err), "сеть/VPN ещё не поднялись после сна — повторить позже")
+        self.assertTrue(is_transient(RuntimeError("net::ERR_INTERNET_DISCONNECTED at https://studio.youtube.com")))
+        self.assertFalse(is_transient(RuntimeError("шаг «название»: нет элемента")))

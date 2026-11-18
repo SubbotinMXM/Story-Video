@@ -64,8 +64,6 @@ class FullRunRequest:
     strict_sync: bool = False
     # строгий подбор на весь ролик, а не только первые 3 мин (вместе со strict_sync)
     strict_full: bool = False
-    # «Звёзды»: ролик про нескольких людей (engine/slides/stars_media)
-    stars: bool = False
     # свои доли источников, % (None — как по умолчанию: по теме ролика)
     source_mix: dict | None = None
     # если задан — продолжаем этот run, пропуская готовые стадии
@@ -196,7 +194,7 @@ def run_full_pipeline(
 
     # --- Media (частичный timeline тоже продолжается внутри) ---
     media_ready = not needs_stage(stage, "media_done") and (
-        stage == "render_done" or timeline_matches(run_dir, strict=req.strict_sync, full=req.strict_full, stars=req.stars)
+        stage == "render_done" or timeline_matches(run_dir, strict=req.strict_sync, full=req.strict_full)
     )
     if media_ready:
         media = load_media_result(run_dir)
@@ -212,7 +210,6 @@ def run_full_pipeline(
                 llm_model=req.llm_model,
                 strict_sync=req.strict_sync,
                 strict_full=req.strict_full,
-                stars=req.stars,
                 source_mix=req.source_mix,
                 ai=req.ai,
             ),

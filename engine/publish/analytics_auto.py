@@ -120,7 +120,13 @@ def loop(manager, load_config, every: float = 30.0) -> None:
 
     while True:
         try:
-            tick(manager, load_config())
+            cfg = load_config()
+            # расписание включено — Mac не засыпает (иначе во сне рвётся VPN и запуск по расписанию без сети)
+            if normalize(cfg.get("analytics_auto")).get("enabled"):
+                manager.awake.hold("schedule")
+            else:
+                manager.awake.release("schedule")
+            tick(manager, cfg)
         except Exception as exc:  # noqa: BLE001 — сбой проверки не должен останавливать приложение
             log(f"Аналитика по расписанию: {exc}")
         time.sleep(every)

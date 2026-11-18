@@ -76,10 +76,11 @@ class HoleFillingTests(unittest.TestCase):
 
 class ModeMappingTests(unittest.TestCase):
     def test_runner_flags(self) -> None:
-        self.assertEqual(_media_mode({"media_mode": "theme"}), {"strict_sync": False, "strict_full": False, "stars": False, "source_mix": None})
-        self.assertEqual(_media_mode({"media_mode": "strict_3min"}), {"strict_sync": True, "strict_full": False, "stars": False, "source_mix": None})
-        self.assertEqual(_media_mode({"media_mode": "strict_full"}), {"strict_sync": True, "strict_full": True, "stars": False, "source_mix": None})
-        self.assertEqual(_media_mode({"media_mode": "stars"}), {"strict_sync": False, "strict_full": False, "stars": True, "source_mix": None})
+        self.assertEqual(_media_mode({"media_mode": "theme"}), {"strict_sync": False, "strict_full": False, "source_mix": None})
+        self.assertEqual(_media_mode({"media_mode": "strict_3min"}), {"strict_sync": True, "strict_full": False, "source_mix": None})
+        self.assertEqual(_media_mode({"media_mode": "strict_full"}), {"strict_sync": True, "strict_full": True, "source_mix": None})
+        # раздела «Звёзды» нет: старые задачи и настройка идут «по смыслу», люди распознаются сами
+        self.assertEqual(_media_mode({"media_mode": "stars"}), {"strict_sync": False, "strict_full": False, "source_mix": None})
 
     def test_mode_frozen_in_job_params(self) -> None:
         params: dict = {}

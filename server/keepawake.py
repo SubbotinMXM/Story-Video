@@ -7,6 +7,10 @@ macOS `caffeinate -i` держит систему бодрствующей (эк
 даются крохи. По журналу: распознавание 59 минут аудио днём 6–8 мин, ночью с погасшим экраном —
 7,5 часа, и вся ночная очередь вставала. Поэтому на время работы приложение объявляет системе
 «занят работой, начатой пользователем» (NSProcessInfo.beginActivity) — App Nap не включается.
+
+Причин не спать может быть несколько (reason): «queue» — в очереди работа, «schedule» — включено
+расписание (аналитика): иначе Mac засыпает между задачами, VPN во сне рвётся, и запуск по расписанию
+в «тёмном» пробуждении упирается в отсутствие сети (18.11, 06:02). Сон разрешён, только когда причин нет.
 """
 
 from __future__ import annotations
@@ -26,14 +30,16 @@ class KeepAwake:
         self._proc: subprocess.Popen | None = None
         self._bin = shutil.which("caffeinate") if sys.platform == "darwin" else None
         self._activity = None  # токен NSProcessInfo: пока есть — App Nap выключен
+        self._reasons: set[str] = set()
 
     @property
     def active(self) -> bool:
         with self._lock:
             return self._proc is not None and self._proc.poll() is None
 
-    def hold(self) -> None:
+    def hold(self, reason: str = "queue") -> None:
         with self._lock:
+            self._reasons.add(reason)
             if self._bin is None or (self._proc is not None and self._proc.poll() is None):
                 return
             try:
@@ -46,7 +52,8 @@ class KeepAwake:
                 log(f"Не удалось запретить сон: {exc}")
                 return
             self._begin_activity()
-        log("Сон Mac отключён на время генерации (и притормаживание с погасшим экраном — тоже)")
+        log("Сон Mac отключён: " + ("включено расписание" if reason == "schedule" else "идёт работа")
+            + " (экран гаснет как обычно; притормаживание с погасшим экраном тоже отключено)")
 
     def _begin_activity(self) -> None:
         if self._activity is not None or sys.platform != "darwin":
@@ -72,8 +79,11 @@ class KeepAwake:
         except Exception:
             pass
 
-    def release(self) -> None:
+    def release(self, reason: str = "queue") -> None:
         with self._lock:
+            self._reasons.discard(reason)
+            if self._reasons:
+                return  # есть другая причина не спать (например, расписание)
             proc, self._proc = self._proc, None
             self._end_activity()
         if proc is None or proc.poll() is not None:
@@ -83,4 +93,4 @@ class KeepAwake:
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             proc.kill()
-        log("Очередь пуста — Mac снова может засыпать")
+        log("Работы и расписаний нет — Mac снова может засыпать")

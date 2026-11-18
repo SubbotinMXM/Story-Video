@@ -106,7 +106,7 @@ class StarsCastTests(unittest.TestCase):
         from engine.slides.theme_plan import ThemePlan
 
         star = sm.Star(1, "Андрей Миронов", "Andrei Mironov", "Андрей Миронов", "photo", "1941–1987", "советский актёр")
-        imgs, _vids = person_query_set(sm._star_plan(ThemePlan(summary="s"), star), star.search, "photo")
+        imgs, _vids = person_query_set(sm._star_plan(ThemePlan(summary="s"), star, star.search), star.search, "photo")
         self.assertEqual(imgs[0], '"Андрей Миронов" советский актёр')
 
 

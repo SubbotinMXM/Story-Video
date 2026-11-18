@@ -72,13 +72,18 @@ def person_query_set(plan: ThemePlan, name: str, kind: str) -> tuple[list[str], 
     def quoted(qs: list[str]) -> list[str]:
         out: list[str] = []
         for q in qs:
-            q = re.sub(re.escape(name), f'"{name}"', q, flags=re.I) if '"' not in q else q
+            q = quote_name(q, name)
             if q not in out:
                 out.append(q)
         return out
 
     # запросы плана с уточнением («… советский актёр») — первыми: точнее, тёзка в выдаче реже
     return quoted(extra_i + images)[:16], quoted(extra_v + videos)[:8]
+
+
+def quote_name(query: str, name: str) -> str:
+    """Имя героя в кавычках — поиск ищет точное совпадение."""
+    return re.sub(re.escape(name), f'"{name}"', query, flags=re.I) if '"' not in query else query
 
 
 def _search(clients: dict, source: str, queries: list[str], *, video: bool, cancel: CancelToken | None) -> list[StockCandidate]:
@@ -142,8 +147,11 @@ def collect_person_pool(
     pct_hi: float,
     image_need: int,
     video_need: int,
+    anchors: list[str] | None = None,
 ) -> tuple[list[dict], list[dict], int, int]:
-    """Пул только с героем → (videos, images, отбраковано видео, картинок)."""
+    """Пул только с героем → (videos, images, отбраковано видео, картинок).
+    anchors — точные запросы (имя + кто это + годы): лицо героя узнаём по их выдаче, а не по всем
+    фото с этим именем — иначе тёзка, которого в выдаче больше, стал бы «героем»."""
     from engine.slides.theme_media import CLIP_SEC, _extract_frames
 
     span = pct_hi - pct_lo
@@ -197,7 +205,15 @@ def collect_person_pool(
             if n % 10 == 0:
                 progress(pct_lo + span * 0.55 * n / max(1, len(futs)), f"Фото героя: проверено {n}/{len(futs)}, подходит {len(got)}")
 
-    hero = faces.find_hero([h["faces"] for h in got]) if photo else None
+    hero = None
+    if photo and anchors:
+        exact = {quote_name(q, name).lower() for q in anchors}
+        sure = [h["faces"] for h in got if str(h["cand"].query or "").lower() in exact]
+        hero = faces.find_hero(sure)
+        if hero is not None:
+            log(f"Герой: лицо «{name}» взято по точным запросам ({len(sure)} фото) — тёзки отсекаются")
+    if photo and hero is None:
+        hero = faces.find_hero([h["faces"] for h in got])
     if photo and hero is not None:
         keep = [h for h in got if faces.is_hero_shot(h["faces"], hero)]
         rejected_i += len(got) - len(keep)

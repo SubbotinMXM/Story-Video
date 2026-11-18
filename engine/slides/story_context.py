@@ -22,7 +22,7 @@ Schema:
   "title": "1-3 words in the SCRIPT language: the subject of the film, used as a folder name. Person if there is one (Архимед), otherwise the topic (Афины, природа)",
   "characters": ["main people/roles in English, historically accurate names if known"],
   "visual_style": "one of: historical_reenactment | documentary_archive | nature | modern_lifestyle | science | abstract",
-  "subject": "one of: person | place | nature | history | other. person = the film is mainly about one specific real person (living celebrity or historical figure); place = a country, city, region, building, or a nation / people; nature = animals, landscapes, natural phenomena; history = historical events or an era without one main hero; other = anything else",
+  "subject": "one of: person | place | nature | history | other. person = the film is mainly about one or several specific real people (a biography of a celebrity or historical figure, or stories about several celebrities one after another); place = a country, city, region, building, or a nation / people; nature = animals, landscapes, natural phenomena; history = historical events or an era without one main hero; other = anything else",
   "must_include": ["2-6 English keywords that MUST bias every search (era/place/identity)"],
   "avoid": ["4-10 English anachronism keywords to avoid, e.g. smartphone, modern kitchen, yogurt, jeans, car"],
   "historical": true/false,

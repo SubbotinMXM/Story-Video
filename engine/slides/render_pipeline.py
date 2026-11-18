@@ -432,8 +432,8 @@ def _preset_chapters(run_dir: Path, language: str) -> list[tuple[float, str]] | 
         raw = json.loads((run_dir / TIMELINE_NAME).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(raw, dict) or raw.get("variant") != "stars":
-        return None
+    if not isinstance(raw, dict) or raw.get("variant") != "stars" or len(raw.get("stars") or []) < 2:
+        return None  # один герой — обычные главы по смыслу, а не «Вступление — Ванга — Заключение»
     from engine.slides.stars_media import star_chapters
 
     return star_chapters(raw, language) or None

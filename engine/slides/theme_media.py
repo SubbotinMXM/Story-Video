@@ -125,7 +125,8 @@ def collect_theme_pool(
 
     from engine.slides.person_media import collect_person_pool, person_mode
 
-    hero = person_mode(plan)
+    # people=False — подбор по героям уже пробовали (stars_media): повторять те же поиски незачем
+    hero = person_mode(plan) if req.people else None
     try:
         videos: list[dict] = []
         images: list[dict] = []

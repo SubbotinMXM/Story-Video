@@ -61,6 +61,9 @@ _TRANSIENT = (
     " 500", " 502", " 503", " 504", " 520", " 521", " 522", " 523", " 524", "cloudflare",
     # YouTube временно ограничил доступ с этого адреса — обычно проходит само через какое-то время
     "подтвердить, что это не робот",
+    # браузер не открыл страницу: сеть/VPN ещё не поднялись после сна или обрыв — проходит само
+    "page.goto: timeout", "net::err_internet_disconnected", "net::err_name_not_resolved", "net::err_connection",
+    "net::err_timed_out", "net::err_network_changed", "net::err_proxy", "net::err_tunnel",
 )
 
 

@@ -19,11 +19,6 @@ export const MEDIA_MODES = [
     title: "Строго весь ролик",
     text: "Кадр под текст на всю длину, смена каждые 3–5 с, фото и видео вперемешку. Дольше всего.",
   },
-  {
-    id: "stars",
-    title: "Звёзды",
-    text: "Ролик про нескольких людей: на часть текста про каждого — только его настоящие фото (проверка по лицу), иногда видео. Вступление и заключение — фото всех героев. Главы — по героям, плюс превью для YouTube. AI-кадров нет.",
-  },
 ] as const;
 
 /** Рассказы: футажи, голова диктора, надпись в углу. */
@@ -69,6 +64,8 @@ export function BrollIntroCard() {
 /** Стоковые слайды: режим подбора кадров. */
 export function MediaModeCard() {
   const { settings, update } = useLoadedSettings();
+  // раздела «Звёзды» больше нет — старая настройка показывается как «По смыслу»
+  const mode = settings.media_mode === "stars" ? "theme" : settings.media_mode;
   return (
     <Card title="Подбор кадров">
       <div className="stack">
@@ -77,8 +74,8 @@ export function MediaModeCard() {
             <button
               key={m.id}
               role="radio"
-              aria-checked={settings.media_mode === m.id}
-              className={`provider ${settings.media_mode === m.id ? "active" : ""}`}
+              aria-checked={mode === m.id}
+              className={`provider ${mode === m.id ? "active" : ""}`}
               onClick={() => update({ media_mode: m.id })}
             >
               <span className="radio" />
@@ -89,19 +86,22 @@ export function MediaModeCard() {
             </button>
           ))}
         </div>
-        {settings.media_mode === "stars" && (
-          <Field
-            label="Кто эти люди (необязательно)"
-            hint="Тёзки и однофамильцы: программа берёт людей по контексту ролика (все советские артисты — значит, и этот советский). Если не уверена — остановится и спросит: впиши сюда уточнение и нажми «Продолжить»."
-          >
-            <Textarea
-              value={settings.stars_notes}
-              onChange={(v) => update({ stars_notes: v })}
-              rows={3}
-              placeholder={"Андрей Миронов — советский актёр, 1941–1987\nЛюдмила Гурченко — советская актриса"}
-            />
-          </Field>
-        )}
+        <div className="notice small">
+          Ролик про конкретных людей (один человек или несколько) программа распознаёт сама в любом режиме: пока
+          рассказ идёт про человека — только его настоящие фото и видео в разном порядке (проверка по лицу), потом —
+          следующего. Тёзки отсекаются по смыслу ролика: кто он, откуда, годы жизни.
+        </div>
+        <Field
+          label="Кто эти люди (необязательно)"
+          hint="Нужно, только если программа сама не поймёт, о ком речь: она остановится и спросит — впиши уточнение и нажми «Продолжить»."
+        >
+          <Textarea
+            value={settings.stars_notes}
+            onChange={(v) => update({ stars_notes: v })}
+            rows={3}
+            placeholder={"Андрей Миронов — советский актёр, 1941–1987\nЛюдмила Гурченко — советская актриса"}
+          />
+        </Field>
         <div className="muted small">
           Кадры ищутся везде: YouTube, Pexels, Pixabay, Unsplash, Google, Wikimedia, Archive. Доля источников
           подстраивается под тему ролика. Видео — цель 1080p, не ниже 720p.

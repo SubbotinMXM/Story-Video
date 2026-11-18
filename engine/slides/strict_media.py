@@ -547,7 +547,7 @@ def collect_strict_timeline(
         plan = ensure_theme_plan(run_dir, script_path.read_text(encoding="utf-8"), client)
         from engine.slides.person_media import person_mode
 
-        if person_mode(plan) is not None:
+        if req.people and person_mode(plan) is not None:
             # Ролик про конкретного человека: по фразам искать нечего — нужны только его
             # фото и видео. Пул с героем подходит и к строгим режимам.
             log("Строгий ряд: ролик про человека — беру только его фото и видео")

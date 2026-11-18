@@ -61,8 +61,9 @@ class MediaRequest:
     llm_model: str = ""
     strict_sync: bool = False
     strict_full: bool = False
-    # «Звёзды»: несколько героев, на отрезок каждого — его фото (engine/slides/stars_media)
-    stars: bool = False
+    # ролик про конкретных людей — на часть текста про каждого его фото (engine/slides/stars_media);
+    # False — уже проверено (людей нет / фото не нашлось), подбор по режиму как обычно
+    people: bool = True
     # свои доли источников {ai, stocks, youtube, google, wikimedia, archive}, %; None — по теме ролика
     source_mix: dict | None = None
     # AI-кадры (RoyalTechno): None — выключены, ролик только из живых кадров
@@ -90,10 +91,16 @@ def run_media_stage(
     cancel: CancelToken | None = None,
     on_progress: ProgressCb | None = None,
 ) -> MediaStageResult:
-    if req.stars:
-        from engine.slides.stars_media import collect_stars_timeline
+    if req.people:
+        # в любом режиме: ролик про людей — кадры по героям, а не по фразам и не вперемешку
+        from dataclasses import replace
 
-        return collect_stars_timeline(req, cancel=cancel, on_progress=on_progress)
+        from engine.slides.stars_media import collect_people_timeline
+
+        done = collect_people_timeline(req, cancel=cancel, on_progress=on_progress)
+        if done is not None:
+            return done
+        req = replace(req, people=False)
     if req.strict_sync:
         from engine.slides.strict_media import collect_strict_timeline
 

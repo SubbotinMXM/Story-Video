@@ -64,13 +64,13 @@ def detect_stage(run_dir: Path) -> str:
     return chk.stage if chk.stage in STAGE_ORDER else "none"
 
 
-def timeline_matches(run_dir: Path, *, strict: bool, full: bool = False, stars: bool = False) -> bool:
+def timeline_matches(run_dir: Path, *, strict: bool, full: bool = False) -> bool:
     """Уже собранный timeline подходит под текущий режим подбора (и его кадры ещё на диске)."""
     raw = _read_timeline(run_dir)
     if raw is None or not has_stock(run_dir):
         return False
-    if stars or raw.get("variant") == "stars":
-        return stars and raw.get("variant") == "stars" and bool(raw.get("slots"))
+    if raw.get("variant") == "stars":
+        return bool(raw.get("slots"))  # ролик про людей — кадры по героям в любом режиме
     if raw.get("person") and raw.get("mode") == "theme_pool" and raw.get("images"):
         return True  # пул «только герой» собирается одинаково для любого режима
     if strict:

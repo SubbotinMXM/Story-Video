@@ -426,6 +426,21 @@ class KeepAwakeTests(unittest.TestCase):
         k.release()  # повторно — без ошибок
         self.assertIsNotNone(first.poll())
 
+    def test_schedule_keeps_mac_awake_between_jobs(self) -> None:
+        """18.11: очередь опустела в 04:08 — Mac уснул, VPN порвался, аналитика по расписанию в 06:02 без сети.
+        Пока включено расписание, конец работы очереди сон не разрешает."""
+        from server.keepawake import KeepAwake
+
+        k = KeepAwake()
+        if k._bin is None:
+            self.skipTest("caffeinate есть только на macOS")
+        k.hold("schedule")
+        k.hold()  # пришла задача
+        k.release()  # очередь пуста
+        self.assertTrue(k.active, "расписание включено — не спим")
+        k.release("schedule")  # расписание выключили
+        self.assertFalse(k.active)
+
 
 class SingleInstanceTests(unittest.TestCase):
     def test_second_instance_refused(self) -> None:

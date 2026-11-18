@@ -205,13 +205,13 @@ def _media_mode(cfg: dict, params: dict | None = None) -> dict[str, Any]:
     from engine.slides.source_mix import clean_mix
 
     mode = str((params or {}).get("media_mode") or "") or _s(cfg, "media_mode") or "theme"
+    if mode == "stars":
+        mode = "theme"  # раздела «Звёзды» больше нет: ролик про людей распознаётся в любом режиме
     if params is not None:
         params.setdefault("media_mode", mode)
     return {
         "strict_sync": mode in ("strict_3min", "strict_full"),
         "strict_full": mode == "strict_full",
-        # «Звёзды»: ролик про нескольких людей — на каждого его фото
-        "stars": mode == "stars",
         # свои доли источников (None — по умолчанию, по теме ролика)
         "source_mix": clean_mix(cfg.get("source_mix")),
     }
