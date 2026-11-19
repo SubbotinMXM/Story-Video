@@ -317,7 +317,7 @@ def sync(api_key: str, url: str, *, profile_ids: list[str] | None = None, cancel
     if only:
         profiles = [p for p in profiles if any(c.id in only for c in p.channels)]
         if not profiles:
-            raise AnalyticsError("каналов группы нет в профилях AdsPower — нажми «Синхронизировать всё»")
+            raise AnalyticsError("каналов выбранных групп нет в профилях — найди каналы в нужных профилях (список профилей выше)")
     if not profiles:
         raise AnalyticsError("нет каналов: в «Выкладке» нажми «Синхронизировать с AdsPower» и «Обновить каналы»")
     ok: list[str] = []
@@ -364,6 +364,10 @@ def sync(api_key: str, url: str, *, profile_ids: list[str] | None = None, cancel
                     entry = registry.set_channels(p.id, found, studio=env or None)
                     state["channels"] = [c for c in entry.channels if not only or c.id in only]
                     added.extend(f"{c.name} ({c.handle}) — {p.label()}" for c in entry.channels if c.id not in before)
+                elif found == [] and not p.channels:
+                    # каналов в профиле нет — запоминаем, что смотрели: иначе его будут открывать при каждой синхронизации
+                    registry.set_channels(p.id, [], studio=env or None)
+                    notes.append(f"{p.label()}: каналов в профиле нет (не вошли в Google или канал не создан)")
                 elif found is not None and p.channels:
                     # пусто, а раньше каналы были — скорее сбой чтения, чем удаление: список не трогаем
                     notes.append(f"{p.label()}: каналов не нашлось — оставил прежний список, проверь «Обновить каналы»")

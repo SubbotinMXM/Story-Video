@@ -248,7 +248,11 @@ class SyncScopeTest(unittest.TestCase):
         self.assertIn("analytics-sync-groups", page, "выбор групп запоминается")
         self.assertIn("params: { groups: syncEffective }", page)
         self.assertNotIn("Синхронизировать всё", page, "кнопки «синхронизировать всё» больше нет")
-        self.assertIn("Только AdsPower", page, "список профилей AdsPower — отдельной кнопкой, по всем")
+        # профили, которые ни разу не открывали, в группах не бывают: каналы в них ищутся кнопкой у профиля
+        self.assertIn("params: { profiles: [", page)
+        self.assertIn("Синхронизация с AdsPower", page)
+        self.assertIn("Найти все каналы в профилях", page)
+        self.assertNotIn("Только AdsPower", page)
 
 
 class SyncTest(unittest.TestCase):
@@ -322,6 +326,52 @@ class SyncTest(unittest.TestCase):
         self.assertEqual([c.id for c in registry.load()["p2"].channels], ["UCc"], "пустой поиск не стёр каналы")
         self.assertTrue(any("оставил прежний список" in n for n in out["notes"]))
         self.assertIn("UCnew", an.load())
+
+    def test_group_sync_does_not_open_unknown_profiles(self) -> None:
+        """Профили, которых программа не открывала, сами не сканируются: чужие и ненужные профили не трогаем.
+        Каналы в них ищутся только по кнопке у конкретного профиля или «Найти все каналы в профилях»."""
+        opened = []
+
+        def in_profile(key, url, pid, work, *, headless, timeout, what, again, cancel=None):
+            opened.append(pid)
+            return work("ws://x", mock.Mock())
+
+        with mock.patch("engine.publish.scan.in_profile", in_profile), mock.patch.object(an, "collect", lambda *a, **k: None), \
+                mock.patch("engine.publish.youtube.scan_channels", lambda *a, **k: None), \
+                mock.patch.object(an, "_refresh_profiles", lambda k, u: ""):
+            an.sync("k", "u", channel_ids=["UCa"])
+        self.assertEqual(opened, ["p1"], "p3 (пустой, не сканировался) и p2 (не из группы) не открываются")
+
+    def test_one_profile_scan_finds_channels_with_numbers(self) -> None:
+        """Кнопка «Найти каналы» у профиля: открывается только он, каналы попадают в учёт (для всего приложения) и в аналитику."""
+        opened = []
+
+        def in_profile(key, url, pid, work, *, headless, timeout, what, again, cancel=None):
+            opened.append(pid)
+            return work("ws://x", mock.Mock())
+
+        def collect(cdp, channels, *, cancel=None, on_channel=None, pulse=None):
+            for ch in channels:
+                on_channel(an.Stats(ch.id, ch.name, ch.handle, subscribers=7))
+
+        with mock.patch("engine.publish.scan.in_profile", in_profile), mock.patch.object(an, "collect", collect), \
+                mock.patch("engine.publish.youtube.scan_channels", lambda *a, **k: [registry.Channel("UCp3", "Из третьего", "@p3")]):
+            out = an.sync("k", "u", profile_ids=["p3"])
+        self.assertEqual(opened, ["p3"])
+        self.assertEqual([c.id for c in registry.load()["p3"].channels], ["UCp3"])
+        self.assertIn("UCp3", an.load())
+        self.assertEqual(len(out["added"]), 1)
+
+    def test_empty_profile_is_marked_scanned_not_reopened_every_time(self) -> None:
+        def in_profile(key, url, pid, work, *, headless, timeout, what, again, cancel=None):
+            return work("ws://x", mock.Mock())
+
+        with mock.patch("engine.publish.scan.in_profile", in_profile), mock.patch.object(an, "collect", lambda *a, **k: None), \
+                mock.patch("engine.publish.youtube.scan_channels", lambda *a, **k: []), \
+                mock.patch.object(an, "_refresh_profiles", lambda k, u: ""):
+            out = an.sync("k", "u", profile_ids=["p3"])
+        self.assertTrue(registry.load()["p3"].scanned_at)
+        self.assertTrue(any("каналов в профиле нет" in n for n in out["notes"]))
 
 
 class ApiTest(unittest.TestCase):

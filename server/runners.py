@@ -1257,6 +1257,12 @@ def _analytics_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
     # конкретные каналы (кнопка «Показанные в таблице» и т. п.): профили без них не открываем
     picked = list(dict.fromkeys(str(c) for c in params.get("channels") or [] if str(c).strip()))
     title = "Аналитика каналов"
+    if profiles and not (picked or groups or group):
+        from engine.publish import registry as _reg
+
+        known = _reg.load()
+        names = [known[p].label() for p in profiles if p in known]
+        title = ("Каналы профиля: " + names[0]) if len(profiles) == 1 and names else f"Каналы профилей: {len(profiles)}"
     if picked:
         title += f": выбранные ({len(picked)})"
     elif groups:

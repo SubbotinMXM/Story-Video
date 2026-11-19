@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, BarChart3, Check, Clock, Pencil, Plus, RefreshCw, Tags, Trash2, X } from "lucide-react";
 import { Badge, Button, Card, Empty, PageHeader, Progress, Select, Toggle } from "../components/ui";
-import { api, type AnalyticsAuto, type AnalyticsGroup, type AnalyticsRow } from "../lib/api";
+import { api, type AnalyticsAuto, type AnalyticsGroup, type AnalyticsRow, type PublishProfile } from "../lib/api";
 import { useJobs, useLoadedSettings, useProfiles, useToasts } from "../lib/store";
 import { inAnyGroup, inFilter, NO_GROUP, toggleFilter } from "../lib/groups";
 
@@ -78,22 +78,23 @@ export function AnalyticsPage({ active }: { active: boolean }) {
   }, [active, running, job?.status, job?.progress, load]);
 
   const { push } = useToasts();
-  const { setProfiles } = useProfiles();
+  const { profiles: registry, setProfiles } = useProfiles();
   const [adsBusy, setAdsBusy] = useState(false);
-  // «Только AdsPower»: список профилей без открытия — у новых профилей каналов ещё нет, их найдёт «Найти каналы во всех профилях»
+  // «Синхронизация с AdsPower»: только свежий список профилей (названия, новые, удалённые). Профили не открываются:
+  // каналы ищутся «Найти все каналы в профилях» или кнопкой у нужного профиля
   const syncAds = async () => {
     setAdsBusy(true);
     try {
       const { profiles } = await api.publishSync();
       setProfiles(profiles); // список профилей — сразу во всех разделах
       const live = profiles.filter((p) => !p.missing);
-      const fresh = live.filter((p) => !p.scanned_at).length;
       const gone = profiles.length - live.length;
+      const fresh = live.filter((p) => !p.scanned_at).length;
       push({
         kind: "ok",
         title: `AdsPower: профилей ${live.length}`,
         text: [
-          fresh ? `без прочитанных каналов: ${fresh} — их каналы появятся после «Найти каналы во всех профилях» (или «Найти каналы» у профиля при выкладке)` : "",
+          fresh ? `каналы ещё не искали в ${fresh} — найди их в нужных профилях (список ниже)` : "",
           gone ? `нет в AdsPower: ${gone}` : "",
         ].filter(Boolean).join("; ") || "Список профилей обновлён",
       });
@@ -104,6 +105,16 @@ export function AnalyticsPage({ active }: { active: boolean }) {
       setAdsBusy(false);
     }
   };
+  // профили, по которым прямо сейчас ищутся каналы (в очереди или идут)
+  const scanning = useMemo(() => {
+    const ids = new Set<string>();
+    jobs.forEach((j) => {
+      if (j.kind === "analytics" && (j.status === "running" || j.status === "queued")) {
+        ((j.params?.profiles as string[] | undefined) ?? []).forEach((id) => ids.add(id));
+      }
+    });
+    return ids;
+  }, [jobs]);
   const { settings, update } = useLoadedSettings();
   const groups: AnalyticsGroup[] = settings.analytics_groups ?? [];
   const view = { group: "", profile: "", sort: "views_48h", dir: "desc", ...(settings.analytics_view ?? {}) };
@@ -202,6 +213,9 @@ export function AnalyticsPage({ active }: { active: boolean }) {
         onRun={sync}
         onRunAll={() => void enqueue([{ kind: "analytics", params: {} }])}
         onAds={() => void syncAds()}
+        profiles={registry}
+        scanning={scanning}
+        onScanProfile={(id) => void enqueue([{ kind: "analytics", params: { profiles: [id] } }])}
       />
       {running && job && (
         <Card>
@@ -546,79 +560,147 @@ function ManualSync(props: {
   onRun: () => void;
   onRunAll: () => void;
   onAds: () => void;
+  profiles: PublishProfile[];
+  /** id профилей, по которым сейчас ищутся каналы. */
+  scanning: Set<string>;
+  onScanProfile: (id: string) => void;
 }) {
-  const { groups, rows, selected, onChange, count, running, busy, disabled, onRun, onRunAll, onAds } = props;
+  const { groups, rows, selected, onChange, count, running, busy, disabled, onRun, onRunAll, onAds, profiles, scanning, onScanProfile } = props;
   const ids = new Set(rows.map((r) => r.channel_id));
   const inGroup = (g: AnalyticsGroup) => g.channels.filter((c) => ids.has(c)).length;
   const loose = rows.filter((r) => !groups.some((g) => g.channels.includes(r.channel_id))).length;
   const toggle = (id: string) => onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
   const allIds = [...groups.map((g) => g.id)];
+  const live = profiles.filter((p) => !p.missing);
+  const noChannels = live.filter((p) => p.channels.length === 0).length;
+  const [q, setQ] = useState("");
+  const [onlyNew, setOnlyNew] = useState(false);
+  const shown = live.filter((p) => {
+    if (onlyNew && (p.channels.length > 0 || p.scanned_at)) return false;
+    const hay = `${p.number} ${p.name} ${p.group} ${p.channels.map((c) => `${c.name} ${c.handle}`).join(" ")}`.toLowerCase();
+    return !q.trim() || hay.includes(q.trim().toLowerCase());
+  });
+  const busyAll = running || busy;
+  const runningWide = running && scanning.size === 0; // идёт не поиск в отдельных профилях
   return (
     <Card>
-      <div className="stack" style={{ gap: 12 }}>
-        <div className="an-sync-head">
-          <div>
-            <div className="an-sync-title">Синхронизация каналов</div>
-            <div className="muted small">
-              Профили из AdsPower обновляются все, а цифры — только у каналов выбранных групп. Канал из нескольких групп берётся один раз.
+      <div className="stack" style={{ gap: 14 }}>
+        <div className="an-sync-title">Синхронизация</div>
+        <div className="an-sync-actions">
+          <div className="an-sync-action">
+            <Button icon={<RefreshCw size={16} />} onClick={onAds} loading={busy} disabled={busyAll}>
+              Синхронизация с AdsPower
+            </Button>
+            <div className="muted small">Подтягивает и обновляет список всех профилей (новые, переименованные, удалённые). Профили не открывает.</div>
+          </div>
+          <div className="an-sync-action">
+            <Button variant="primary" icon={<RefreshCw size={16} />} onClick={onRunAll} loading={runningWide} disabled={busyAll}>
+              {runningWide ? "Ищу каналы…" : "Найти все каналы в профилях"}
+            </Button>
+            <div className="muted small">Сначала обновляет список из AdsPower, потом открывает все профили скрыто, по одному: находит каналы и снимает цифры. Долго.</div>
+          </div>
+        </div>
+
+        <div className="an-profs">
+          <div className="an-profs-head">
+            <div>
+              <div className="an-sync-title">Профили AdsPower · {live.length}</div>
+              <div className="muted small">
+                Нужны не все? Найди каналы только у нужных профилей — они сразу появятся в таблице и во всём приложении, в том числе при создании роликов.
+                {noChannels > 0 && ` Без каналов: ${noChannels}.`}
+              </div>
+            </div>
+            <div className="an-profs-tools">
+              <input className="input" placeholder="Найти профиль или канал" value={q} onChange={(e) => setQ(e.target.value)} />
+              <label className="an-profs-check">
+                <input type="checkbox" checked={onlyNew} onChange={(e) => setOnlyNew(e.target.checked)} /> только не искали
+              </label>
             </div>
           </div>
-          <Button
-            icon={<RefreshCw size={16} />}
-            onClick={onAds}
-            loading={busy}
-            disabled={running || busy}
-            title="Только список профилей из AdsPower: новые, переименованные, удалённые. Каналы и цифры не трогает, профили не открывает."
-          >
-            Только AdsPower
-          </Button>
+          {live.length === 0 ? (
+            <div className="muted small">Профилей пока нет — нажми «Синхронизация с AdsPower».</div>
+          ) : (
+            <div className="an-profs-list" role="list">
+              {shown.length === 0 && <div className="muted small an-profs-empty">Ничего не найдено</div>}
+              {shown.map((p) => {
+                const going = scanning.has(p.id);
+                const n = p.channels.length;
+                return (
+                  <div className="an-prof" role="listitem" key={p.id}>
+                    <div className="an-prof-main">
+                      <div className="an-prof-name" title={p.name}>
+                        <span className="muted">№{p.number}</span> {p.name || "без названия"}
+                      </div>
+                      <div className="muted small an-prof-sub">
+                        {p.group && <span>{p.group} · </span>}
+                        {n > 0
+                          ? p.channels.map((c) => c.name).join(", ")
+                          : p.scanned_at
+                            ? "каналов в профиле нет"
+                            : "каналы ещё не искали"}
+                      </div>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant={n === 0 && !p.scanned_at ? "primary" : "ghost"}
+                      icon={<RefreshCw size={14} />}
+                      onClick={() => onScanProfile(p.id)}
+                      loading={going}
+                      disabled={going || busyAll}
+                      title="Открыть этот профиль скрыто, найти его каналы и снять цифры"
+                    >
+                      {going ? "Ищу…" : n > 0 ? "Обновить" : "Найти каналы"}
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
-        {rows.length === 0 ? (
-          <div className="an-sync-run">
-            <Button variant="primary" icon={<RefreshCw size={16} />} onClick={onRunAll} loading={running} disabled={running || busy}
-              title="Первый запуск: профили открываются скрыто по одному, в каждом находятся каналы и снимаются цифры.">
-              {running ? "Ищу каналы…" : "Найти каналы во всех профилях"}
-            </Button>
-            <span className="muted small">Каналов пока нет: сначала найдём их во всех профилях, потом соберёшь их в группы.</span>
-          </div>
-        ) : groups.length === 0 ? (
-          <div className="muted small">Групп пока нет — создай группу кнопкой «+ Группа» ниже и добавь в неё каналы (столбец «Группы»).</div>
-        ) : (
-          <div className="chips" role="group" aria-label="Группы для синхронизации">
-            {groups.map((g) => (
+
+        {rows.length > 0 && groups.length > 0 && (
+          <div className="stack" style={{ gap: 10 }}>
+            <div>
+              <div className="an-sync-title">Обновить цифры по группам</div>
+              <div className="muted small">Только каналы выбранных групп (канал из нескольких групп берётся один раз). Профили без этих каналов не открываются.</div>
+            </div>
+            <div className="chips" role="group" aria-label="Группы для синхронизации">
+              {groups.map((g) => (
+                <button
+                  type="button"
+                  key={g.id}
+                  className={`chip ${selected.includes(g.id) ? "active" : ""}`}
+                  aria-pressed={selected.includes(g.id)}
+                  onClick={() => toggle(g.id)}
+                  title="Можно выбрать несколько групп"
+                >
+                  {g.name} · {inGroup(g)}
+                </button>
+              ))}
               <button
                 type="button"
-                key={g.id}
-                className={`chip ${selected.includes(g.id) ? "active" : ""}`}
-                aria-pressed={selected.includes(g.id)}
-                onClick={() => toggle(g.id)}
-                title="Можно выбрать несколько групп"
+                className={`chip ${selected.includes(NO_GROUP) ? "active" : ""}`}
+                aria-pressed={selected.includes(NO_GROUP)}
+                onClick={() => toggle(NO_GROUP)}
+                title="Каналы, которых нет ни в одной группе (например, только что найденные)"
               >
-                {g.name} · {inGroup(g)}
+                Без группы · {loose}
               </button>
-            ))}
-            <button
-              type="button"
-              className={`chip ${selected.includes(NO_GROUP) ? "active" : ""}`}
-              aria-pressed={selected.includes(NO_GROUP)}
-              onClick={() => toggle(NO_GROUP)}
-              title="Каналы, которых нет ни в одной группе (например, только что найденные)"
-            >
-              Без группы · {loose}
-            </button>
-            <Button size="sm" variant="ghost" onClick={() => onChange(selected.length === allIds.length ? [] : allIds)}>
-              {selected.length === allIds.length ? "Снять все" : "Все группы"}
-            </Button>
+              <Button size="sm" variant="ghost" onClick={() => onChange(selected.length === allIds.length ? [] : allIds)}>
+                {selected.length === allIds.length ? "Снять все" : "Все группы"}
+              </Button>
+            </div>
+            <div className="an-sync-run">
+              <Button icon={<RefreshCw size={16} />} onClick={onRun} loading={runningWide} disabled={busyAll || disabled}>
+                {runningWide ? "Обновляю…" : `Обновить цифры · ${count} ${count === 1 ? "канал" : count > 1 && count < 5 ? "канала" : "каналов"}`}
+              </Button>
+              {!running && selected.length === 0 && <span className="muted small">Выбери хотя бы одну группу.</span>}
+              {!running && selected.length > 1 && <span className="muted small">Выбрано несколько групп — берутся каналы всех этих групп.</span>}
+            </div>
           </div>
         )}
-        {rows.length > 0 && (
-          <div className="an-sync-run">
-            <Button variant="primary" icon={<RefreshCw size={16} />} onClick={onRun} loading={running} disabled={running || busy || disabled}>
-              {running ? "Синхронизирую…" : `Синхронизировать · ${count} ${count === 1 ? "канал" : count > 1 && count < 5 ? "канала" : "каналов"}`}
-            </Button>
-            {!running && selected.length === 0 && groups.length > 0 && <span className="muted small">Выбери хотя бы одну группу.</span>}
-            {!running && selected.length > 1 && <span className="muted small">Выбрано несколько групп — синхронизируются каналы всех этих групп.</span>}
-          </div>
+        {rows.length > 0 && groups.length === 0 && (
+          <div className="muted small">Групп пока нет — создай группу кнопкой «+ Группа» ниже и добавь в неё каналы (столбец «Группы»).</div>
         )}
       </div>
     </Card>
