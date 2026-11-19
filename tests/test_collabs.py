@@ -241,3 +241,12 @@ class WiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestsDoNotTouchUserQueueTest(unittest.TestCase):
+    def test_queue_file_is_not_the_real_one(self) -> None:
+        """Тесты не пишут в настоящий data/jobs.json (раньше туда попали «задачи подтверждения соавторств» из тестов)."""
+        from engine.core.config import PROJECT_ROOT
+        from server import jobs
+
+        self.assertNotEqual(jobs.JOBS_FILE.resolve(), (PROJECT_ROOT / "data" / "jobs.json").resolve())

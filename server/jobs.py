@@ -33,7 +33,8 @@ CANCELLED = "cancelled"
 FINISHED = {DONE, FAILED, CANCELLED}
 RESUMABLE = {FAILED, CANCELLED}
 
-JOBS_FILE = DATA_DIR / "jobs.json"
+# тесты (tests/_isolate.py) задают свой файл очереди: настоящий jobs.json пользователя они не трогают
+JOBS_FILE = Path(os.environ["STORY_VIDEO_JOBS_FILE"]) if os.environ.get("STORY_VIDEO_JOBS_FILE") else DATA_DIR / "jobs.json"
 HISTORY_LIMIT = 100
 
 # (job, progress_cb, cancel) -> result dict

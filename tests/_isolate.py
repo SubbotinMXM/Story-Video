@@ -13,6 +13,8 @@ os.environ["STORY_VIDEO_CHAPTERS_DIR"] = tempfile.mkdtemp(prefix="story-video-ch
 os.environ["STORY_VIDEO_PUBLISH_DIR"] = tempfile.mkdtemp(prefix="story-video-publish-")
 # память проверки фото героев между роликами — во временную папку, не в data/cache
 os.environ["STORY_VIDEO_JUDGE_CACHE_DIR"] = tempfile.mkdtemp(prefix="story-video-judgecache-")
+# очередь задач — во временный файл: тесты не пишут в настоящий data/jobs.json (там остались «задачи» из тестов)
+os.environ["STORY_VIDEO_JOBS_FILE"] = os.path.join(tempfile.mkdtemp(prefix="story-video-jobs-"), "jobs.json")
 # распознавание надписей macOS не собирается в data/bin (тесты, где оно нужно, подменяют чтение)
 os.environ["STORY_VIDEO_OCR_OFF"] = "1"
 # баланс RoyalTechno при постановке задач — без запроса в сеть
