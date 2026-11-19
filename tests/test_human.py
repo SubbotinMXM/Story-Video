@@ -149,6 +149,39 @@ class ClickTest(unittest.TestCase):
         self.assertEqual(loc.clicked, 1, "Playwright сам проверит, куда жмёт")
 
 
+class CoverTest(unittest.TestCase):
+    """Кнопку перекрыла всплывашка Studio (календарь остался открытым): закрываем Escape и жмём снова."""
+
+    def test_popup_over_button_is_closed_with_escape_then_clicked(self) -> None:
+        page = FakePage()
+        loc = FakeLocator(page, 300)
+        state = {"open": True}
+        orig = loc.evaluate
+
+        def evaluate(js, arg=None):
+            if arg is None and "elementFromPoint" in str(js):
+                return "ytcp-date-picker" if state["open"] else ""
+            if arg is not None:
+                return not state["open"]  # пока панель открыта, под мышью не кнопка
+            return orig(js, arg)
+
+        loc.evaluate = evaluate
+        page.keyboard.press = lambda key: (page.keyboard.typed.append(("press", key)), state.update(open=False))
+        human.click(page, loc)
+        self.assertIn(("press", "Escape"), page.keyboard.typed)
+        self.assertEqual(page.mouse.events[-1], ("up",), "после закрытия панели — обычный клик мышью")
+        self.assertEqual(loc.clicked, 0)
+
+    def test_sticky_header_is_not_escaped(self) -> None:
+        """Закреплённая шапка — не всплывашка: Escape не нажимаем (он мог бы закрыть окно загрузки)."""
+        page = FakePage()
+        loc = FakeLocator(page, 300)
+        loc.covered_below = -1  # всегда перекрыта, но evaluate(_COVER_JS) вернёт None
+        human.click(page, loc)
+        self.assertNotIn(("press", "Escape"), page.keyboard.typed)
+        self.assertEqual(loc.clicked, 1)
+
+
 class TypeTest(unittest.TestCase):
     def test_short_text_by_letters_with_delay(self) -> None:
         page = FakePage()

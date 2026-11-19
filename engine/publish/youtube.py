@@ -1081,22 +1081,159 @@ _DATE_JS = """(iso) => { const [y, m, d] = iso.split('-').map(Number);
         .format(new Date(y, m - 1, d)); }"""
 
 
+def norm_date(text: str) -> str:
+    """Дата для сравнения: Studio пишет «20 нояб. 2026\u202fг.» (узкий неразрывный пробел), а Intl браузера отдаёт
+    обычный пробел или «\u00a0» — буквально строки не совпадают, хотя дата одна и та же. Без регистра, пробелов,
+    знаков препинания и хвоста «г.»."""
+    words = re.sub(r"[^\w]+", " ", str(text or "").casefold()).split()
+    if words and words[-1] == "г":
+        words.pop()
+    return " ".join(words)
+
+
+# Дата, которую показывает Studio, → «2026-11-20» (пусто — не поняли). Названия месяцев берём у самого браузера на языке
+# страницы (Intl): так читается любой язык Studio и любой формат («20 нояб. 2026 г.», «Nov 20, 2026», «20 de nov. de 2026»,
+# «2026. 11. 20.»), без списка языков в коде. Месяц — по самому длинному совпадающему началу слова.
+_PARSE_DATE_JS = r"""(text) => {
+    const lang = document.documentElement.lang || 'en';
+    const clean = (t) => String(t).toLowerCase().replace(/[.,]/g, ' ').replace(/[\u00a0\u202f]/g, ' ');
+    const names = [];
+    for (let m = 0; m < 12; m++) {
+        const set = new Set();
+        for (const style of ['short', 'long']) {
+            for (const f of [{month: style}, {month: style, day: 'numeric'}]) {
+                const part = new Intl.DateTimeFormat(lang, f).formatToParts(new Date(2026, m, 15)).find(p => p.type === 'month');
+                if (part) set.add(clean(part.value).trim());
+            }
+        }
+        names.push([...set].filter(x => x.length >= 2 && !/^\d+$/.test(x)));
+    }
+    const words = clean(text).split(/\s+/).filter(Boolean);
+    const nums = words.filter(w => /^\d+$/.test(w)).map(Number);
+    const year = nums.find(n => n >= 2000 && n <= 2100);
+    let month = -1, best = 0;
+    for (const w of words) {
+        if (/^\d+$/.test(w)) continue;
+        names.forEach((alts, m) => alts.forEach(n => {
+            const stem = n.length > 4 ? n.slice(0, Math.max(3, n.length - 1)) : n;
+            if ((w === n || w.startsWith(stem)) && stem.length > best) { best = stem.length; month = m; }
+        }));
+    }
+    if (month < 0 || !year) {  // числовой формат: год-месяц-день, день.месяц.год или месяц/день/год — по порядку полей Intl
+        const order = new Intl.DateTimeFormat(lang, {year: 'numeric', month: '2-digit', day: '2-digit'})
+            .formatToParts(new Date(2026, 10, 20)).filter(p => ['year', 'month', 'day'].includes(p.type)).map(p => p.type);
+        const n3 = clean(text).match(/\d+/g) || [];
+        if (n3.length >= 3 && order.length === 3) {
+            const v = {}; order.forEach((t, i) => v[t] = Number(n3[i]));
+            if (v.year > 2000 && v.month >= 1 && v.month <= 12) { month = v.month - 1; return `${v.year}-${String(v.month).padStart(2, '0')}-${String(v.day).padStart(2, '0')}`; }
+        }
+        return '';
+    }
+    const day = nums.find(n => n >= 1 && n <= 31 && n !== year);
+    return day ? `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}` : '';
+}"""
+
+# Клик по дню в открытом календаре Studio (запасной путь, если набрать дату не получилось): нужный месяц листаем,
+# день — span.calendar-day без disabled/invisible; помечаем его атрибутом, дальше кликает человекоподобная мышь.
+_PICK_DAY_JS = r"""([iso, parse]) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    const find = (new Function('return ' + parse))();
+    const months = [...document.querySelectorAll('ytcp-date-picker .calendar-month')];
+    const box = document.querySelector('ytcp-date-picker #calendar-main');
+    for (const mon of months) {
+        const label = mon.getAttribute('aria-label') || (mon.querySelector('.calendar-month-label') || {}).textContent || '';
+        const got = find(label + ' 1');  // «Нояб. 2026 г.» + день → «2026-11-01»
+        if (got && got.startsWith(`${y}-${String(m).padStart(2, '0')}`)) {
+            const cell = [...mon.querySelectorAll('.calendar-day')].find(c => c.textContent.trim() === String(d)
+                && !c.classList.contains('invisible') && !c.classList.contains('disabled'));
+            if (!cell) return 'disabled';
+            cell.scrollIntoView({block: 'center'});
+            document.querySelectorAll('[data-sv-pick]').forEach(e => e.removeAttribute('data-sv-pick'));
+            cell.setAttribute('data-sv-pick', '1');
+            return 'ok';
+        }
+    }
+    if (box) box.scrollBy(0, Math.max(200, box.clientHeight * 0.8));  // нужного месяца в списке нет — листаем вниз
+    return 'scroll';
+}"""
+
+
+def studio_date(page, text: str) -> str:
+    """Дата из текста Studio («20 нояб. 2026 г.») → «2026-11-20»; не поняли — пусто."""
+    try:
+        return str(page.evaluate(_PARSE_DATE_JS, text) or "")
+    except Exception:
+        return ""
+
+
+def _date_popup_open(page) -> bool:
+    """Календарь даты уже раскрыт (после неудачной попытки он остаётся на экране и перекрывает кнопки)."""
+    try:
+        return page.locator("ytcp-date-picker input").first.is_visible()
+    except Exception:
+        return False
+
+
+def _date_ok(page, want_iso: str, typed: str) -> bool:
+    """Studio держит именно эту дату: по смыслу (любой язык и формат), а не только по совпадению строк."""
+    from engine.publish.studio_kit import el
+
+    shown = el(page, "date_trigger").inner_text()
+    return studio_date(page, shown) == want_iso or norm_date(shown) == norm_date(typed)
+
+
+def _pick_calendar_day(page, when, cancel: CancelToken | None) -> bool:
+    """Запасной путь: кликнуть нужный день в календаре, как человек (не зависит от языка и формата даты)."""
+    iso = when.date().isoformat()
+    for _ in range(30):  # до ~2,5 лет вперёд: календарь листается по ~6 месяцев за раз
+        _act(cancel)
+        try:
+            res = page.evaluate(_PICK_DAY_JS, [iso, _PARSE_DATE_JS])
+        except Exception:
+            return False
+        if res == "ok":
+            page.wait_for_timeout(300)
+            cell = page.locator('ytcp-date-picker [data-sv-pick="1"]').first
+            human.click(page, cell)
+            page.wait_for_timeout(1000)
+            return True
+        if res == "disabled":
+            return False  # дата в прошлом / недоступна — кликать нечего
+        page.wait_for_timeout(400)
+    return False
+
+
 def _set_date(page, when, cancel: CancelToken | None) -> None:
-    """Дата публикации в формате языка Studio (так же форматирует сам браузер: «12 Nov 2027», «12 нояб. 2027 г.»).
-    После ввода сверяем, что Studio показала именно её; не совпало — запасной английский формат."""
-    variants = [page.evaluate(_DATE_JS, when.date().isoformat()), f"{when.day} {when:%b %Y}", f"{when:%b} {when.day}, {when:%Y}"]
+    """Дата публикации. Сначала набираем в формате языка Studio (как форматирует сам браузер: «12 Nov 2027»,
+    «12 нояб. 2027 г.»), потом запасные английские форматы; после каждого — сверяем, какую дату Studio держит ПО
+    СМЫСЛУ (не по строке: пробелы, «г.», порядок полей — не важны). Не получилось набрать — кликаем день в
+    календаре. Календарь после неудачи остаётся открытым — второй раз по полю не кликаем, а вводим в него; если не
+    вышло совсем — закрываем его, чтобы повтор начинался с чистого экрана."""
+    want = when.date().isoformat()
+    variants = [page.evaluate(_DATE_JS, want), f"{when.day} {when:%b %Y}", f"{when:%b} {when.day}, {when:%Y}"]
     from engine.publish.studio_kit import el
 
     for text in dict.fromkeys(variants):
         _act(cancel)
-        human.click(page, el(page, "date_trigger"))
+        if not _date_popup_open(page):
+            human.click(page, el(page, "date_trigger"))
         _type_into(page, el(page, "date_input"), text, cancel)
         human.press(page, "Enter")
         page.wait_for_timeout(1200)
-        if el(page, "date_trigger").inner_text().strip() == text:
+        if _date_ok(page, want, text):
             return
         log(f"Studio: дата «{text}» не принята — пробую другой формат")
+    log("Studio: дату не удалось набрать — выбираю день в календаре")
+    if not _date_popup_open(page):
+        human.click(page, el(page, "date_trigger"))
+    if _pick_calendar_day(page, when, cancel) and studio_date(page, el(page, "date_trigger").inner_text()) == want:
+        return
     shown = el(page, "date_trigger").inner_text().strip()
+    if _date_popup_open(page):  # не оставляем календарь поверх окна: повтор дозаполнит черновик с чистого экрана
+        try:
+            human.press(page, "Escape")
+        except Exception:
+            pass
     raise StudioError(f"дата публикации не вписалась (в Studio «{shown}», нужно {when:%d.%m.%Y})")
 
 
@@ -1146,6 +1283,14 @@ PENDING_VISITS = 4  # Studio обрабатывает видео — столь�
 _PENDING = re.compile(r"pending|processing|обрабатыва|ожида", re.I)
 
 
+def _shown_has_date(page, shown: str, expected_text: str) -> bool:
+    """В тексте блока доступа («Запланировано 20 нояб. 2026 г., 19:00») та же дата, что ожидали — по смыслу."""
+    want = studio_date(page, expected_text)
+    if not want:
+        return False
+    return any(studio_date(page, chunk) == want for chunk in re.split(r"[;|•]|\s{2,}", shown) + [shown])
+
+
 def _check_scheduled(page, expected_date: str, url: str) -> list[str]:
     """На странице видео (после _confirm_saved): в блоке доступа должна стоять дата выхода. Не видно —
     не ошибка (видео сохранено, повтор создал бы дубль), а пометка «проверь в Studio»."""
@@ -1164,7 +1309,7 @@ def _check_scheduled(page, expected_date: str, url: str) -> list[str]:
         except Exception:
             shown = ""
             continue
-        if expected_date and expected_date in shown:
+        if expected_date and (norm_date(expected_date) in norm_date(shown) or _shown_has_date(page, shown, expected_date)):
             log(f"Studio: видео запланировано — {shown}")
             return []
         if not _PENDING.search(shown):

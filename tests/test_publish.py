@@ -903,6 +903,122 @@ class ScheduledPendingTest(unittest.TestCase):
         notes = youtube._check_scheduled(self._Page(["Scheduled Nov 16, 2026"]), "Nov 15, 2026", "https://youtu.be/x")
         self.assertIn("не вижу запланированной даты", notes[0])
 
+    def test_russian_studio_date_with_narrow_space_matches(self):
+        """Studio (ru) пишет «…2026\u202fг.», а ожидаемая строка — с обычным пробелом: это одна и та же дата."""
+        shown = "Запланировано 20 нояб. 2026\u202fг., 19:00"
+        self.assertEqual(youtube._check_scheduled(self._Page([shown]), "20 нояб. 2026 г.", "https://youtu.be/x"), [])
+
+
+class SetDateTest(unittest.TestCase):
+    """Дата публикации: принимаем по смыслу (любой язык и формат), при провале ввода — клик по дню в календаре,
+    при полном провале — чистый экран и понятная ошибка."""
+
+    class _Box:
+        text = ""
+
+        def inner_text(self, **_):
+            return self.text
+
+    class _Page:
+        """Studio-заглушка. shown(typed, n) — что покажет поле даты после n-го ввода; parse — как «браузер» читает текст."""
+
+        def __init__(self, shown, parse=None, pick=("ok",), popup=False):
+            self.shown, self.pick, self.popup = shown, list(pick), popup
+            self.parse = parse or (lambda t: "2026-11-20" if "20" in t and ("2026" in t) else "")
+            self.typed, self.pick_calls = [], 0
+            self.after_pick = None
+
+        def evaluate(self, js, arg=None):
+            if js is youtube._PARSE_DATE_JS:
+                return self.parse(arg)
+            if js is youtube._PICK_DAY_JS:
+                self.pick_calls += 1
+                return self.pick.pop(0) if self.pick else "scroll"
+            return "20 нояб. 2026 г."  # _DATE_JS: дата в формате языка Studio
+
+        def wait_for_timeout(self, _ms):
+            return None
+
+        def locator(self, _sel):
+            page = self
+
+            class L:
+                first = type("F", (), {"is_visible": lambda self_: page.popup})()
+
+            return L()
+
+    def _run(self, page):
+        box = self._Box()
+        clicks, keys = [], []
+
+        def el(_page, name, **_):
+            if name == "date_trigger":
+                n = len(page.typed)
+                shown = page.shown(page.typed[-1] if page.typed else "", n)
+                box.text = page.typed[-1] if shown == "ECHO" else (page.after_pick if shown == "PICKED" else shown)
+                return box
+            return object()
+
+        def type_into(_page, _loc, text, _cancel):
+            page.typed.append(text)
+            page.popup = True
+
+        def click(_p, loc):
+            clicks.append(loc)
+            if page.pick_calls and page.after_pick is None:
+                page.after_pick = "20 нояб. 2026\u202fг."  # клик по дню в календаре выставил дату
+
+        with mock.patch("engine.publish.studio_kit.el", el), mock.patch.object(youtube, "_type_into", type_into), \
+                mock.patch.object(youtube.human, "click", click), \
+                mock.patch.object(youtube.human, "press", lambda _p, key, *a, **k: keys.append(key)):
+            err = None
+            try:
+                youtube._set_date(page, datetime(2026, 11, 20, 17, 0), None)
+            except youtube.StudioError as exc:
+                err = exc
+        return page, clicks, keys, err
+
+    def test_narrow_space_and_suffix_is_accepted_on_first_try(self):
+        page, _c, _k, err = self._run(self._Page(lambda t, n: "20 нояб. 2026\u202fг."))
+        self.assertIsNone(err)
+        self.assertEqual(page.typed, ["20 нояб. 2026 г."], "второй формат не пробуем и календарь не ломаем")
+
+    def test_accepted_by_meaning_even_if_studio_shows_another_format(self):
+        """Studio показала «2026. 11. 20.», набирали «20 нояб. 2026 г.»: строки разные, дата одна — принимаем."""
+        page, _c, _k, err = self._run(self._Page(lambda t, n: "2026. 11. 20.", parse=lambda t: "2026-11-20"))
+        self.assertIsNone(err)
+        self.assertEqual(len(page.typed), 1)
+
+    def test_open_calendar_is_not_clicked_again(self):
+        """Первый формат не подошёл — календарь остался открытым: второй раз вводим в него, по полю не кликаем."""
+        page, clicks, _k, err = self._run(self._Page(lambda t, n: "Недопустимая" if n < 2 else "ECHO",
+                                                     parse=lambda t: ""))
+        self.assertIsNone(err)
+        self.assertEqual(len(page.typed), 2)
+        self.assertEqual(len(clicks), 1, "по полю даты кликнули один раз — повторный клик упирался в открытый календарь")
+
+    def test_calendar_click_is_the_fallback_when_typing_never_works(self):
+        """Ни один формат не принят (новый язык/формат Studio) — день выбирается кликом в календаре, с прокруткой."""
+        page = self._Page(lambda t, n: "PICKED" if page_after(page) else "Недопустимая дата",
+                          parse=lambda t: "2026-11-20" if "нояб" in t else "", pick=("scroll", "scroll", "ok"))
+        page_after = lambda p: p.after_pick is not None  # noqa: E731
+        page, clicks, keys, err = self._run(page)
+        self.assertIsNone(err)
+        self.assertEqual(len(page.typed), 3, "все три формата попробовали")
+        self.assertEqual(page.pick_calls, 3, "месяц пролистали дважды, потом нашли день")
+        self.assertNotIn("Escape", keys)
+
+    def test_total_failure_closes_calendar_and_reports(self):
+        page, _c, keys, err = self._run(self._Page(lambda t, n: "Недопустимая дата", parse=lambda t: "", pick=("disabled",)))
+        self.assertIsNotNone(err)
+        self.assertIn("не вписалась", str(err))
+        self.assertIn("Escape", keys, "календарь не остаётся поверх окна")
+
+    def test_norm_date(self):
+        self.assertEqual(youtube.norm_date("20 нояб. 2026\u202fг."), youtube.norm_date("20 нояб. 2026 г."))
+        self.assertEqual(youtube.norm_date("Nov 20, 2026"), "nov 20 2026")
+        self.assertNotEqual(youtube.norm_date("20 нояб. 2026"), youtube.norm_date("21 нояб. 2026"))
+
 
 class WalkToVisibilityTest(unittest.TestCase):
     """Шаги окна загрузки: без монетизации — «Далее» как раньше; с монетизацией — шаги проходит программа."""

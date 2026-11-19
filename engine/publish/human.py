@@ -128,6 +128,31 @@ def center(page, locator) -> dict | None:
     return box
 
 
+# Что перекрывает элемент: всплывашка Studio (календарь даты, выпадающий список, меню, подсказка), внутри которой самого
+# элемента нет. Пусто — не всплывашка (закреплённая шапка/панель окна — их обходим колесом, а не Escape).
+_COVER_JS = """(el) => { const r = el.getBoundingClientRect();
+    const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (!top || el.contains(top) || top.contains(el)) return '';
+    const pop = top.closest('ytcp-date-picker, tp-yt-iron-dropdown, ytcp-text-menu, tp-yt-paper-menu-button, '
+        + 'ytcp-popup-container, tp-yt-paper-tooltip, ytcp-ve-dropdown, ytcp-select-menu');
+    return pop && !pop.contains(el) ? pop.tagName.toLowerCase() : ''; }"""
+
+
+def _dismiss_cover(page, locator) -> bool:
+    """Кнопку перекрыла всплывашка (раскрытый календарь, список, меню — после неудачного шага они остаются на
+    экране): закрываем её, как человек, клавишей Escape (закрывается верхняя всплывашка, окно загрузки остаётся)."""
+    try:
+        name = locator.evaluate(_COVER_JS)
+    except Exception:
+        return False
+    if not name:
+        return False
+    log(f"Studio: кнопку перекрыла всплывающая панель «{name}» — закрываю (Escape) и нажимаю снова")
+    page.keyboard.press("Escape")
+    _sleep(page, 0.5, 0.9)
+    return True
+
+
 def _hits(locator, x: float, y: float) -> bool:
     try:
         return bool(locator.evaluate(_HIT, [x, y]))
@@ -153,6 +178,12 @@ def click(page, locator, *, timeout: int = 15000) -> None:
             _sleep(page, 0.2, 0.5)
             page.mouse.wheel(0, -220)
             _sleep(page, 0.3, 0.6)
+            box = locator.bounding_box(timeout=timeout)
+        except Exception:
+            box = None
+        point = _free_point(locator, box)
+    if point is None and _dismiss_cover(page, locator):
+        try:
             box = locator.bounding_box(timeout=timeout)
         except Exception:
             box = None

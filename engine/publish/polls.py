@@ -346,8 +346,9 @@ def _set_date(page, local: datetime, cancel) -> None:
         human.type_text(page, text, cancel)
         human.press(page, "Enter")
         page.wait_for_timeout(1200)
-        if _norm(el(page, "post_date").inner_text()) == _norm(text):
-            return
+        shown = el(page, "post_date").inner_text()
+        if _norm(shown) == _norm(text) or youtube.studio_date(page, shown) == local.date().isoformat():
+            return  # та же дата — хоть по строке, хоть по смыслу (язык, порядок полей, «г.», узкие пробелы)
         log(f"Голосования: дата «{text}» не принята — пробую другой формат")
     raise youtube.StudioError(f"дата опроса не вписалась (показано «{el(page, 'post_date').inner_text().strip()}», "
                               f"нужно {local:%d.%m.%Y})")
