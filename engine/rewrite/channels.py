@@ -37,6 +37,10 @@ class ChannelError(RuntimeError):
     pass
 
 
+class KeysExhausted(ChannelError):
+    """Ни один ключ YouTube API не может ответить (квота кончилась / доступ запрещён) — не сбой запроса."""
+
+
 @dataclass
 class Video:
     id: str
@@ -150,24 +154,40 @@ class _Api:
     def __init__(self, keys: list[str]) -> None:
         from engine.slides.stocks_base import KeyPool
 
-        self.keys = KeyPool(keys)
+        # у поиска свой суточный лимит: исчерпан он — ключ всё ещё годен для channels / videos / playlistItems,
+        # поэтому «негодные» ключи помним отдельно для поиска и для остальных запросов
+        self.pools = {"search": KeyPool(keys), "other": KeyPool(keys)}
         self.http = httpx.Client(timeout=30.0, trust_env=False)
 
     def close(self) -> None:
         self.http.close()
 
     def get(self, path: str, params: dict) -> dict:
+        from engine.slides import youtube_cache, youtube_errors as yerr
+
+        cacheable = path == "search"  # поиск стоит 100 единиц — повторный такой же запрос берём из кэша
+        if cacheable and (hit := youtube_cache.get(params)) is not None:
+            return hit
+        pool = self.pools["search" if cacheable else "other"]
+        problems: dict[str, str] = {}  # ключ → почему не работает (для понятного сообщения)
         while True:
-            key = self.keys.next()
+            key = pool.next()
             if not key:
-                raise ChannelError("ключи YouTube API кончились (квота) или не подходят")
+                raise KeysExhausted(yerr.exhausted_message(problems))
             resp = self.http.get(f"{API}/{path}", params={**params, "key": key})
             if resp.status_code in (403, 429):
-                self.keys.mark_bad(key)
+                kind, why = yerr.classify(resp)
+                if kind == "quota":
+                    yerr.note_quota_spent(key)
+                problems[key] = why
+                pool.mark_bad(key)
                 continue
             if resp.status_code >= 400:
                 raise ChannelError(f"YouTube API {resp.status_code}: {resp.text[:150]}")
-            return resp.json()
+            data = resp.json()
+            if cacheable:
+                youtube_cache.put(params, data)
+            return data
 
 
 def _channel_query(url: str) -> dict:

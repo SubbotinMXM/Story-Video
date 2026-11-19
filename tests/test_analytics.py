@@ -162,6 +162,95 @@ class ScheduledCountTest(unittest.TestCase):
         self.assertEqual((st.subscribers, st.views_48h, st.scheduled), (5, 7, None), "основные цифры не страдают")
 
 
+class SyncScopeTest(unittest.TestCase):
+    """Кнопка «Синхронизировать»: каналы выбранных групп (канал может быть в нескольких группах)."""
+
+    def setUp(self) -> None:
+        self.CFG = {"adspower_api_key": "k", "adspower_url": "http://x", "analytics_groups": [
+            {"id": "g1", "name": "Максим", "channels": ["UC1", "UC2", "UC3"]},
+            {"id": "g2", "name": "Рассказы", "channels": ["UC3", "UC4"]},  # UC3 — в обеих группах
+            {"id": "g3", "name": "Пустая", "channels": []}]}
+
+    def run_job(self, params):
+        from server import runners
+
+        title, run = runners._analytics_job(dict(self.CFG), params, {})
+        seen = {}
+
+        def fake_sync(key, url, **kw):
+            seen.update(kw)
+            return {"ok": ["a"], "failed": [], "total": 1, "added": [], "notes": []}
+
+        with mock.patch.object(an, "sync", fake_sync), mock.patch("server.runners.load_config", lambda: dict(self.CFG)):
+            out = run(mock.MagicMock(), lambda *a: None, mock.MagicMock())
+        return title, seen, out
+
+    def test_one_group_takes_all_its_channels_even_those_also_in_other_groups(self) -> None:
+        title, seen, _ = self.run_job({"groups": ["g1"]})
+        self.assertEqual(seen["channel_ids"], ["UC1", "UC2", "UC3"], "«Максим» целиком, включая UC3, который есть и в «Рассказах»")
+        self.assertEqual(title, "Аналитика каналов: группа «Максим»")
+
+    def test_several_groups_union_without_duplicates(self) -> None:
+        title, seen, _ = self.run_job({"groups": ["g1", "g2"]})
+        self.assertEqual(seen["channel_ids"], ["UC1", "UC2", "UC3", "UC4"], "UC3 — один раз")
+        self.assertIn("группы «Максим», «Рассказы»", title)
+
+    def test_many_groups_short_title(self) -> None:
+        title, _seen, _ = self.run_job({"groups": ["g1", "g2", "g3", "g1x"]})
+        self.assertEqual(title, "Аналитика каналов: 4 групп")
+
+    def test_channels_without_group(self) -> None:
+        from engine.publish import registry
+
+        entry = lambda *ids: mock.Mock(missing=False, channels=[mock.Mock(id=i) for i in ids])  # noqa: E731
+        with mock.patch.object(registry, "load", lambda: {"p1": entry("UC1", "UC5"), "p2": entry("UC6", "UC4")}):
+            title, seen, _ = self.run_job({"groups": ["none"]})
+        self.assertEqual(seen["channel_ids"], ["UC5", "UC6"], "каналы, которых нет ни в одной группе")
+        self.assertIn("без группы", title)
+
+    def test_empty_selection_does_not_sync_everything(self) -> None:
+        _title, seen, out = self.run_job({"groups": ["g3"]})
+        self.assertEqual(seen, {}, "пустые группы — ничего не синхронизируем (не «всё»)")
+        self.assertIn("нет каналов", out["summary"])
+
+    def test_membership_is_read_when_the_job_runs(self) -> None:
+        from server import runners
+
+        _title, run = runners._analytics_job(dict(self.CFG), {"groups": ["g2"]}, {})
+        self.CFG["analytics_groups"][1]["channels"] = ["UC9"]  # группу поменяли, пока задача ждала в очереди
+        seen = {}
+        with mock.patch.object(an, "sync", lambda key, url, **kw: seen.update(kw) or {"ok": [], "failed": [], "total": 0, "added": [], "notes": []}), \
+             mock.patch("server.runners.load_config", lambda: dict(self.CFG)):
+            run(mock.MagicMock(), lambda *a: None, mock.MagicMock())
+        self.assertEqual(seen["channel_ids"], ["UC9"])
+
+    def test_old_group_param_for_schedule_still_works(self) -> None:
+        title, seen, _ = self.run_job({"group": "g2", "auto": True})
+        self.assertEqual(seen["channel_ids"], ["UC3", "UC4"])
+        self.assertIn("(по расписанию)", title)
+
+    def test_explicit_channels_win(self) -> None:
+        _title, seen, _ = self.run_job({"groups": ["g1"], "channels": ["UC9"]})
+        self.assertEqual(seen["channel_ids"], ["UC9"])
+
+    def test_adspower_profile_list_is_refreshed_for_everyone(self) -> None:
+        """Группа сужает только чтение цифр: перечитывание списка профилей из AdsPower в sync() идёт по всем."""
+        import inspect
+
+        src = inspect.getsource(an.sync)
+        self.assertIn("_refresh_profiles(api_key, url)", src)
+        self.assertIn("rescan = discover or bool(only)", src, "с группой профили AdsPower тоже обновляются")
+
+    def test_page_has_group_based_sync_without_sync_everything(self) -> None:
+        from pathlib import Path
+
+        page = (Path(__file__).resolve().parents[1] / "web" / "src" / "pages" / "AnalyticsPage.tsx").read_text(encoding="utf-8")
+        self.assertIn("analytics-sync-groups", page, "выбор групп запоминается")
+        self.assertIn("params: { groups: syncEffective }", page)
+        self.assertNotIn("Синхронизировать всё", page, "кнопки «синхронизировать всё» больше нет")
+        self.assertIn("Только AdsPower", page, "список профилей AdsPower — отдельной кнопкой, по всем")
+
+
 class SyncTest(unittest.TestCase):
     def setUp(self) -> None:
         registry.save({

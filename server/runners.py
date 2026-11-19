@@ -1243,7 +1243,9 @@ def _scan_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
 
 
 def _analytics_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
-    """«Аналитика» → «Синхронизировать всё»: все каналы профилей AdsPower (или выбранные профили), скрыто."""
+    """«Аналитика» → «Синхронизировать»: список профилей из AdsPower обновляется целиком, а цифры читаются только у
+    каналов выбранных групп (groups; канал может быть в нескольких группах — берётся один раз; «none» — каналы без
+    группы). Так же ходит автообновление по расписанию (group). Без выбора (старые запросы) — все каналы."""
     from engine.publish import analytics
 
     key, url = _s(cfg, "adspower_api_key"), _s(cfg, "adspower_url")
@@ -1251,16 +1253,33 @@ def _analytics_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
         raise ValueError("Нужен ключ AdsPower (Настройки → AdsPower)")
     profiles = [str(p) for p in params.get("profiles") or [] if str(p).strip()]
     group = str(params.get("group") or "")
+    groups = list(dict.fromkeys(str(g) for g in params.get("groups") or [] if str(g).strip()))
+    # конкретные каналы (кнопка «Показанные в таблице» и т. п.): профили без них не открываем
+    picked = list(dict.fromkeys(str(c) for c in params.get("channels") or [] if str(c).strip()))
     title = "Аналитика каналов"
-    if group:  # только каналы группы «Аналитики» (так ходит автообновление по расписанию)
+    if picked:
+        title += f": выбранные ({len(picked)})"
+    elif groups:
+        from engine.publish.analytics_auto import group_channels
+
+        names = ["без группы" if g == "none" else f"«{group_channels(cfg, g)[0] or 'удалена'}»" for g in groups]
+        title += ": " + (("группы " if len(names) > 1 else "группа ") + ", ".join(names) if len(names) <= 3
+                         else f"{len(names)} групп")
+    elif group:  # только каналы группы «Аналитики» (так ходит автообновление по расписанию)
         from engine.publish.analytics_auto import group_channels
 
         name, _ = group_channels(cfg, group)
         title += f": группа «{name or 'удалена'}»" + (" (по расписанию)" if params.get("auto") else "")
 
     def run(job: Job, progress, cancel: CancelToken) -> dict[str, Any]:
-        only = None
-        if group:
+        only = picked or None
+        if groups and not picked:
+            from engine.publish.analytics_auto import channels_of_groups
+
+            only = channels_of_groups(load_config(), groups)  # состав групп — на момент запуска
+            if not only:
+                return {"summary": "Аналитика: в выбранных группах нет каналов", "lines": [], "warnings": []}
+        elif group and not picked:
             from engine.publish.analytics_auto import group_channels
 
             name, only = group_channels(load_config(), group)  # состав группы — на момент запуска

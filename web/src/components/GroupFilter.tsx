@@ -2,15 +2,11 @@ import { useEffect, useState } from "react";
 import type { AnalyticsGroup } from "../lib/api";
 import { useLoadedSettings } from "../lib/store";
 
-/** Фильтр каналов по группам из «Аналитики». Выбрано несколько групп — показываются каналы любой из них.
- *  Пусто — без фильтра. «none» — каналы без группы. */
-export const NO_GROUP = "none";
+import { inAnyGroup, inFilter, NO_GROUP, toggleFilter } from "../lib/groups";
 
-export function inFilter(filter: string[], channelId: string, groups: AnalyticsGroup[]): boolean {
-  if (filter.length === 0) return true;
-  const mine = groups.filter((g) => g.channels.includes(channelId));
-  return filter.some((f) => (f === NO_GROUP ? mine.length === 0 : mine.some((g) => g.id === f)));
-}
+/** Фильтр каналов по группам из «Аналитики». Фильтры сужают: выбрано несколько групп — остаются каналы, которые есть
+ *  во всех выбранных. Пусто — без фильтра. «none» — каналы без группы (с группами не сочетается). */
+export { inAnyGroup, inFilter, NO_GROUP };
 
 /** Выбор фильтра запоминается в браузере отдельно для каждого места (scope). Удалённые группы отбрасываются. */
 export function useGroupFilter(scope: string): [string[], (v: string[]) => void, AnalyticsGroup[]] {
@@ -62,7 +58,7 @@ export function GroupFilter({
   if (groups.length === 0) return null;
   const count = (g: AnalyticsGroup) => channelIds.filter((id) => g.channels.includes(id)).length;
   const loose = channelIds.filter((id) => !groups.some((g) => g.channels.includes(id))).length;
-  const toggle = (id: string) => onChange(value.includes(id) ? value.filter((x) => x !== id) : [...value, id]);
+  const toggle = (id: string) => onChange(toggleFilter(value, id));
   return (
     <div className="gf">
       <div className="chips" role="group" aria-label="Фильтр по группам">
@@ -76,7 +72,7 @@ export function GroupFilter({
             className={`chip ${value.includes(g.id) ? "active" : ""}`}
             aria-pressed={value.includes(g.id)}
             onClick={() => toggle(g.id)}
-            title="Можно выбрать несколько групп — покажутся каналы любой из них"
+            title="Можно выбрать несколько групп — останутся каналы, которые есть во всех выбранных"
           >
             {g.name} · {count(g)}
           </button>

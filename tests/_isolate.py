@@ -21,6 +21,9 @@ os.environ["STORY_VIDEO_OCR_OFF"] = "1"
 os.environ["STORY_VIDEO_ROYAL_OFFLINE"] = "1"
 # уведомления macOS о конце очереди — не в тестах
 os.environ["STORY_VIDEO_NO_NOTIFY"] = "1"
+os.environ["STORY_VIDEO_YT_QUOTA_FILE"] = os.path.join(tempfile.mkdtemp(prefix="story-video-ytquota-"), "q.json")  # память «квота ключа исчерпана»
+os.environ["STORY_VIDEO_YT_CACHE_OFF"] = "1"  # тест кэша включает его сам
+os.environ["STORY_VIDEO_YT_CACHE_DIR"] = tempfile.mkdtemp(prefix="story-video-ytcache-")  # кэш поиска YouTube
 os.environ["STORY_VIDEO_NO_BACKGROUND"] = "1"  # фоновые проверки (соавторства) в тестах не стартуют
 # Claude Code и Codex: тесты не запускают настоящие CLI (лимиты подписок, минуты ожидания)
 os.environ["STORY_VIDEO_SUBS_OFF"] = "1"

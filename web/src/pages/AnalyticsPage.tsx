@@ -3,7 +3,7 @@ import { ArrowDown, ArrowUp, BarChart3, Check, Clock, Pencil, Plus, RefreshCw, T
 import { Badge, Button, Card, Empty, PageHeader, Progress, Select, Toggle } from "../components/ui";
 import { api, type AnalyticsAuto, type AnalyticsGroup, type AnalyticsRow } from "../lib/api";
 import { useJobs, useLoadedSettings, useProfiles, useToasts } from "../lib/store";
-import { inFilter, NO_GROUP } from "../components/GroupFilter";
+import { inAnyGroup, inFilter, NO_GROUP, toggleFilter } from "../lib/groups";
 
 type SortKey = "name" | "subscribers" | "watch_hours" | "views_48h" | "scheduled" | "synced_at";
 const SORTS: { key: SortKey; label: string }[] = [
@@ -49,7 +49,7 @@ function when(ts: number) {
 }
 
 /** Аналитика каналов из профилей AdsPower: подписчики, часы просмотра за всё время, просмотры за 48 часов.
- *  «Синхронизировать всё» — задача в очереди выкладки: профили открываются скрыто, цифры читаются из Studio. */
+ *  «Синхронизировать» — задача в очереди выкладки по выбранным группам: профили открываются скрыто, цифры читаются из Studio. */
 export function AnalyticsPage({ active }: { active: boolean }) {
   const { enqueue, jobs } = useJobs();
   const [rows, setRows] = useState<AnalyticsRow[] | null>(null);
@@ -77,11 +77,10 @@ export function AnalyticsPage({ active }: { active: boolean }) {
     lastStatus.current = job?.status;
   }, [active, running, job?.status, job?.progress, load]);
 
-  const sync = () => void enqueue([{ kind: "analytics", params: {} }]);
   const { push } = useToasts();
   const { setProfiles } = useProfiles();
   const [adsBusy, setAdsBusy] = useState(false);
-  // «Только AdsPower»: список профилей без открытия — у новых профилей каналов ещё нет, их найдёт «Синхронизировать всё»
+  // «Только AdsPower»: список профилей без открытия — у новых профилей каналов ещё нет, их найдёт «Найти каналы во всех профилях»
   const syncAds = async () => {
     setAdsBusy(true);
     try {
@@ -94,7 +93,7 @@ export function AnalyticsPage({ active }: { active: boolean }) {
         kind: "ok",
         title: `AdsPower: профилей ${live.length}`,
         text: [
-          fresh ? `без прочитанных каналов: ${fresh} — их каналы появятся после «Синхронизировать всё» (или «Найти каналы» у профиля при выкладке)` : "",
+          fresh ? `без прочитанных каналов: ${fresh} — их каналы появятся после «Найти каналы во всех профилях» (или «Найти каналы» у профиля при выкладке)` : "",
           gone ? `нет в AdsPower: ${gone}` : "",
         ].filter(Boolean).join("; ") || "Список профилей обновлён",
       });
@@ -112,8 +111,8 @@ export function AnalyticsPage({ active }: { active: boolean }) {
   const saveGroups = (next: AnalyticsGroup[]) => update({ analytics_groups: next });
   const groupsOf = (id: string) => groups.filter((g) => g.channels.includes(id));
   const all = rows ?? [];
-  // можно включить сразу несколько групп (показываются каналы любой из них) и несколько профилей;
-  // группы и профили вместе — «и»: каналы выбранных групп внутри выбранных профилей
+  // фильтры сужают: несколько групп — каналы, которые есть во всех выбранных; профили — любой из выбранных
+  // (канал в одном профиле); группы и профили вместе — «и»
   const groupSel = splitSel(view.group).filter((g) => g === NO_GROUP || groups.some((x) => x.id === g));
   const profileList = useMemo(() => {
     const seen = new Map<string, string>();
@@ -139,6 +138,37 @@ export function AnalyticsPage({ active }: { active: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [all, view.group, view.profile, groups, view.sort, view.dir]);
   const filtered = groupSel.length > 0 || profileSel.length > 0;
+
+  // что синхронизировать: каналы выбранных групп (можно несколько; канал в нескольких группах — один раз).
+  // Список профилей из AdsPower обновляется целиком, цифры читаются только у этих каналов — как у автообновления.
+  const [syncPick, setSyncPickRaw] = useState<string[]>(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem("analytics-sync-groups") || "null");
+      return Array.isArray(v) ? v.map(String) : [];
+    } catch {
+      return [];
+    }
+  });
+  const setSyncPick = (v: string[]) => {
+    setSyncPickRaw(v);
+    try {
+      localStorage.setItem("analytics-sync-groups", JSON.stringify(v));
+    } catch {
+      /* storage недоступен */
+    }
+  };
+  // удалённые группы выкидываем; ничего не выбрано — подсказкой берём группу автообновления
+  const autoGroup = settings.analytics_auto?.group;
+  const syncSel = syncPick.filter((g) => g === NO_GROUP || groups.some((x) => x.id === g));
+  const syncEffective = syncSel.length === 0 && autoGroup && groups.some((x) => x.id === autoGroup) ? [autoGroup] : syncSel;
+  const syncIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const r of all) if (inAnyGroup(syncEffective, r.channel_id, groups)) ids.add(r.channel_id);
+    return [...ids];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [all, groups, syncEffective.join(",")]);
+  const sync = () => void enqueue([{ kind: "analytics", params: { groups: syncEffective } }]);
+  const syncDisabled = syncEffective.length === 0 || syncIds.length === 0;
   const sortBy = (key: SortKey) =>
     setView(view.sort === key ? { dir: view.dir === "asc" ? "desc" : "asc" } : { sort: key, dir: key === "name" ? "asc" : "desc" });
   const arrow = (key: SortKey) =>
@@ -158,30 +188,20 @@ export function AnalyticsPage({ active }: { active: boolean }) {
     <div className="page">
       <PageHeader
         title="Аналитика"
-        subtitle="«Только AdsPower» — список профилей, ничего не открывая. «Синхронизировать всё» — ещё и каналы с цифрами (профили открываются скрыто)."
-        actions={
-          <span className="row gap-sm">
-            <Button
-              icon={<RefreshCw size={16} />}
-              onClick={() => void syncAds()}
-              loading={adsBusy}
-              disabled={Boolean(running) || adsBusy}
-              title="Только список профилей из AdsPower: новые, переименованные, удалённые. Каналы и цифры не трогает, профили не открывает."
-            >
-              Только AdsPower
-            </Button>
-            <Button
-              variant="primary"
-              icon={<RefreshCw size={16} />}
-              onClick={sync}
-              loading={Boolean(running)}
-              disabled={Boolean(running) || adsBusy}
-              title="Профили из AdsPower + каналы в каждом профиле + свежие цифры. Профили открываются скрыто по одному."
-            >
-              {running ? "Синхронизирую…" : "Синхронизировать всё"}
-            </Button>
-          </span>
-        }
+        subtitle="Подписчики, часы просмотра, просмотры за 48 часов и сколько роликов ждёт выхода — по каналам из профилей AdsPower. Каналы собираются в группы, синхронизация и автообновление работают по группам."
+      />
+      <ManualSync
+        groups={groups}
+        rows={all}
+        selected={syncEffective}
+        onChange={setSyncPick}
+        count={syncIds.length}
+        running={Boolean(running)}
+        busy={adsBusy}
+        disabled={syncDisabled}
+        onRun={sync}
+        onRunAll={() => void enqueue([{ kind: "analytics", params: {} }])}
+        onAds={() => void syncAds()}
       />
       {running && job && (
         <Card>
@@ -221,7 +241,7 @@ export function AnalyticsPage({ active }: { active: boolean }) {
         <Empty
           icon={<BarChart3 size={28} />}
           title="Каналов пока нет"
-          text="Нажми «Синхронизировать всё»: программа подтянет профили из AdsPower, найдёт в них каналы и снимет цифры."
+          text="Нажми «Найти каналы во всех профилях»: программа подтянет профили из AdsPower и найдёт в них каналы. Потом собери каналы в группы — дальше синхронизация и автообновление идут по группам."
         />
       ) : (
         <Card>
@@ -327,7 +347,7 @@ function GroupBar(props: {
   const loose = rows.filter((r) => !groups.some((g) => g.channels.includes(r.channel_id))).length;
   // переименовать/удалить можно, когда выбрана ровно одна группа
   const current = filter.length === 1 ? groups.find((g) => g.id === filter[0]) : undefined;
-  const toggle = (id: string) => onFilter(filter.includes(id) ? filter.filter((x) => x !== id) : [...filter, id]);
+  const toggle = (id: string) => onFilter(toggleFilter(filter, id));
 
   const commit = () => {
     if (!editing) return;
@@ -356,7 +376,7 @@ function GroupBar(props: {
               className={`chip ${filter.includes(g.id) ? "active" : ""}`}
               aria-pressed={filter.includes(g.id)}
               onClick={() => toggle(g.id)}
-              title="Можно включить несколько групп сразу — покажутся каналы любой из них"
+              title="Можно выбрать несколько групп — останутся каналы, которые есть во всех выбранных"
             >
               {g.name} · {count(g)}
             </button>
@@ -509,6 +529,99 @@ function MemberPicker({ groups, member, onToggle }: { groups: AnalyticsGroup[]; 
         </div>
       )}
     </div>
+  );
+}
+
+/** Ручная синхронизация: выбираешь группы (одну или несколько) — читаются цифры только у их каналов.
+ *  Канал может быть в нескольких группах — синхронизируется один раз. Профили из AdsPower обновляются все. */
+function ManualSync(props: {
+  groups: AnalyticsGroup[];
+  rows: AnalyticsRow[];
+  selected: string[];
+  onChange: (v: string[]) => void;
+  count: number;
+  running: boolean;
+  busy: boolean;
+  disabled: boolean;
+  onRun: () => void;
+  onRunAll: () => void;
+  onAds: () => void;
+}) {
+  const { groups, rows, selected, onChange, count, running, busy, disabled, onRun, onRunAll, onAds } = props;
+  const ids = new Set(rows.map((r) => r.channel_id));
+  const inGroup = (g: AnalyticsGroup) => g.channels.filter((c) => ids.has(c)).length;
+  const loose = rows.filter((r) => !groups.some((g) => g.channels.includes(r.channel_id))).length;
+  const toggle = (id: string) => onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+  const allIds = [...groups.map((g) => g.id)];
+  return (
+    <Card>
+      <div className="stack" style={{ gap: 12 }}>
+        <div className="an-sync-head">
+          <div>
+            <div className="an-sync-title">Синхронизация каналов</div>
+            <div className="muted small">
+              Профили из AdsPower обновляются все, а цифры — только у каналов выбранных групп. Канал из нескольких групп берётся один раз.
+            </div>
+          </div>
+          <Button
+            icon={<RefreshCw size={16} />}
+            onClick={onAds}
+            loading={busy}
+            disabled={running || busy}
+            title="Только список профилей из AdsPower: новые, переименованные, удалённые. Каналы и цифры не трогает, профили не открывает."
+          >
+            Только AdsPower
+          </Button>
+        </div>
+        {rows.length === 0 ? (
+          <div className="an-sync-run">
+            <Button variant="primary" icon={<RefreshCw size={16} />} onClick={onRunAll} loading={running} disabled={running || busy}
+              title="Первый запуск: профили открываются скрыто по одному, в каждом находятся каналы и снимаются цифры.">
+              {running ? "Ищу каналы…" : "Найти каналы во всех профилях"}
+            </Button>
+            <span className="muted small">Каналов пока нет: сначала найдём их во всех профилях, потом соберёшь их в группы.</span>
+          </div>
+        ) : groups.length === 0 ? (
+          <div className="muted small">Групп пока нет — создай группу кнопкой «+ Группа» ниже и добавь в неё каналы (столбец «Группы»).</div>
+        ) : (
+          <div className="chips" role="group" aria-label="Группы для синхронизации">
+            {groups.map((g) => (
+              <button
+                type="button"
+                key={g.id}
+                className={`chip ${selected.includes(g.id) ? "active" : ""}`}
+                aria-pressed={selected.includes(g.id)}
+                onClick={() => toggle(g.id)}
+                title="Можно выбрать несколько групп"
+              >
+                {g.name} · {inGroup(g)}
+              </button>
+            ))}
+            <button
+              type="button"
+              className={`chip ${selected.includes(NO_GROUP) ? "active" : ""}`}
+              aria-pressed={selected.includes(NO_GROUP)}
+              onClick={() => toggle(NO_GROUP)}
+              title="Каналы, которых нет ни в одной группе (например, только что найденные)"
+            >
+              Без группы · {loose}
+            </button>
+            <Button size="sm" variant="ghost" onClick={() => onChange(selected.length === allIds.length ? [] : allIds)}>
+              {selected.length === allIds.length ? "Снять все" : "Все группы"}
+            </Button>
+          </div>
+        )}
+        {rows.length > 0 && (
+          <div className="an-sync-run">
+            <Button variant="primary" icon={<RefreshCw size={16} />} onClick={onRun} loading={running} disabled={running || busy || disabled}>
+              {running ? "Синхронизирую…" : `Синхронизировать · ${count} ${count === 1 ? "канал" : count > 1 && count < 5 ? "канала" : "каналов"}`}
+            </Button>
+            {!running && selected.length === 0 && groups.length > 0 && <span className="muted small">Выбери хотя бы одну группу.</span>}
+            {!running && selected.length > 1 && <span className="muted small">Выбрано несколько групп — синхронизируются каналы всех этих групп.</span>}
+          </div>
+        )}
+      </div>
+    </Card>
   );
 }
 

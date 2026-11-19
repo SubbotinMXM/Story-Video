@@ -281,12 +281,16 @@ def _int(v) -> int:
 def search(api, queries: list[str], f: Filters, *, now: datetime | None = None,
            cancel: CancelToken | None = None, progress=None) -> tuple[dict[str, Found], dict[str, dict]]:
     """Ролики по запросам (последние WINDOW_DAYS) → (каналы, ролики {id: {...}})."""
-    from engine.rewrite.channels import _iso_duration
+    from engine.rewrite.channels import KeysExhausted, _iso_duration, _iso_time
 
     now = now or datetime.now(timezone.utc)
-    after = (now - timedelta(days=WINDOW_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # до суток: одинаковый запрос в течение дня берётся из кэша поиска, а не тратит квоту заново
+    after = (now - timedelta(days=WINDOW_DAYS)).strftime("%Y-%m-%dT00:00:00Z")
     region = f.region or LANG_REGION.get(f.language, "")
     video_q: dict[str, set[str]] = {}
+    free_ids: set[str] = set()  # найденные без квоты: дату публикации проверяем сами (ниже)
+    free = False  # квота поиска кончилась — дальше ищем бесплатно
+    api_error: Exception | None = None
     for n, q in enumerate(queries, 1):
         if cancel:
             cancel.check()
@@ -296,16 +300,30 @@ def search(api, queries: list[str], f: Filters, *, now: datetime | None = None,
                   "publishedAfter": after, **({"relevanceLanguage": f.language} if f.language else {}),
                   **({"regionCode": region} if region else {})}
         for order, duration in SEARCH_PASSES:
-            data = api.get("search", {**params, "order": order, "videoDuration": duration})
-            for it in data.get("items") or []:
-                vid = (it.get("id") or {}).get("videoId")
-                if vid:
-                    video_q.setdefault(vid, set()).add(q)
+            ids: list[str] = []
+            if not free:
+                try:
+                    data = api.get("search", {**params, "order": order, "videoDuration": duration})
+                    ids = [vid for it in data.get("items") or [] if (vid := (it.get("id") or {}).get("videoId"))]
+                except KeysExhausted as exc:
+                    api_error, free = exc, True
+                    log(f"Ниши: поиск через API недоступен ({exc}) — дальше ищу бесплатно, без квоты")
+            if free:
+                from engine.research.free_search import search_ids
+
+                ids = search_ids(q, order, duration, region=region)
+                free_ids.update(ids)
+            for vid in ids:
+                video_q.setdefault(vid, set()).add(q)
+    if free and not video_q and api_error is not None:
+        raise api_error  # и бесплатный поиск ничего не дал — честно говорим про ключи
     videos: dict[str, dict] = {}
     for batch in _chunks(list(video_q)):
         data = api.get("videos", {"part": "snippet,statistics,contentDetails", "id": ",".join(batch)})
         for v in data.get("items") or []:
             sn = v.get("snippet") or {}
+            if v["id"] in free_ids and (_iso_time(sn.get("publishedAt") or "") or now.timestamp()) < now.timestamp() - WINDOW_DAYS * 86400:
+                continue  # бесплатный поиск отдаёт «за год» — окно в полгода применяем здесь
             videos[v["id"]] = {"id": v["id"], "title": sn.get("title") or "", "channel": sn.get("channelId") or "",
                                "views": _int((v.get("statistics") or {}).get("viewCount")),
                                "minutes": _iso_duration((v.get("contentDetails") or {}).get("duration") or "") / 60,

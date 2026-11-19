@@ -88,7 +88,12 @@ def _ping_unsplash(http: httpx.Client, key: str) -> None:
 
 
 def _ping_youtube(http: httpx.Client, key: str) -> None:
-    """Проверка ключа за 1 единицу квоты (поиск стоил бы 100)."""
+    """Проверка ключа за 1 единицу квоты (поиск стоил бы 100). Поиск считается отдельно: если приложение уже
+    видело, что на этом ключе он исчерпан, — так и говорим, а не «OK»."""
+    from datetime import datetime
+
+    from engine.slides import youtube_errors as yerr
+
     t0 = time.monotonic()
     resp = http.get(
         "https://www.googleapis.com/youtube/v3/videos",
@@ -96,8 +101,11 @@ def _ping_youtube(http: httpx.Client, key: str) -> None:
     )
     ms = int((time.monotonic() - t0) * 1000)
     if resp.status_code in (403, 429):
-        text = resp.text
-        why = "квота на сегодня исчерпана" if "quota" in text.lower() or resp.status_code == 429 else "ключ не подходит"
+        _kind, why = yerr.classify(resp)
         raise RuntimeError(f"{why} ({ms} ms)")
     if resp.status_code >= 400:
         raise RuntimeError(f"HTTP {resp.status_code} ({ms} ms)")
+    since = yerr.spent_since(key)
+    if since:
+        raise RuntimeError(f"ключ принимается, но поиск на нём исчерпан с {datetime.fromtimestamp(since):%H:%M} "
+                           f"(обновится {yerr.reset_text()})")

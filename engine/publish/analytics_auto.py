@@ -92,6 +92,37 @@ def group_channels(cfg: dict, group_id: str) -> tuple[str, list[str]]:
     return "", []
 
 
+NO_GROUP = "none"  # «каналы без группы»
+
+
+def channels_of_groups(cfg: dict, group_ids: list[str]) -> list[str]:
+    """Каналы выбранных групп (объединение: канал в нескольких группах — один раз, порядок — по группам).
+    «none» — каналы профилей AdsPower, которых нет ни в одной группе. Нет групп/каналов — []."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(cid: str) -> None:
+        if cid and cid not in seen:
+            seen.add(cid)
+            out.append(cid)
+
+    for gid in group_ids:
+        if gid == NO_GROUP:
+            from engine.publish import registry
+
+            grouped = {str(c) for g in cfg.get("analytics_groups") or [] for c in g.get("channels") or []}
+            for entry in registry.load().values():
+                if entry.missing:
+                    continue
+                for ch in entry.channels:
+                    if ch.id not in grouped:
+                        add(ch.id)
+            continue
+        for cid in group_channels(cfg, gid)[1]:
+            add(cid)
+    return out
+
+
 def tick(manager, cfg: dict) -> str | None:
     """Проверка по расписанию: пора — поставить задачу «Аналитика» по группе в очередь. → id задачи."""
     setting = normalize(cfg.get("analytics_auto"))

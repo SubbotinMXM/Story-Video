@@ -261,6 +261,124 @@ class NicheTests(unittest.TestCase):
             niches.find("Ниша", [], niches.Filters(), [], None)
 
 
+class QuotaSavingTests(unittest.TestCase):
+    """Квота поиска: кэш и бесплатный поиск, когда она кончилась."""
+
+    def _find(self, api, **flt):
+        f = niches.Filters.of(flt)
+        with mock.patch("engine.rewrite.channels._Api", lambda keys: api), \
+                mock.patch("engine.publish.polls.ask", lambda *a, **k: "{}"):
+            return niches.find("Жизненные истории", ["истории"], f, ["key"], None)
+
+    def test_exhausted_quota_switches_to_free_search(self) -> None:
+        from engine.rewrite.channels import KeysExhausted
+
+        api = FakeApi()
+        orig = api.get
+
+        def get(path, params):
+            if path == "search":
+                raise KeysExhausted("ключи YouTube API не работают — …AAAA: суточная квота исчерпана")
+            return orig(path, params)
+
+        api.get = get
+        asked: list[tuple] = []
+
+        def free(q, order, duration, **kw):
+            asked.append((q, order, duration))
+            return [f"{cid}:found" for cid in api.channels]
+
+        with mock.patch("engine.research.free_search.search_ids", free):
+            res = self._find(api)
+        self.assertEqual(len(asked), 3, "по одному запросу — три прохода, без обращений к API-поиску")
+        self.assertTrue(res["channels"], "каналы найдены без квоты")
+
+    def test_free_search_empty_reports_keys_problem(self) -> None:
+        from engine.rewrite.channels import KeysExhausted
+
+        api = FakeApi()
+        api.get = lambda path, params: (_ for _ in ()).throw(KeysExhausted("квота")) if path == "search" else {}
+        with mock.patch("engine.research.free_search.search_ids", lambda *a, **k: []):
+            with self.assertRaises(KeysExhausted):
+                self._find(api)
+
+    def test_free_search_drops_videos_older_than_window(self) -> None:
+        from engine.rewrite.channels import KeysExhausted
+
+        api = FakeApi()
+        orig = api.get
+
+        def get(path, params):
+            if path == "search":
+                raise KeysExhausted("квота")
+            data = orig(path, params)
+            if path == "videos":  # у «found»-ролика UCyoung дата — год назад: за окном в полгода
+                for v in data["items"]:
+                    if v["id"] == "UCyoung:found":
+                        v["snippet"]["publishedAt"] = iso(time.time() - 400 * DAY)
+            return data
+
+        api.get = get
+        with mock.patch("engine.research.free_search.search_ids", lambda *a, **k: [f"{c}:found" for c in api.channels]):
+            res = self._find(api)
+        self.assertNotIn("UCyoung", {c["id"] for c in res["channels"]})
+
+    def test_sp_param_filters(self) -> None:
+        from engine.research import free_search
+
+        self.assertEqual(free_search.sp_param("relevance", "medium"), "EgYIBRABGAM%3D")
+        self.assertEqual(free_search.sp_param("relevance", "long"), "EgYIBRABGAI%3D")
+        self.assertEqual(free_search.sp_param("viewCount", "long"), "CAMSBggFEAEYAg%3D%3D")
+
+    def test_search_cache_saves_repeat(self) -> None:
+        import httpx
+
+        from engine.rewrite.channels import _Api
+
+        env = mock.patch.dict("os.environ", {"STORY_VIDEO_YT_CACHE_OFF": "0"})
+        env.start()
+        self.addCleanup(env.stop)
+        api = _Api(["KEY1"])
+        calls = []
+
+        def fake_get(url, params):
+            calls.append(params.get("q"))
+            return httpx.Response(200, json={"items": [{"id": {"videoId": "x"}}]})
+
+        try:
+            with mock.patch.object(api.http, "get", side_effect=fake_get):
+                p = {"part": "snippet", "q": "кэш-тест-уникальный", "order": "relevance"}
+                a = api.get("search", p)
+                b = api.get("search", dict(p))
+                api.get("channels", {"id": "1"})
+                api.get("channels", {"id": "1"})
+        finally:
+            api.close()
+        self.assertEqual(a, b)
+        self.assertEqual(calls.count("кэш-тест-уникальный"), 1)
+        self.assertEqual(len(calls), 3, "channels кэшем не пользуется")
+
+    def test_search_quota_does_not_kill_keys_for_other_requests(self) -> None:
+        import httpx
+
+        from engine.rewrite.channels import KeysExhausted, _Api
+
+        api = _Api(["KEY1"])
+
+        def fake_get(url, params):
+            if url.endswith("/search"):
+                return httpx.Response(429, json={"error": {"errors": [{"reason": "rateLimitExceeded"}]}})
+            return httpx.Response(200, json={"items": [1]})
+
+        try:
+            with mock.patch.object(api.http, "get", side_effect=fake_get):
+                with self.assertRaises(KeysExhausted):
+                    api.get("search", {"q": "ключ-тест-2"})
+                self.assertEqual(api.get("videos", {"id": "x"}), {"items": [1]}, "videos.list на этом ключе ещё работает")
+        finally:
+            api.close()
+
+
 class SourceApi(FakeApi):
     """FakeApi + канал-образец UCsource: его читают по @handle, id или ссылке на ролик."""
 

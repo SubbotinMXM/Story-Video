@@ -65,7 +65,64 @@ class YouTubeKeysTests(unittest.TestCase):
         with mock.patch.object(source_ping.httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler))):
             msg = source_ping.ping_stocks(youtube="GOOD\nSPENT")
         self.assertIn("YouTube: 1/2 OK", msg)
-        self.assertIn("квота на сегодня исчерпана", msg)
+        self.assertIn("суточная квота исчерпана", msg)
+
+    def test_classify_quota_vs_denied(self) -> None:
+        from engine.slides import youtube_errors as yerr
+
+        quota = httpx.Response(429, json={"error": {"errors": [{"reason": "rateLimitExceeded"}], "message": "Quota exceeded"}})
+        denied = httpx.Response(403, json={"error": {"errors": [{"reason": "forbidden"}], "message": "Permission denied on the service."}})
+        bad = httpx.Response(400, json={"error": {"errors": [{"reason": "badRequest"}], "message": "API key not valid."}})
+        self.assertEqual(yerr.classify(quota)[0], "quota")
+        kind, why = yerr.classify(denied)
+        self.assertEqual(kind, "denied")
+        self.assertIn("не включён YouTube Data API", why)
+        self.assertIn("недействителен", yerr.classify(bad)[1])
+
+    def test_channels_api_explains_each_key(self) -> None:
+        """Поиск ниш: не «кончились или не подходят», а что с каждым ключом и когда вернётся квота."""
+        from engine.rewrite.channels import ChannelError, _Api
+
+        def fake_get(url, params):
+            if params["key"] == "AAAA1111":
+                return httpx.Response(429, json={"error": {"errors": [{"reason": "rateLimitExceeded"}]}})
+            return httpx.Response(403, json={"error": {"errors": [{"reason": "forbidden"}], "message": "Permission denied"}})
+
+        api = _Api(["AAAA1111", "BBBB2222"])
+        try:
+            with mock.patch.object(api.http, "get", side_effect=fake_get):
+                with self.assertRaises(ChannelError) as ctx:
+                    api.get("search", {})
+        finally:
+            api.close()
+        msg = str(ctx.exception)
+        self.assertIn("…1111: суточная квота исчерпана", msg)
+        self.assertIn("…2222: доступ запрещён", msg)
+        self.assertIn("Квота обновится", msg)
+        self.assertIn("включи YouTube Data API v3", msg)
+
+    def test_ping_remembers_spent_search(self) -> None:
+        """Проверка ключа стоит 1 единицу и не видит исчерпанный поиск: приложение помнит, что поиск кончился."""
+        from engine.slides import source_ping
+        from engine.slides import youtube_errors as yerr
+
+        yerr.note_quota_spent("SEARCHSPENTKEY")
+        self.addCleanup(yerr.clear, "SEARCHSPENTKEY")
+        real = httpx.Client
+        handler = lambda req: httpx.Response(200, json={"items": []})  # noqa: E731
+        with mock.patch.object(source_ping.httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler))):
+            msg = source_ping.ping_stocks(youtube="SEARCHSPENTKEY\nFINEKEY")
+        self.assertIn("YouTube: 1/2 OK", msg)
+        self.assertIn("поиск на нём исчерпан", msg)
+
+    def test_spent_resets_after_midnight_pacific(self) -> None:
+        from engine.slides import youtube_errors as yerr
+
+        yerr.note_quota_spent("RESETKEY")
+        self.addCleanup(yerr.clear, "RESETKEY")
+        t = yerr.spent_since("RESETKEY")
+        self.assertTrue(t)
+        self.assertEqual(yerr.spent_since("RESETKEY", now=yerr.reset_at(t) + 1), 0.0)
 
 
 if __name__ == "__main__":

@@ -48,7 +48,9 @@ class YouTubeClient:
 
     def __init__(self, api_keys: list[str] | str, *, min_height: int = 720) -> None:
         keys = [api_keys] if isinstance(api_keys, str) else list(api_keys or [])
-        self.keys = KeyPool([k for k in keys if (k or "").strip()])
+        live = [k for k in keys if (k or "").strip()]
+        self.keys = KeyPool(live)  # для поиска; у него свой суточный лимит
+        self._keys_other = KeyPool(live)  # для проверки найденных видео (1 единица) — не зависит от лимита поиска
         self.api_key = self.keys.next() or ""
         self.min_height = max(0, int(min_height))
         self._http = httpx.Client(timeout=45.0, trust_env=False, follow_redirects=True)
@@ -60,8 +62,14 @@ class YouTubeClient:
 
     def _get(self, url: str, params: dict) -> httpx.Response | None:
         """Запрос к YouTube Data API: квота ключа кончилась (403/429) — следующий ключ."""
+        from engine.slides import youtube_cache
+
+        cacheable = url == self.SEARCH_URL  # поиск стоит 100 единиц — повтор берём из кэша
+        if cacheable and (hit := youtube_cache.get(params)) is not None:
+            return httpx.Response(200, json=hit)
+        pool = self.keys if cacheable else self._keys_other
         while True:
-            key = self.keys.next()
+            key = pool.next()
             if not key:
                 return None
             try:
@@ -71,14 +79,24 @@ class YouTubeClient:
                 return None
             if resp.status_code in (403, 429):
                 # суточная квота (или ключ недействителен) — до конца этого запуска ключ не трогаем
-                left = sum(1 for k in self.keys._keys if k not in self.keys._dead) - 1
-                log(f"youtube: ключ …{key[-4:]} — HTTP {resp.status_code} (квота/ключ), осталось ключей: {left}")
-                self.keys.mark_bad(key)
+                from engine.slides import youtube_errors as yerr
+
+                kind, why = yerr.classify(resp)
+                if kind == "quota":
+                    yerr.note_quota_spent(key)
+                left = sum(1 for k in pool._keys if k not in pool._dead) - 1
+                log(f"youtube: ключ …{key[-4:]} — HTTP {resp.status_code}: {why}, осталось ключей: {left}")
+                pool.mark_bad(key)
                 continue
             if resp.status_code >= 400:
                 log(f"youtube HTTP {resp.status_code}")
                 return None
             self.api_key = key
+            if cacheable:
+                try:
+                    youtube_cache.put(params, resp.json())
+                except ValueError:
+                    pass
             return resp
 
     def search(
