@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import json
 import random
-import re
 from dataclasses import dataclass
 
+from engine.core.jsonish import json_dict
 from engine.core.cancel import CancelToken
 from engine.core.logutil import log
 from engine.publish import human
@@ -70,11 +70,7 @@ def generate_replies(comments: list[Comment], llm: tuple[str, str, str] | None) 
         user = "Комментарии зрителей:\n" + json.dumps(
             [{"id": c.id, "author": c.author, "text": c.text[:600]} for c in chunk], ensure_ascii=False)
         raw = _ask(user, llm)
-        m = re.search(r"\{.*\}", raw or "", re.S)
-        try:
-            items = json.loads(m.group(0)).get("items") or [] if m else []
-        except (json.JSONDecodeError, AttributeError):
-            items = []
+        items = json_dict(raw).get("items") or []
         for it in items:
             if not isinstance(it, dict) or not it.get("id"):
                 continue

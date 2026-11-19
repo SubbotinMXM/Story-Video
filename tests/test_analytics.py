@@ -63,6 +63,105 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(an.load()["UCx1"].error, "", "удачная синхронизация убирает ошибку")
 
 
+class ScheduledCountTest(unittest.TestCase):
+    """Столбец «Запланировано»: сколько роликов канала ждут выхода (страница «Контент» в Studio)."""
+
+    EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"]
+    TODAY = __import__("datetime").date(2026, 11, 19)
+
+    def rows(self, *items: str) -> list[str]:
+        return list(items)
+
+    def test_scheduled_by_word_and_by_future_date(self) -> None:
+        rows = ["… — Scheduled Nov 21, 2026 Scheduled 0 0", "… — Scheduled Nov 20, 2026 Scheduled 0 0",
+                "… — Public Nov 10, 2026 Published 32 1", "… — Private Oct 15, 2026 Uploaded 16 0"]
+        self.assertEqual(youtube.scheduled_in_rows(rows, self.EN, self.TODAY), (2, False))
+
+    def test_other_languages_by_word(self) -> None:
+        self.assertEqual(youtube.scheduled_in_rows(["… Запланировано 21 нояб. 2026 г. 0 0"], [], self.TODAY)[0], 1)
+        self.assertEqual(youtube.scheduled_in_rows(["… Programado 21 nov 2026"], [], self.TODAY)[0], 1)
+        self.assertEqual(youtube.scheduled_in_rows(["… Geplant 21. Nov. 2026"], [], self.TODAY)[0], 1)
+
+    def test_unknown_language_falls_back_to_future_date(self) -> None:
+        self.assertEqual(youtube.scheduled_in_rows(["XYZ 25 Nov 2026 abc 0 0"], self.EN, self.TODAY)[0], 1)
+        self.assertEqual(youtube.scheduled_in_rows(["XYZ 10 Nov 2026 abc 3 1"], self.EN, self.TODAY)[0], 0)
+
+    def test_drafts_and_private_with_future_date_are_not_scheduled(self) -> None:
+        self.assertEqual(youtube.scheduled_in_rows(["… Private Dec 30, 2026 Uploaded 0 0"], self.EN, self.TODAY)[0], 0)
+        self.assertEqual(youtube.scheduled_in_rows(["… Draft Dec 30, 2026"], self.EN, self.TODAY)[0], 0)
+
+    def test_every_row_scheduled_means_look_at_next_page(self) -> None:
+        n, every = youtube.scheduled_in_rows(["Scheduled Nov 21, 2026", "Scheduled Nov 22, 2026"], self.EN, self.TODAY)
+        self.assertEqual((n, every), (2, True))
+        self.assertEqual(youtube.scheduled_in_rows([], self.EN, self.TODAY), (0, False))
+
+    def test_pages_are_turned_while_everything_is_scheduled(self) -> None:
+        class Loc:
+            def __init__(self, page):
+                self.page, self.first = page, self
+
+            def count(self):
+                return 1
+
+            def get_attribute(self, _n):
+                return None
+
+            def click(self):
+                self.page.i += 1
+
+        class Page:
+            def __init__(self):
+                self.i = 0
+                self.pages = [["Scheduled Nov 21, 2026"] * 30, ["Scheduled Nov 25, 2026"] * 5 + ["Public Nov 1, 2026 Published"]]
+
+            def goto(self, *a, **k):
+                pass
+
+            def wait_for_selector(self, *a, **k):
+                pass
+
+            def wait_for_timeout(self, _ms):
+                pass
+
+            def evaluate(self, _js):
+                return ScheduledCountTest.EN
+
+            def eval_on_selector_all(self, *a):
+                return self.pages[self.i]
+
+            def locator(self, _sel):
+                return Loc(self)
+
+        self.assertEqual(youtube.count_scheduled(Page(), "UC1"), 35)
+
+    def test_unreadable_page_is_none(self) -> None:
+        page = mock.MagicMock()
+        page.wait_for_selector.side_effect = RuntimeError("timeout")
+        self.assertIsNone(youtube.count_scheduled(page, "UC1"))
+
+    def test_saved_and_kept_when_next_sync_cannot_read(self) -> None:
+        an.save_one(an.Stats("UCs1", name="A", subscribers=1, scheduled=7, synced_at=100))
+        an.save_one(an.Stats("UCs1", name="A", subscribers=2, scheduled=None, synced_at=200))
+        self.assertEqual(an.load()["UCs1"].scheduled, 7, "не прочиталось — прежнее число, а не пусто")
+        an.save_one(an.Stats("UCs1", name="A", subscribers=3, scheduled=0, synced_at=300))
+        self.assertEqual(an.load()["UCs1"].scheduled, 0, "ноль — настоящее значение, не «нет данных»")
+        an.save_one(an.Stats("UCs1", name="A", error="профиль занят"))
+        self.assertEqual(an.load()["UCs1"].scheduled, 0, "ошибка не стирает")
+
+    def test_read_channel_survives_failing_scheduled_read(self) -> None:
+        import types
+
+        page = mock.MagicMock()
+        page.locator.return_value.count.return_value = 0  # карточек нет — read_hub подменён
+        ch = types.SimpleNamespace(id="UC1", name="A", handle="@a")
+        with mock.patch.object(youtube, "studio_channel", return_value="UC1"), mock.patch.object(an, "_wait", return_value=True), \
+             mock.patch.object(an, "read_hub", return_value=(5, 7)), mock.patch.object(an, "read_totals", return_value=(1.0, 2, 3)), \
+             mock.patch.object(an, "pause"), mock.patch.object(youtube, "goto"), \
+             mock.patch.object(youtube, "count_scheduled", side_effect=RuntimeError("Studio поменяла вёрстку")):
+            st = an.read_channel(page, ch)
+        self.assertEqual((st.subscribers, st.views_48h, st.scheduled), (5, 7, None), "основные цифры не страдают")
+
+
 class SyncTest(unittest.TestCase):
     def setUp(self) -> None:
         registry.save({

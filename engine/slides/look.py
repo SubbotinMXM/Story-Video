@@ -8,12 +8,11 @@
 
 from __future__ import annotations
 
-import subprocess
 import tempfile
 import threading
 from pathlib import Path
 
-from engine.slides.ffmpeg_util import find_ffmpeg
+from engine.slides.ffprobe_util import grab_first_frame
 
 # из 64 бит: ближе — та же картинка (пересжата, другой размер, рамка)
 DUP_BITS = 10
@@ -42,15 +41,8 @@ def image_hash(path: Path) -> int | None:
 def _video_hash(path: Path) -> int | None:
     with tempfile.TemporaryDirectory() as tmp:
         frame = Path(tmp) / "f.jpg"
-        for t in ("2", "0.5"):  # середина короткого клипа; совсем короткий — начало
-            subprocess.run(
-                [find_ffmpeg(), "-v", "error", "-y", "-ss", t, "-i", str(path), "-frames:v", "1", "-q:v", "4", str(frame)],
-                capture_output=True,
-                timeout=60,
-            )
-            if frame.is_file() and frame.stat().st_size > 0:
-                return image_hash(frame)
-    return None
+        # середина короткого клипа; совсем короткий — начало
+        return image_hash(frame) if grab_first_frame(path, frame, times=(2.0, 0.5), quality=4) else None
 
 
 def fingerprint(path: Path) -> int | None:

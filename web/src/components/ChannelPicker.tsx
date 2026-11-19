@@ -4,6 +4,7 @@ import type { PublishProfile } from "../lib/api";
 import { useProfiles } from "../lib/store";
 import { Badge } from "./ui";
 import { Subs } from "./Subs";
+import { GroupFilter, inFilter, useGroupFilter } from "./GroupFilter";
 
 export const channelKey = (profileId: string, channelId: string) =>
   `${profileId}/${channelId}`;
@@ -13,14 +14,18 @@ export const channelKey = (profileId: string, channelId: string) =>
 export function ChannelPicker({
   value,
   onChange,
+  scope = "picker",
   emptyText = "Каналов пока нет — нажми «Синхронизировать всё» в «Аналитике»: программа найдёт профили AdsPower и каналы в них.",
 }: {
   value: string[];
   onChange: (keys: string[]) => void;
+  /** Где используется: фильтр по группам запоминается отдельно для каждого места. */
+  scope?: string;
   emptyText?: string;
 }) {
   const { profiles, loaded } = useProfiles();
   const [query, setQuery] = useState("");
+  const [filter, setFilter, groups] = useGroupFilter(scope);
 
   const live = useMemo(() => profiles.filter((p) => !p.missing), [profiles]);
   const withChannels = live.filter((p) => p.channels.length > 0);
@@ -44,11 +49,19 @@ export function ChannelPicker({
   const shown = withChannels
     .map((p) => ({
       p,
-      chans: p.channels.filter((c) =>
-        match(p, `${c.name} ${c.handle} ${c.account}`),
+      chans: p.channels.filter(
+        (c) =>
+          inFilter(filter, c.id, groups) &&
+          match(p, `${c.name} ${c.handle} ${c.account}`),
       ),
     }))
     .filter((x) => x.chans.length > 0);
+  // «Все» и «Снять» работают по тому, что сейчас показано (фильтр групп и поиск)
+  const shownKeys = shown.flatMap(({ p, chans }) =>
+    chans.map((c) => channelKey(p.id, c.id)),
+  );
+  const filtered = filter.length > 0 || q !== "";
+  const shownOn = shownKeys.filter((k) => value.includes(k)).length;
 
   const set = (keys: string[], on: boolean) => {
     const cur = new Set(value.filter((k) => known.has(k)));
@@ -62,6 +75,12 @@ export function ChannelPicker({
 
   return (
     <div className="cp">
+      <GroupFilter
+        value={filter}
+        onChange={setFilter}
+        groups={groups}
+        channelIds={withChannels.flatMap((p) => p.channels.map((c) => c.id))}
+      />
       <div className="cp-toolbar">
         {allKeys.length > 6 && (
           <label className="cp-search">
@@ -81,18 +100,20 @@ export function ChannelPicker({
           <button
             type="button"
             className="link-btn small"
-            disabled={picked.length === allKeys.length}
-            onClick={() => set(allKeys, true)}
+            disabled={shownOn === shownKeys.length}
+            onClick={() => set(shownKeys, true)}
+            title={filtered ? "Отметить все показанные сейчас каналы" : undefined}
           >
-            Все
+            {filtered ? "Все показанные" : "Все"}
           </button>
           <button
             type="button"
             className="link-btn small"
-            disabled={picked.length === 0}
-            onClick={() => onChange([])}
+            disabled={shownOn === 0}
+            onClick={() => set(shownKeys, false)}
+            title={filtered ? "Снять отметки с показанных сейчас каналов" : undefined}
           >
-            Снять
+            {filtered ? "Снять показанные" : "Снять"}
           </button>
         </span>
       </div>
@@ -109,7 +130,9 @@ export function ChannelPicker({
         </div>
       )}
       {shown.length === 0 && (
-        <div className="muted small">Ничего не нашлось по «{query}».</div>
+        <div className="muted small">
+          {query ? `Ничего не нашлось по «${query}».` : "В выбранных группах нет каналов."}
+        </div>
       )}
       <div className="cp-scroll">
         <div className="cp-groups">

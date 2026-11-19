@@ -34,6 +34,7 @@ export type Settings = {
   unsplash_api_keys: string;
   youtube_api_keys: string;
   subtitles: boolean;
+  transition: "calm" | "flash";
   subscribe: boolean;
   subscribe_path: string;
   speed_copies: boolean;
@@ -59,6 +60,7 @@ export type Settings = {
   broll_publish_descs: string;
   broll_publish_dates: string[];
   broll_publish_time: string;
+  broll_publish_step: number;
   broll_publish_visible: boolean;
   broll_publish_keep: boolean;
   broll_publish_comment: string;
@@ -68,6 +70,7 @@ export type Settings = {
   slides_publish_coauthors_on: boolean | null;
   slides_publish_dates: string[];
   slides_publish_time: string;
+  slides_publish_step: number;
   slides_publish_visible: boolean;
   slides_publish_keep: boolean;
   slides_publish_comment: string;
@@ -87,7 +90,6 @@ export type Settings = {
   slides_intro_dir: string;
   slides_outro_dir: string;
   music_track: string;
-  thumb_color: boolean;
   ai_budget_usd: number;
   rewrite_engine: string;
   rewrite_review: boolean;
@@ -100,7 +102,8 @@ export type Settings = {
   claude_model: string;
   codex_model?: string;
   analytics_groups?: AnalyticsGroup[];
-  analytics_view?: { group: string; sort: string; dir: "asc" | "desc" | string };
+  last_seen_version?: string; // какую версию «Что нового» человек уже видел
+  analytics_view?: { group: string; profile?: string; sort: string; dir: "asc" | "desc" | string };
   analytics_auto?: { enabled: boolean; group: string; time: string };
   rewrite_llm_model: string;
   rewrite_fallback: boolean;
@@ -118,6 +121,34 @@ export type AnalyticsPoint = { t: number; subscribers: number | null; views_48h:
 /** Автообновление аналитики по расписанию: ближайший и прошлый запуск (unix-время, 0 — нет). */
 export type AnalyticsAuto = { next_at: number; last_at: number; last_job: string };
 
+export type TemplateSection = "broll" | "slides";
+export type TemplateSummary = {
+  publish: boolean;
+  channels: string[];
+  step: number;
+  time: string;
+  competitors: string[];
+  ai: boolean;
+};
+export type Template = {
+  id: string;
+  name: string;
+  section: TemplateSection;
+  created: number;
+  updated: number;
+  summary: TemplateSummary;
+};
+export type TemplateLaunchIn = { count: number; start: string; step: number; channels?: string[]; save_channels?: boolean };
+export type TemplateLaunchOut = {
+  jobs: Job[];
+  notes: string[];
+  channels: { url: string; channel?: string; taken?: number; left?: number; error?: string }[];
+};
+
+export type ChangeItem = { tag: "new" | "better" | "fix"; title: string; text: string };
+export type Release = { version: string; date: string; title: string; summary: string; items: ChangeItem[] };
+export type WhatsNew = { version: string; unseen: Release[]; history: Release[] };
+
 export type AnalyticsRow = {
   channel_id: string;
   name: string;
@@ -129,6 +160,7 @@ export type AnalyticsRow = {
   views_48h: number | null;
   watch_hours: number | null;
   views_total: number | null;
+  scheduled: number | null;
   synced_at: number;
   error: string;
   prev: AnalyticsPoint | null;
@@ -164,12 +196,18 @@ export type AnalyticsGroup = { id: string; name: string; channels: string[] };
 /** Автосмена инструмента или модели в задаче: что делалось, с чего на что и почему. */
 export type ToolSwitch = { task: string; from: string; to: string; reason: string; at: number; times?: number };
 
+export type TokenRow = { name: string; calls: number; in: number; cached: number; out: number };
+export type TokenUsage = { calls: number; in: number; cached: number; out: number; by: TokenRow[] };
+
 export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
 
 export type Job = {
   id: string;
   notice?: string; // предупреждение при постановке (например, мало денег на RoyalTechno)
   switches?: ToolSwitch[]; // автосмены инструмента/модели: Claude → Codex → встроенная…
+  stop_at?: number | null; // когда нажали «Стоп»
+  stopping?: boolean; // «Стоп» нажат, текущий шаг ещё доделывается
+  tokens?: TokenUsage | null; // расход токенов встроенной нейросети по этапам
   kind: string;
   title: string;
   params: { run?: string; [k: string]: unknown };
@@ -211,6 +249,7 @@ export type Run = {
   updated: string;
   snippet: string;
   has_final: boolean;
+  stock_bytes: number;
 };
 
 export type AiModelOption = { id: string; label: string; price_cents: number; low_res: boolean };
@@ -276,6 +315,16 @@ export const api = {
     request<{ jobs: Job[]; channels: ChannelPick[] }>("POST", "/api/rewrite/channels", { channels, count, params }),
   rewriteChannelStats: () => request<{ channels: ChannelStat[] }>("GET", "/api/rewrite/channels"),
   analytics: () => request<{ channels: AnalyticsRow[]; auto?: AnalyticsAuto }>("GET", "/api/analytics"),
+  templates: () => request<Template[]>("GET", "/api/templates"),
+  createTemplate: (name: string, section: TemplateSection) => request<Template>("POST", "/api/templates", { name, section }),
+  renameTemplate: (id: string, name: string) => request<Template>("PATCH", `/api/templates/${id}`, { name }),
+  saveTemplate: (id: string) => request<Template>("POST", `/api/templates/${id}/save`),
+  applyTemplate: (id: string) => request<Settings>("POST", `/api/templates/${id}/apply`),
+  copyTemplate: (id: string) => request<Template>("POST", `/api/templates/${id}/copy`),
+  deleteTemplate: (id: string) => request<{ ok: boolean }>("DELETE", `/api/templates/${id}`),
+  launchTemplate: (id: string, body: TemplateLaunchIn) => request<TemplateLaunchOut>("POST", `/api/templates/${id}/launch`, body),
+  whatsNew: () => request<WhatsNew>("GET", "/api/whats-new"),
+  whatsNewSeen: () => request<{ version: string }>("POST", "/api/whats-new/seen"),
   coverUpload: (data: string, name = "") => request<{ path: string }>("POST", "/api/covers/upload", { data, name }),
   coverImageUrl: (path: string) => `/api/cover-image?path=${encodeURIComponent(path)}`,
   ping: (service: string) =>
@@ -293,6 +342,7 @@ export const api = {
   resetJob: (id: string) => request<{ ok: boolean }>("POST", `/api/jobs/${id}/reset`),
   clearJobs: () => request<{ ok: boolean }>("POST", "/api/jobs/clear"),
   runs: () => request<Run[]>("GET", "/api/runs"),
+  freeRunSpace: () => request<{ freed: number; runs: number }>("POST", "/api/runs/free-space"),
   pick: (kind: PickKind, title = "", multiple = false) =>
     request<{ paths: string[]; texts?: { name: string; text: string }[] }>("POST", "/api/pick", {
       kind,

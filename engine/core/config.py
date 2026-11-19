@@ -30,6 +30,8 @@ DEFAULTS: dict[str, Any] = {
     "youtube_api_keys": "",
     # общие опции ролика
     "subtitles": False,
+    # переходы между фото в стоковых роликах: calm — спокойные, flash — со светлыми вспышками
+    "transition": "calm",
     "subscribe": False,
     "subscribe_path": "",
     "speed_copies": False,
@@ -47,7 +49,7 @@ DEFAULTS: dict[str, Any] = {
     # подбор кадров: theme — по смыслу; strict_3min — строго первые 3 мин; strict_full — строго весь ролик;
     # stars — ролик про нескольких людей: на часть про каждого — его фото
     "media_mode": "theme",
-    # режим «Звёзды»: уточнения, кто есть кто (тёзки) — программа спрашивает, если не уверена
+    # ролики про людей: уточнения, кто есть кто (тёзки) — программа спрашивает, если не уверена
     "stars_notes": "",
     # тексты в озвучку, раздельно для футажей и стоков: пусто — ничего не вставляется
     "broll_text_start": "",
@@ -77,7 +79,6 @@ DEFAULTS: dict[str, Any] = {
     # Claude недоступен / кончился лимит / оборвался — дописать встроенной нейросетью
     "rewrite_fallback": True,  # модель Claude Code (пусто — по умолчанию подписки)
     # вкладка «Превью»: фото людей цветные (как нашлись) или чёрно-белые
-    "thumb_color": True,
     # AI-кадры (RoyalTechno AI): генерация фото/видео для кусков без хорошего живого кадра
     "royaltechno_api_key": "",
     # AdsPower (браузерные профили с каналами YouTube) — Local API на этом Mac
@@ -96,6 +97,7 @@ DEFAULTS: dict[str, Any] = {
     "broll_publish_descs": "",  # файл описаний «1. …»
     "broll_publish_dates": [],  # свои даты запуска (YYYY-MM-DD); пусто — каждый день подряд
     "broll_publish_time": "",  # ЧЧ:ММ по Москве; пусто — случайное 16:00–20:00
+    "broll_publish_step": 1,  # дней между роликами на канале: 1 — каждый день, 2 — через день, 3 — через два…
     "broll_publish_visible": True,  # браузер при выкладке видно
     "broll_publish_keep": True,  # оставлять ролик на компьютере после выкладки
     # комментарий-призыв от имени канала под вышедшими роликами (закрепляется); пусто — не писать
@@ -109,6 +111,7 @@ DEFAULTS: dict[str, Any] = {
     "slides_publish_coauthors_on": None,
     "slides_publish_dates": [],
     "slides_publish_time": "",
+    "slides_publish_step": 1,
     "slides_publish_visible": True,
     "slides_publish_keep": True,
     "slides_publish_cover": True,
@@ -133,7 +136,8 @@ DEFAULTS: dict[str, Any] = {
     # вкладка «Аналитика»: свои группы каналов [{id, name, channels: [id канала]}] (канал — хоть в нескольких)
     "analytics_groups": [],
     # её вид: фильтр по группе ("" — все, "none" — без группы, иначе id группы) и сортировка
-    "analytics_view": {"group": "", "sort": "views_48h", "dir": "desc"},
+    "last_seen_version": "",  # какую версию «Что нового» человек уже видел (engine/core/changelog.py)
+    "analytics_view": {"group": "", "profile": "", "sort": "views_48h", "dir": "desc"},
     # автообновление аналитики: каждый день в time (МСК) — синхронизация каналов группы (engine/publish/analytics_auto)
     "analytics_auto": {"enabled": False, "group": "", "time": "07:00"},
 }
@@ -228,6 +232,11 @@ def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
             cfg["ai_budget_usd"] = DEFAULTS["ai_budget_usd"]
     except (TypeError, ValueError):
         cfg["ai_budget_usd"] = DEFAULTS["ai_budget_usd"]
+    for key in ("broll_publish_step", "slides_publish_step"):
+        try:
+            cfg[key] = max(1, min(30, int(cfg.get(key))))
+        except (TypeError, ValueError):
+            cfg[key] = 1
     for key in ("broll_publish_channels", "broll_publish_coauthors", "broll_publish_dates",
                 "slides_publish_channels", "slides_publish_coauthors", "slides_publish_dates"):
         value = cfg.get(key)

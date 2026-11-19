@@ -15,9 +15,10 @@ import {
   Trash2,
   XCircle,
 } from "lucide-react";
-import { api, type Job, type ToolSwitch } from "../lib/api";
+import { api, type Job, type TokenUsage, type ToolSwitch } from "../lib/api";
 import { useJobs, useSettings, useToasts } from "../lib/store";
 import { Badge, Button, Empty, Progress } from "./ui";
+import { LongText } from "./LongText";
 
 const KIND_LABEL: Record<string, string> = {
   broll: "Рассказы",
@@ -27,7 +28,6 @@ const KIND_LABEL: Record<string, string> = {
   slides_media: "Шаг 2",
   slides_render: "Шаг 3",
   copies: "Копии",
-  thumbnail: "Превью",
   rewrite: "Рерайт",
   publish: "Выкладка",
   comments: "Комментарии",
@@ -43,7 +43,7 @@ const MODE_LABEL: Record<string, string> = {
   theme: "по смыслу ролика",
   strict_3min: "строго первые 2 минуты",
   strict_full: "строго весь ролик",
-  stars: "звёзды",
+  stars: "по смыслу ролика", // старые задачи: раздела «Звёзды» больше нет
 };
 
 const STATUS: Record<Job["status"], { label: string; tone: string }> = {
@@ -85,19 +85,21 @@ function LiveTable({ job, now }: { job: Job; now: number }) {
     <div className="live-table">
       {rows.map((r) => (
         <div key={r.channel} className={`live-row live-${r.status}`}>
-          <div className="row gap-sm small">
+          <div className="live-top">
             <span className="live-icon">{LIVE_ICON[r.status] ?? "•"}</span>
-            <b className="ellipsis">{r.channel}</b>
-            {r.speed ? <span className="muted">копия {r.speed}%</span> : null}
-            {r.when && <span className="muted">выход {r.when}</span>}
+            <b className="live-name" title={r.channel}>{r.channel}</b>
           </div>
+          {(r.speed || r.when) && (
+            <div className="live-meta muted small">
+              {r.speed ? <span>копия {r.speed}%</span> : null}
+              {r.when && <span>выход {r.when}</span>}
+            </div>
+          )}
           {r.status === "active" && <Progress value={Math.max(0, Math.min(1, r.pct / 100))} />}
-          <div className="row gap-sm small">
-            <span className={`ellipsis ${r.status === "failed" ? "bad" : "muted"}`} title={r.stage}>{r.stage}</span>
-            {r.status === "active" && (
-              <span className="muted">· {Math.max(0, Math.round(now / 1000 - r.updated))} с назад</span>
-            )}
-          </div>
+          <LongText className={`small ${r.status === "failed" ? "bad" : "muted"}`} text={r.stage} lines={3} />
+          {r.status === "active" && (
+            <span className="muted small">{Math.max(0, Math.round(now / 1000 - r.updated))} с назад</span>
+          )}
         </div>
       ))}
     </div>
@@ -140,7 +142,7 @@ function JobCard({ job, now, onShowLog, queuePos, queueLen }: {
   };
 
   return (
-    <div className={`job job-${job.status}`}>
+    <div className={`job job-${job.status} ${job.stopping ? "job-stopping" : ""}`}>
       <div className="job-top" onClick={() => setOpen((v) => !v)}>
         <StatusIcon status={job.status} />
         <div className="job-main">
@@ -173,7 +175,21 @@ function JobCard({ job, now, onShowLog, queuePos, queueLen }: {
       {job.status === "running" && (job.kind === "publish" || job.kind === "comments") && job.live?.length ? (
         <div className="muted small">Общий прогресс задачи (каналы грузятся по очереди):</div>
       ) : null}
-      {job.status === "running" && (
+      {job.status === "running" && job.stopping && (
+        <div className="stopping" role="status">
+          <div className="stopping-head">
+            <Loader2 size={15} className="spin" />
+            <b>Останавливаю…</b>
+            {job.stop_at ? <span className="muted">{Math.max(0, Math.round(now / 1000 - job.stop_at))} с</span> : null}
+          </div>
+          <div className="stopping-bar" />
+          <div className="small">
+            Кнопка сработала: задача доделывает текущий шаг и остановится. Это не зависание, готовые этапы сохранятся.
+          </div>
+          <div className="muted small ellipsis" title={job.message}>{job.message.replace(/^Останавливаю[^(]*/, "").replace(/^\(|\)$/g, "") || "ждём ответа"}</div>
+        </div>
+      )}
+      {job.status === "running" && !job.stopping && (
         <div className="job-progress">
           <Progress value={job.progress} />
           <div className="job-msg">
@@ -183,13 +199,15 @@ function JobCard({ job, now, onShowLog, queuePos, queueLen }: {
         </div>
       )}
       {!open && job.status !== "running" && job.status !== "queued" && (
-        <div className="job-msg muted ellipsis">{job.error || job.message}</div>
+        <LongText className="job-note muted small" text={job.error || job.message} lines={2} />
       )}
       {job.switches?.length ? <Switches items={job.switches} /> : null}
+      {job.tokens ? <Tokens usage={job.tokens} /> : null}
       {job.status === "done" &&
         job.result?.warnings?.map((w, i) => (
-          <div key={i} className="notice warn small">
-            ⚠ {w}
+          <div key={i} className="pn pn-warn small">
+            <span className="pn-ico" aria-hidden>⚠</span>
+            <LongText text={w} lines={4} />
           </div>
         ))}
 
@@ -200,12 +218,13 @@ function JobCard({ job, now, onShowLog, queuePos, queueLen }: {
             size="sm"
             variant="danger"
             icon={<Square size={13} />}
-            loading={busy}
+            loading={busy || job.stopping}
+            disabled={job.stopping}
             onClick={() => act(() => api.cancelJob(job.id))}
           >
-            {job.status === "running" ? "Остановить" : "Отменить"}
+            {job.stopping ? "Останавливаю…" : job.status === "running" ? "Остановить" : "Отменить"}
           </Button>
-          {job.status === "running" && (
+          {job.status === "running" && !job.stopping && (
             <span className="muted small">Готовые этапы сохранятся</span>
           )}
           {job.status === "queued" && queueLen > 1 && (
@@ -225,7 +244,7 @@ function JobCard({ job, now, onShowLog, queuePos, queueLen }: {
       {open && job.resumable && (
         <div className="job-details">
           {job.error ? (
-            <div className="job-error">{job.error}</div>
+            <div className="job-error"><LongText text={job.error} lines={8} /></div>
           ) : (
             <div className="muted small">{job.message}</div>
           )}
@@ -274,9 +293,7 @@ function JobCard({ job, now, onShowLog, queuePos, queueLen }: {
       {open && job.status === "done" && (
         <div className="job-details">
           {job.result?.lines?.map((l, i) => (
-            <div key={i} className="small mono-soft">
-              {l}
-            </div>
+            <LongText key={i} className="small mono-soft" text={l} lines={3} />
           ))}
           <div className="row gap-sm wrap">
             {job.kind === "rewrite" && job.status === "done" && Boolean(job.params.review) && job.result?.follow && (
@@ -427,6 +444,34 @@ export function JobsPanel() {
   );
 }
 
+
+function tk(n: number) {
+  return n >= 1e6 ? `${(n / 1e6).toFixed(1)} млн` : n >= 1000 ? `${Math.round(n / 1000)} тыс.` : String(n);
+}
+
+/** Расход токенов встроенной нейросети: итог сразу, по этапам — по клику. */
+function Tokens({ usage }: { usage: TokenUsage }) {
+  const [all, setAll] = useState(false);
+  const fresh = usage.in - usage.cached; // кеш провайдера стоит заметно дешевле
+  return (
+    <div className="stack" style={{ gap: 4 }}>
+      <button className="link small" onClick={() => setAll(!all)} title="Claude Code и Codex работают по подписке и здесь не считаются">
+        Нейросеть: {tk(usage.in + usage.out)} токенов, {usage.calls} запросов
+        {usage.cached > 0 ? ` (${Math.round((usage.cached / Math.max(1, usage.in)) * 100)}% входа из кеша)` : ""} {all ? "▴" : "▾"}
+      </button>
+      {all && (
+        <div className="muted small">
+          {usage.by.map((r) => (
+            <div key={r.name}>
+              {r.name}: {tk(r.in - r.cached + r.out)} · запросов {r.calls}
+            </div>
+          ))}
+          <div>Без кеша: вход {tk(fresh)}, ответ {tk(usage.out)}</div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** Автосмены инструмента/модели в задаче: последняя видна сразу, остальные — по клику. */
 function Switches({ items }: { items: ToolSwitch[] }) {

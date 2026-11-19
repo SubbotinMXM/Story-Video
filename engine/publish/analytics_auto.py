@@ -109,6 +109,12 @@ def tick(manager, cfg: dict) -> str | None:
         mark()
         return None
     job = manager.add(manager.create("analytics", {"group": setting["group"], "auto": True}))
+    try:
+        # идущая заливка не прерывается, но как только она кончится, первой берётся аналитика —
+        # раньше остальных роликов, ждущих выкладки
+        manager.move(job.id, "top")
+    except ValueError:
+        pass  # уже стартовала — выше некуда
     log(f"Аналитика по расписанию: группа «{name}», каналов {len(chans)}")
     mark(job.id)
     return job.id

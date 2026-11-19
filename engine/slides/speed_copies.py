@@ -10,7 +10,7 @@ from pathlib import Path
 
 from engine.core.cancel import CancelToken, CancelledError
 from engine.core.logutil import log
-from engine.slides.ffmpeg_util import find_ffmpeg
+from engine.slides.ffmpeg_util import find_ffmpeg, low_priority
 from engine.slides.ffprobe_util import disk_full_hint, has_audio_stream, probe_duration, probe_video_size
 from engine.slides.render_defaults import AUDIO_BITRATE, VIDEO_CRF, rate_cap
 
@@ -196,7 +196,7 @@ def _run_ffmpeg_progress(
 ) -> None:
     # ffmpeg крутит прогресс через \r — line-buffered text mode молчит до конца.
     proc = subprocess.Popen(
-        cmd,
+        low_priority(cmd),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         bufsize=0,

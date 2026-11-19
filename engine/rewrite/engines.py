@@ -27,6 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from engine.core.jsonish import json_dict
 from engine.core.cancel import CancelToken
 from engine.core.logutil import log
 from engine.rewrite.prompts import word_range
@@ -604,15 +605,7 @@ def _within(words: int, lo: int, hi: int) -> bool:
     return lo * (1 - WORDS_TOLERANCE) <= words <= hi * (1 + WORDS_TOLERANCE)
 
 
-def _json(raw: str) -> dict:
-    m = re.search(r"\{.*\}", raw or "", re.S)
-    if not m:
-        return {}
-    try:
-        data = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
+_json = json_dict
 
 
 def _split_source(text: str, n: int) -> list[str]:

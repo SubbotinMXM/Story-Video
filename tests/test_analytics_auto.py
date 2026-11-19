@@ -36,6 +36,10 @@ class FakeManager:
         self.added.append(job.params)
         return job
 
+    def move(self, job_id, to):
+        self.moved = getattr(self, "moved", []) + [(job_id, to)]
+        return True
+
 
 class DueTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -100,6 +104,7 @@ class TickTests(unittest.TestCase):
         self.assertIsNone(self._tick(mgr, at(16, 5)))
         self.assertEqual(self._tick(mgr, at(16, 7)), "job1")
         self.assertEqual(mgr.added, [{"group": "g1", "auto": True}])
+        self.assertEqual(mgr.moved, [("job1", "top")], "аналитика по расписанию — первой в очереди")
         self.assertIsNone(self._tick(mgr, at(16, 7, 30)))
         self.assertEqual(len(mgr.added), 1)
 

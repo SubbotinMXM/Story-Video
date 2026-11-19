@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from pathlib import Path
 
 import httpx
 
+from engine.core.cancel import run_cancellable
 from engine.core.logutil import log
 
 DEFAULT_LUMEAN_BASE = "https://api.lumean.app/api/public"
@@ -338,7 +338,7 @@ class LumeanClient:
             str(tmp),
         ]
         log(f"Lumean speed-fix atempo={speed:.4f} model={model}")
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = run_cancellable(cmd, text=True)
         if proc.returncode != 0 or not tmp.is_file() or tmp.stat().st_size < 32:
             if tmp.exists():
                 tmp.unlink(missing_ok=True)
@@ -539,7 +539,7 @@ def _concat_audio_files(parts: list[Path], dest: Path) -> None:
         "copy",
         str(dest),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = run_cancellable(cmd, text=True)
     if proc.returncode != 0:
         # fallback: re-encode если контейнеры/битрейты разъехались
         cmd_re = [
@@ -557,7 +557,7 @@ def _concat_audio_files(parts: list[Path], dest: Path) -> None:
             "2",
             str(dest),
         ]
-        proc2 = subprocess.run(cmd_re, capture_output=True, text=True)
+        proc2 = run_cancellable(cmd_re, text=True)
         if proc2.returncode != 0:
             raise LumeanError(
                 "Не удалось склеить чанки Lumean:\n"

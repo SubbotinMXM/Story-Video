@@ -38,7 +38,7 @@ LIGHT_MARKERS = ("luna", "mini", "nano", "lite", "flash")
 # не текстовые модели в общем списке сервиса
 _NOT_TEXT = ("image", "tts", "whisper", "embedding", "dall-e", "sora", "veo")
 # задачи, где нужна точность; остальные — light
-SMART_LABELS = ("judge", "rewrite_", "theme_context", "story_context", "stars_cast", "ai_prompts")
+SMART_LABELS = ("judge", "rewrite_", "theme_context", "story_context", "stars_cast", "ai_prompts", "niche_similar")
 # простые задачи: меньше скрытых размышлений (−20…40% токенов ответа). Проверено на запросах кадров
 # и главах — ответы те же; «none» не берём: у части моделей с ним ответ странно долгий
 LIGHT_REASONING = "low"
@@ -47,8 +47,14 @@ LIGHT_REASONING = "low"
 LOW_REASONING_LABELS = ("rewrite_review",)
 
 
-def reasoning_for(label: str) -> str:
+# оценка кадров листом (коллаж, надпись, водяной знак, не тот человек): ответ — короткий JSON, глубокие размышления не нужны
+LOW_REASONING_VISION = ("judge_pool",)
+
+
+def reasoning_for(label: str, vision: bool = False) -> str:
     """Какое усилие размышлений просить у встроенной нейросети: «low» — простым задачам и коротким ответам."""
+    if vision:
+        return LIGHT_REASONING if label.startswith(LOW_REASONING_VISION) else ""
     return LIGHT_REASONING if tier_of(label) == "light" or label.startswith(LOW_REASONING_LABELS) else ""
 # у нас в запросе текста в десятки раз больше, чем в ответе — цена входа важнее
 OUTPUT_WEIGHT = 0.1

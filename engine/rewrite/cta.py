@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from engine.core.jsonish import json_dict
 from engine.core.logutil import log
 
 # добавляется к промпту рерайта: призывы ставит программа из полей раздела, а не нейросеть
@@ -146,11 +147,7 @@ def localize(texts: VoiceTexts, story: str, *, language: str | None = None, llm:
               f"Ответ — JSON с теми же ключами: {json.dumps(todo, ensure_ascii=False)}"),
         llm=llm,
     )
-    m = re.search(r"\{.*\}", raw or "", re.S)
-    try:
-        data = json.loads(m.group(0)) if m else {}
-    except json.JSONDecodeError:
-        data = {}
+    data = json_dict(raw)
     out = {k: " ".join(str(data.get(k) or "").split()) for k in todo}
     if not all(out.values()):
         raise RuntimeError("Не получилось перевести тексты из полей на язык рассказа — повторю позже")

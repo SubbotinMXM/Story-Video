@@ -1,4 +1,5 @@
 import { PageHeader } from "../components/ui";
+import { SaveTemplateButton } from "../components/SaveTemplate";
 import { VoiceTextsCard } from "../components/VoiceTextsCard";
 import { BrollFootageCard, BrollIntroCard } from "../components/SectionCards";
 import { PublishCard, usePublishCount } from "../components/PublishCard";
@@ -16,6 +17,7 @@ export function BrollPage() {
       <PageHeader
         title="Рассказы"
         subtitle="Текст → озвучка → нарезка ваших футажей с головой диктора и оверлеем"
+        actions={<SaveTemplateButton section="broll" />}
       />
       <div className="page-grid">
         <div className="col-main">

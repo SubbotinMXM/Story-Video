@@ -9,11 +9,11 @@
 
 from __future__ import annotations
 
-import subprocess
 import tempfile
 from pathlib import Path
 
 from engine.core.logutil import log
+from engine.slides.ffprobe_util import grab_first_frame
 
 HOOK_SEC = 150.0
 # первые 2 минуты — только живые кадры (AI-кадры — позже), видео в приоритете, фото — если видео нет
@@ -24,7 +24,6 @@ _VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm"}
 def add_beauty(items: list[dict], base_dir: Path) -> None:
     """Проставить item["beauty"] (CLIP) тем, у кого ещё нет. Видео — по кадру из середины."""
     from engine.slides.clip_ranker import beauty_scores
-    from engine.slides.ffmpeg_util import find_ffmpeg
 
     todo = [it for it in items if "beauty" not in it and (base_dir / str(it.get("path") or "")).is_file()]
     if not todo:
@@ -37,12 +36,8 @@ def add_beauty(items: list[dict], base_dir: Path) -> None:
                 frames[k] = path
                 continue
             frame = Path(tmp) / f"{k}.jpg"
-            for t in ("2", "0"):
-                subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-ss", t, "-i", str(path), "-frames:v", "1", "-q:v", "3", str(frame)],
-                               capture_output=True, timeout=60)
-                if frame.is_file():
-                    frames[k] = frame
-                    break
+            if grab_first_frame(path, frame):
+                frames[k] = frame
         scores = beauty_scores(list(frames.values()))
         for k, it in enumerate(todo):
             it["beauty"] = round(scores.get(frames.get(k, Path("-")), 0.0), 4)

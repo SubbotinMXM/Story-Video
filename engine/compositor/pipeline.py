@@ -27,6 +27,8 @@ from engine.compositor.defaults import (
     VIDEO_CRF,
     VIDEO_PRESET,
 )
+from engine.core.cancel import watch_process
+from engine.slides.ffmpeg_util import low_priority
 from engine.slides.ffprobe_util import disk_full_hint
 from engine.slides.render_defaults import rate_cap
 from engine.compositor.onepass import Inputs, edge_filters, join, story_audio
@@ -536,7 +538,7 @@ def _run_ffmpeg(
     on_progress: ProgressCb | None,
 ) -> None:
     proc = subprocess.Popen(
-        cmd,
+        low_priority(cmd),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -544,14 +546,15 @@ def _run_ffmpeg(
     )
     assert proc.stderr is not None
     err_lines: list[str] = []
-    for line in proc.stderr:
-        err_lines.append(line)
-        if on_progress and total > 0:
-            t = _parse_time(line)
-            if t is not None:
-                pct = max(0.0, min(0.99, t / total))
-                on_progress(pct, f"Рендер {pct * 100:.0f}%")
-    code = proc.wait()
+    with watch_process(proc):  # «Стоп» убивает ffmpeg сразу — сборка рассказа идёт десятки минут
+        for line in proc.stderr:
+            err_lines.append(line)
+            if on_progress and total > 0:
+                t = _parse_time(line)
+                if t is not None:
+                    pct = max(0.0, min(0.99, t / total))
+                    on_progress(pct, f"Рендер {pct * 100:.0f}%")
+        code = proc.wait()
     if code != 0:
         tail = "".join(err_lines[-40:])
         hint = disk_full_hint(cmd, tail)

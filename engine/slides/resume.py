@@ -95,26 +95,36 @@ def has_stock(run_dir: Path) -> bool:
     return (run_dir / "pool").is_dir()
 
 
+def _tree_bytes(path: Path) -> int:
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def stock_bytes(run_dir: Path) -> int:
+    """Сколько места занимают скачанные кадры и промежуточные куски запуска (то, что убирает drop_stock)."""
+    total = sum(_tree_bytes(run_dir / name) for name in STOCK_DIRS if (run_dir / name).is_dir())
+    for name in STOCK_FILES:
+        try:
+            total += (run_dir / name).stat().st_size
+        except OSError:
+            pass
+    return total
+
+
 def drop_stock(run_dir: Path) -> int:
     """Удаляет скачанные стоки и промежуточные куски запуска, возвращает освобождённые байты.
     Озвучка, тексты, субтитры и timeline остаются: по ним видно, из чего собран ролик."""
-    freed = 0
+    freed = stock_bytes(run_dir)
     for name in STOCK_DIRS:
-        d = run_dir / name
-        if not d.is_dir():
-            continue
-        for root, _, files in os.walk(d):
-            for f in files:
-                try:
-                    freed += os.path.getsize(os.path.join(root, f))
-                except OSError:
-                    pass
-        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(run_dir / name, ignore_errors=True)
     for name in STOCK_FILES:
-        f = run_dir / name
-        if f.is_file():
-            freed += f.stat().st_size
-            f.unlink(missing_ok=True)
+        (run_dir / name).unlink(missing_ok=True)
     if freed:
         log(f"Стоки запуска удалены: {freed / 1e9:.1f} ГБ ({run_dir.name})")
     return freed

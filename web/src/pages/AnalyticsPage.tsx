@@ -3,15 +3,20 @@ import { ArrowDown, ArrowUp, BarChart3, Check, Clock, Pencil, Plus, RefreshCw, T
 import { Badge, Button, Card, Empty, PageHeader, Progress, Select, Toggle } from "../components/ui";
 import { api, type AnalyticsAuto, type AnalyticsGroup, type AnalyticsRow } from "../lib/api";
 import { useJobs, useLoadedSettings, useProfiles, useToasts } from "../lib/store";
+import { inFilter, NO_GROUP } from "../components/GroupFilter";
 
-type SortKey = "name" | "subscribers" | "watch_hours" | "views_48h" | "synced_at";
+type SortKey = "name" | "subscribers" | "watch_hours" | "views_48h" | "scheduled" | "synced_at";
 const SORTS: { key: SortKey; label: string }[] = [
   { key: "views_48h", label: "Просмотры, 48 ч" },
   { key: "subscribers", label: "Подписчики" },
   { key: "watch_hours", label: "Часы просмотра" },
+  { key: "scheduled", label: "Запланировано" },
   { key: "name", label: "Название" },
   { key: "synced_at", label: "Обновлено" },
 ];
+/** Выбранные фильтры хранятся одной строкой «id1,id2» (в настройках — обычная строка). */
+const splitSel = (v: string | undefined) => (v ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+const joinSel = (v: string[]) => v.join(",");
 const newGroupId = () => `g-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
 
 const fmtInt = (n: number | null | undefined) => (n == null ? "—" : Math.round(n).toLocaleString("ru-RU"));
@@ -102,17 +107,23 @@ export function AnalyticsPage({ active }: { active: boolean }) {
   };
   const { settings, update } = useLoadedSettings();
   const groups: AnalyticsGroup[] = settings.analytics_groups ?? [];
-  const view = { group: "", sort: "views_48h", dir: "desc", ...(settings.analytics_view ?? {}) };
+  const view = { group: "", profile: "", sort: "views_48h", dir: "desc", ...(settings.analytics_view ?? {}) };
   const setView = (patch: Partial<typeof view>) => update({ analytics_view: { ...view, ...patch } });
   const saveGroups = (next: AnalyticsGroup[]) => update({ analytics_groups: next });
   const groupsOf = (id: string) => groups.filter((g) => g.channels.includes(id));
   const all = rows ?? [];
-  const activeGroup = groups.find((g) => g.id === view.group);
-  // выбранной группы больше нет (удалили) — показываем все
-  const filter = view.group === "none" || activeGroup ? view.group : "";
+  // можно включить сразу несколько групп (показываются каналы любой из них) и несколько профилей;
+  // группы и профили вместе — «и»: каналы выбранных групп внутри выбранных профилей
+  const groupSel = splitSel(view.group).filter((g) => g === NO_GROUP || groups.some((x) => x.id === g));
+  const profileList = useMemo(() => {
+    const seen = new Map<string, string>();
+    all.forEach((r) => r.profile_id && !seen.has(r.profile_id) && seen.set(r.profile_id, r.profile || r.profile_id));
+    return [...seen.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, "ru", { numeric: true }));
+  }, [all]);
+  const profileSel = splitSel(view.profile).filter((id) => profileList.some((p) => p.id === id));
   const list = useMemo(() => {
-    const picked = all.filter((r) =>
-      filter === "" ? true : filter === "none" ? !groupsOf(r.channel_id).length : activeGroup!.channels.includes(r.channel_id),
+    const picked = all.filter(
+      (r) => (profileSel.length === 0 || profileSel.includes(r.profile_id)) && inFilter(groupSel, r.channel_id, groups),
     );
     const key = view.sort as SortKey;
     const sign = view.dir === "asc" ? 1 : -1;
@@ -126,7 +137,8 @@ export function AnalyticsPage({ active }: { active: boolean }) {
       return sign * (x - y);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [all, filter, groups, view.sort, view.dir]);
+  }, [all, view.group, view.profile, groups, view.sort, view.dir]);
+  const filtered = groupSel.length > 0 || profileSel.length > 0;
   const sortBy = (key: SortKey) =>
     setView(view.sort === key ? { dir: view.dir === "asc" ? "desc" : "asc" } : { sort: key, dir: key === "name" ? "asc" : "desc" });
   const arrow = (key: SortKey) =>
@@ -136,7 +148,7 @@ export function AnalyticsPage({ active }: { active: boolean }) {
       ...g,
       channels: g.channels.includes(channel) ? g.channels.filter((c) => c !== channel) : [...g.channels, channel],
     }));
-  const sum = (k: "subscribers" | "watch_hours" | "views_48h") =>
+  const sum = (k: "subscribers" | "watch_hours" | "views_48h" | "scheduled") =>
     list.some((r) => r[k] != null) ? list.reduce((a, r) => a + (r[k] ?? 0), 0) : null;
   // «Всего» вчера: у канала без вчерашних цифр берём сегодняшние — его рост не попадёт в общую динамику ложно
   const sumPrev = (k: "subscribers" | "watch_hours" | "views_48h") =>
@@ -193,8 +205,11 @@ export function AnalyticsPage({ active }: { active: boolean }) {
         <GroupBar
           groups={groups}
           rows={all}
-          filter={filter}
-          onFilter={(group) => setView({ group })}
+          filter={groupSel}
+          onFilter={(sel) => setView({ group: joinSel(sel) })}
+          profiles={profileList}
+          profile={profileSel}
+          onProfile={(sel) => setView({ profile: joinSel(sel) })}
           onSave={saveGroups}
           sort={view.sort}
           dir={view.dir}
@@ -219,6 +234,7 @@ export function AnalyticsPage({ active }: { active: boolean }) {
                   <th className="num an-sort" onClick={() => sortBy("subscribers")}>Подписчики {arrow("subscribers")}</th>
                   <th className="num an-sort" onClick={() => sortBy("watch_hours")} title="За всё время существования канала (YouTube Analytics, задержка до 1–2 суток)">Часы просмотра {arrow("watch_hours")}</th>
                   <th className="num an-sort" onClick={() => sortBy("views_48h")} title="Просмотры за последние 48 часов (в реальном времени)">Просмотры, 48 ч {arrow("views_48h")}</th>
+                  <th className="num an-sort" onClick={() => sortBy("scheduled")} title="Сколько роликов канала запланировано, но ещё не вышло (читается из «Контента» при синхронизации)">Запланировано {arrow("scheduled")}</th>
                   <th className="an-sort" onClick={() => sortBy("synced_at")}>Обновлено {arrow("synced_at")}</th>
                 </tr>
               </thead>
@@ -248,6 +264,7 @@ export function AnalyticsPage({ active }: { active: boolean }) {
                     <td className="num">
                       {fmtInt(r.views_48h)} {delta(r.views_48h, r.prev?.views_48h, false, since(r.prev?.t, r.synced_at))}
                     </td>
+                    <td className="num">{fmtInt(r.scheduled)}</td>
                     <td className="small">
                       {when(r.synced_at)}
                       {r.error && r.synced_at ? <> <Badge tone="warn">устарело</Badge></> : null}
@@ -258,18 +275,19 @@ export function AnalyticsPage({ active }: { active: boolean }) {
               {rows !== null && !list.length && (
                 <tbody>
                   <tr>
-                    <td colSpan={6} className="muted small">В этой группе пока нет каналов — добавь их кнопкой в столбце «Группы».</td>
+                    <td colSpan={7} className="muted small">{filtered ? "Под выбранные фильтры каналов нет — сними часть фильтров или добавь каналы в группу кнопкой в столбце «Группы»." : "Каналов пока нет."}</td>
                   </tr>
                 </tbody>
               )}
               {list.length > 1 && (
                 <tfoot>
                   <tr>
-                    <td>Всего{filter ? ` (${list.length})` : ""}</td>
+                    <td>Всего{filtered ? ` (${list.length})` : ""}</td>
                     <td />
                     <td className="num">{fmtInt(sum("subscribers"))} {delta(sum("subscribers"), sumPrev("subscribers"))}</td>
                     <td className="num">{fmtHours(sum("watch_hours"))} {delta(sum("watch_hours"), sumPrev("watch_hours"), true)}</td>
                     <td className="num">{fmtInt(sum("views_48h"))} {delta(sum("views_48h"), sumPrev("views_48h"))}</td>
+                    <td className="num">{fmtInt(sum("scheduled"))}</td>
                     <td />
                   </tr>
                 </tfoot>
@@ -287,24 +305,29 @@ export function AnalyticsPage({ active }: { active: boolean }) {
 }
 
 
-/** Фильтр по группам, создание/переименование/удаление групп и сортировка. */
+/** Фильтры (группы и профили — можно включить несколько сразу), создание/переименование/удаление групп и сортировка. */
 function GroupBar(props: {
   groups: AnalyticsGroup[];
   rows: AnalyticsRow[];
-  filter: string;
-  onFilter: (g: string) => void;
+  filter: string[];
+  onFilter: (g: string[]) => void;
+  profiles: { id: string; name: string }[];
+  profile: string[];
+  onProfile: (ids: string[]) => void;
   onSave: (g: AnalyticsGroup[]) => void;
   sort: string;
   dir: string;
   onSort: (k: SortKey) => void;
   onDir: () => void;
 }) {
-  const { groups, rows, filter, onFilter, onSave, sort, dir, onSort, onDir } = props;
+  const { groups, rows, filter, onFilter, profiles, profile, onProfile, onSave, sort, dir, onSort, onDir } = props;
   const [editing, setEditing] = useState<{ id: string; name: string } | null>(null);
   const ids = new Set(rows.map((r) => r.channel_id));
   const count = (g: AnalyticsGroup) => g.channels.filter((c) => ids.has(c)).length;
   const loose = rows.filter((r) => !groups.some((g) => g.channels.includes(r.channel_id))).length;
-  const current = groups.find((g) => g.id === filter);
+  // переименовать/удалить можно, когда выбрана ровно одна группа
+  const current = filter.length === 1 ? groups.find((g) => g.id === filter[0]) : undefined;
+  const toggle = (id: string) => onFilter(filter.includes(id) ? filter.filter((x) => x !== id) : [...filter, id]);
 
   const commit = () => {
     if (!editing) return;
@@ -317,23 +340,33 @@ function GroupBar(props: {
   const remove = (g: AnalyticsGroup) => {
     if (!window.confirm(`Удалить группу «${g.name}»? Каналы останутся, пропадёт только группа.`)) return;
     onSave(groups.filter((x) => x.id !== g.id));
-    onFilter("");
+    onFilter(filter.filter((x) => x !== g.id));
   };
 
   return (
     <Card>
       <div className="stack" style={{ gap: 10 }}>
-        <div className="chips" style={{ alignItems: "center" }}>
-          <button className={`chip ${filter === "" ? "active" : ""}`} onClick={() => onFilter("")}>
+        <div className="chips" style={{ alignItems: "center" }} role="group" aria-label="Фильтр по группам">
+          <button className={`chip ${filter.length === 0 ? "active" : ""}`} onClick={() => onFilter([])}>
             Все · {rows.length}
           </button>
           {groups.map((g) => (
-            <button key={g.id} className={`chip ${filter === g.id ? "active" : ""}`} onClick={() => onFilter(g.id)}>
+            <button
+              key={g.id}
+              className={`chip ${filter.includes(g.id) ? "active" : ""}`}
+              aria-pressed={filter.includes(g.id)}
+              onClick={() => toggle(g.id)}
+              title="Можно включить несколько групп сразу — покажутся каналы любой из них"
+            >
               {g.name} · {count(g)}
             </button>
           ))}
           {groups.length > 0 && (
-            <button className={`chip ${filter === "none" ? "active" : ""}`} onClick={() => onFilter("none")}>
+            <button
+              className={`chip ${filter.includes(NO_GROUP) ? "active" : ""}`}
+              aria-pressed={filter.includes(NO_GROUP)}
+              onClick={() => toggle(NO_GROUP)}
+            >
               Без группы · {loose}
             </button>
           )}
@@ -367,6 +400,7 @@ function GroupBar(props: {
           )}
         </div>
         <div className="row gap-sm" style={{ alignItems: "center", flexWrap: "wrap" }}>
+          {profiles.length > 1 && <ProfilePicker profiles={profiles} rows={rows} value={profile} onChange={onProfile} />}
           <span className="muted small">Сортировка:</span>
           <select className="input" style={{ width: "auto" }} value={sort} onChange={(e) => onSort(e.target.value as SortKey)}>
             {SORTS.map((s) => (
@@ -382,6 +416,60 @@ function GroupBar(props: {
         </div>
       </div>
     </Card>
+  );
+}
+
+/** Профили AdsPower: можно отметить несколько — покажутся каналы любого из них. Список с галочками и поиском. */
+function ProfilePicker({ profiles, rows, value, onChange }: {
+  profiles: { id: string; name: string }[];
+  rows: AnalyticsRow[];
+  value: string[];
+  onChange: (ids: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+  const count = (id: string) => rows.filter((r) => r.profile_id === id).length;
+  const shown = profiles.filter((p) => p.name.toLowerCase().includes(q.trim().toLowerCase()));
+  const toggle = (id: string) => onChange(value.includes(id) ? value.filter((x) => x !== id) : [...value, id]);
+  const label = value.length === 0 ? `Все профили · ${profiles.length}` : value.length === 1 ? profiles.find((p) => p.id === value[0])?.name ?? "1 профиль" : `Профилей: ${value.length}`;
+  return (
+    <div className="an-groups" ref={ref}>
+      <span className="muted small">Профиль:</span>
+      <button type="button" className={`chip ${value.length ? "active" : ""}`} aria-expanded={open} onClick={() => setOpen(!open)} title="Можно отметить несколько профилей">
+        {label}
+      </button>
+      {value.length > 0 && <Button size="sm" variant="ghost" icon={<X size={14} />} onClick={() => onChange([])} title="Показать все профили" />}
+      {open && (
+        <div className="an-groups-menu an-profiles-menu">
+          {profiles.length > 8 && (
+            <input className="input" autoFocus placeholder="Найти профиль" value={q} onChange={(e) => setQ(e.target.value)} />
+          )}
+          <div className="an-profiles-list">
+            {shown.map((p) => (
+              <label key={p.id} className="an-groups-item">
+                <input type="checkbox" checked={value.includes(p.id)} onChange={() => toggle(p.id)} />
+                {p.name} · {count(p.id)}
+              </label>
+            ))}
+            {!shown.length && <div className="muted small">Не нашлось.</div>}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -26,7 +26,7 @@ from engine.slides.publish import lang_suffix
 from engine.slides.full_pipeline import FullRunRequest, run_full_pipeline
 from engine.slides.llm_client import DEFAULT_BASE_URL, DEFAULT_MODEL
 from engine.slides.media_pipeline import MediaRequest, run_media_stage, stock_keys_from_config
-from engine.slides.paths import RUNS_DIR, new_run_dir
+from engine.slides.paths import RUNS_DIR, SOURCE_NAME, new_run_dir
 from engine.slides.render_pipeline import RenderRequest, run_render_stage
 from engine.slides.resume import describe_resume, detect_stage
 from engine.slides.speed_copies import BASE_NAME as BASE_VIDEO, write_speed_copies
@@ -226,6 +226,7 @@ def _render_flags(cfg: dict) -> dict[str, Any]:
         "subscribe": sub is not None,
         "subscribe_path": sub,
         "subtitles": bool(cfg.get("subtitles")),
+        "transition": "flash" if _s(cfg, "transition") == "flash" else "calm",
         "intro_dir": _opt_dir(_s(cfg, "slides_intro_dir")),
         "outro_dir": _opt_dir(_s(cfg, "slides_outro_dir")),
         "music": track_path(track_id),
@@ -322,6 +323,17 @@ def build(kind: str, params: dict[str, Any], state: dict[str, Any]) -> tuple[str
             job_output_dirs.reset(token)
 
     return title, run_with_settings
+
+
+def _save_source(run_dir: Path, params: dict) -> None:
+    """Ссылка на оригинал рерайта — в папку запуска: по обложке оригинала определяются герои ролика про людей."""
+    url = str(params.get("source_url") or "").strip()
+    if not url:
+        return
+    try:
+        (run_dir / SOURCE_NAME).write_text(json.dumps({"url": url}, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _state_dir(state: dict, key: str) -> Path | None:
@@ -616,6 +628,9 @@ def _niches_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
     from engine.research import niches
     from engine.slides.stocks_base import parse_keys
 
+    similar = str(params.get("similar_url") or "").strip()
+    if similar:
+        return _similar_job(cfg, params, similar)
     niche = str(params.get("niche") or "").strip()
     raw = params.get("keywords") or params.get("subniches") or []
     keywords = [str(s).strip() for s in raw if str(s).strip()] if isinstance(raw, list) else []
@@ -639,6 +654,34 @@ def _niches_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
                            f"каналов {st['channels']}, разобрано {st['checked']}, подошли {st['passed']})", "lines": lines}
 
     return f"Поиск ниш: {label}", run
+
+
+def _similar_job(cfg: dict, params: dict, url: str) -> tuple[str, Any]:
+    """«Поиск ниш» → «Похожие на канал»: по ссылке на канал (или ролик) — такие же каналы по тем же критериям."""
+    from engine.research import niches
+    from engine.slides.stocks_base import parse_keys
+
+    keys = parse_keys(cfg.get("youtube_api_keys") or cfg.get("youtube_api_key"))
+    if not keys:
+        raise ValueError("Нужен ключ YouTube Data API (Настройки → Ключи → YouTube)")
+    raw = params.get("filters") or {}
+    # язык «как у канала» (по умолчанию): аудиторию определяет сама программа по названиям роликов образца
+    auto = str(raw.get("language") or "auto") == "auto"
+    f = niches.Filters.of({k: v for k, v in raw.items() if not (k == "language" and auto)})
+    llm = _llm_opt(cfg)
+
+    def run(job: Job, progress, cancel: CancelToken) -> dict[str, Any]:
+        try:
+            res = niches.find_similar(url, f, keys, llm, auto_language=auto, cancel=cancel, progress=progress)
+        except niches.SimilarError as exc:
+            raise ValueError(str(exc)) from None
+        st, src = res["stats"], res["similar"]
+        lines = [f"{c['title']} — {c['subs']} подп., медиана {c['recent_median']} просм. ({c['url']})"
+                 for c in res["channels"]]
+        return {"summary": f"Похожие на «{src['title']}»: каналов {len(res['channels'])} (роликов {st['videos']}, "
+                           f"каналов {st['channels']}, разобрано {st['checked']}, подошли {st['passed']})", "lines": lines}
+
+    return f"Поиск ниш: похожие на {url[:60]}", run
 
 
 def _footage_dir(cfg: dict) -> Path:
@@ -962,6 +1005,7 @@ def _slides_pipeline(cfg: dict, params: dict, state: dict, *, voice_only: bool) 
             rd = new_run_dir(title_hint=req.tts.title_hint)
             job.save_state(run_dir=str(rd), owned_dir=str(rd))
         req.resume_dir = rd
+        _save_source(rd, params)
         # тексты из полей — один раз в исходный текст (повтор задачи даёт тот же результат: перевод запомнен)
         text, texts_lines = _with_texts(cfg, params, "slides", tj.text, audio=audio is not None or has_voice)
         req.tts = replace(req.tts, text=text) if text != req.tts.text else req.tts
@@ -975,7 +1019,7 @@ def _slides_pipeline(cfg: dict, params: dict, state: dict, *, voice_only: bool) 
                 "lines": [f"Запуск: {rd.name}", f"Слов: {w.word_count}", f"Длительность: {w.duration:.1f} с"],
             }
         assert res.render is not None and res.media is not None
-        extra = [f"Кадров: {res.media.selected}", f"Запуск: {rd.name}", *[f"Тексты: {n}" for n in texts_lines],
+        extra = [f"Кадров: {res.media.selected}", *res.media.notes, f"Запуск: {rd.name}", *[f"Тексты: {n}" for n in texts_lines],
                  *res.dub_lines]
         if publish:
             folder = res.render.desktop_video
@@ -1120,32 +1164,6 @@ def _copies_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
     return f"Копии: {src.name}", run
 
 
-def _thumbnail_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
-    from engine.slides.paths import DESKTOP
-    from engine.slides.thumbnail import build_thumbnail, parse_names, thumbnail_path
-
-    names = parse_names(str(params.get("names") or ""))
-    if not names:
-        raise ValueError("Впиши имена людей для превью")
-    color = bool(params.get("color", True))
-
-    def run(job: Job, progress, cancel: CancelToken) -> dict[str, Any]:
-        path, used, missing = build_thumbnail(
-            names, keys=stock_keys_from_config(cfg), dest=thumbnail_path(DESKTOP), color=color,
-            llm=_llm_opt(cfg), cancel=cancel, progress=progress,
-        )
-        return {
-            "summary": f"Превью: {len(used)} фото, {'цветные' if color else 'чёрно-белые'}",
-            "folder": str(path),
-            "image": str(path),
-            "lines": [f"На превью: {', '.join(used)}"],
-            "warnings": [f"Нет на превью: {m}" for m in missing],
-        }
-
-    title = ", ".join(names[:3]) + (f" и ещё {len(names) - 3}" if len(names) > 3 else "")
-    return f"Превью: {title}", run
-
-
 def _cover_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
     """Раздел «Обложки»: образец → варианты → лучший → переводы надписей. Папка — Desktop/Обложки/…"""
     from datetime import datetime
@@ -1261,6 +1279,34 @@ def _analytics_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
         }
 
     return title, run
+
+
+def _collabs_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
+    """Принять все ждущие приглашения соавторов (журнал приглашений — engine/publish/collabs.py)."""
+    from engine.publish import collabs
+    from engine.publish.adspower import AdsPowerDown
+
+    key, url = _s(cfg, "adspower_api_key"), _s(cfg, "adspower_url")
+    if not key:
+        raise ValueError("Нужен ключ AdsPower (Настройки → AdsPower)")
+
+    def run(job: Job, progress, cancel: CancelToken) -> dict[str, Any]:
+        try:
+            out = collabs.reconcile(key, url, cancel=cancel, progress=progress)
+        except AdsPowerDown as exc:
+            return {"summary": "Соавторства: AdsPower не отвечает — подтвержу позже", "lines": [],
+                    "warnings": [str(exc)]}
+        ok, failed = out["ok"], out["failed"]
+        left = len(collabs.pending())
+        return {
+            "summary": (f"Соавторства: подтверждено {len(ok)} из {out['total']}"
+                        + (f", не удалось {len(failed)} — повторю сам" if failed else "")),
+            "lines": [*(f"Подтверждено: {x}" for x in ok), *(f"Не подтверждено: {x}" for x in failed)],
+            "warnings": [f"Соавторство не подтверждено — {x}" for x in failed]
+            + ([f"Ждут подтверждения: {left}"] if left else []),
+        }
+
+    return "Подтверждение соавторств" + (" (само)" if params.get("auto") else ""), run
 
 
 def _safe_dir(name: str) -> str:
@@ -1394,7 +1440,6 @@ _BUILDERS = {
     "slides_media": _slides_media,
     "slides_render": _slides_render,
     "copies": _copies_job,
-    "thumbnail": _thumbnail_job,
     "rewrite": _rewrite_job,
     "cover": _cover_job,
     "publish": _publish_job,
@@ -1402,5 +1447,6 @@ _BUILDERS = {
     "polls": _polls_job,
     "niches": _niches_job,
     "analytics": _analytics_job,
+    "collabs": _collabs_job,
     "scan": _scan_job,
 }

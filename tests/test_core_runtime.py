@@ -67,6 +67,157 @@ class JobManagerEdgeTests(_ManagerCase):
         _wait(lambda: job.status == jobs_mod.CANCELLED)
         self.assertTrue(job.public()["resumable"])
 
+    def test_job_collects_tokens_of_its_own_llm_calls(self) -> None:
+        from engine.core import usage
+        from engine.slides.llm_client import _usage_line
+
+        def resp(i, c, o):
+            u = mock.MagicMock(prompt_tokens=i, completion_tokens=o)
+            u.prompt_tokens_details.cached_tokens = c
+            return mock.MagicMock(usage=u)
+
+        def builder(kind, params, state):
+            def run(job, progress, cancel):
+                _usage_line(resp(1000, 400, 50), "rewrite_part_1")
+                _usage_line(resp(2000, 0, 100), "rewrite_review")
+                _usage_line(resp(500, 100, 10), "judge_pool")
+                _usage_line(resp(500, 100, 10), "judge_8")
+                return {}
+            return "Токены", run
+
+        m = jobs_mod.JobManager(builder)
+        job = m.add(m.create("x", {}))
+        _wait(lambda: job.status == jobs_mod.DONE)
+        tokens = job.public()["tokens"]
+        self.assertEqual((tokens["calls"], tokens["in"], tokens["cached"], tokens["out"]), (4, 4000, 600, 170))
+        by = {r["name"]: r for r in tokens["by"]}
+        self.assertEqual(by["Проверка кадров"]["calls"], 2)
+        self.assertEqual(by["Рерайт"]["in"], 1000)
+        self.assertEqual(by["Проверка рерайта"]["out"], 100, "проверка рерайта — отдельно от рерайта")
+        usage.record("x", 1, 0, 1)  # вне задачи — тихо, без ошибок
+        self.assertIsNone(usage.summary({}))
+
+    def _drain(self, kinds: list[str], min_sec: float | None) -> list[tuple]:
+        """Ставит задачи, ждёт пустую очередь, возвращает отправленные уведомления."""
+        seen: list[tuple] = []
+
+        gate = threading.Event()  # задачи стартуют, когда все уже в очереди (иначе первая успеет закончиться одна)
+
+        def builder(kind, params, state):
+            def run(job, progress, cancel):
+                gate.wait(3)
+                if kind == "bad":
+                    raise RuntimeError("сломалось")
+                return {}
+            return f"Задача {kind}", run
+
+        patches = [mock.patch("server.notify.notify", lambda title, text: seen.append((title, text))),
+                   mock.patch.object(jobs_mod, "AUTO_RETRY_MIN", ())]
+        if min_sec is not None:
+            patches.append(mock.patch.object(jobs_mod.JobManager, "NOTICE_MIN_SEC", min_sec))
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        m = jobs_mod.JobManager(builder)
+        jobs = [m.add(m.create(k, {})) for k in kinds]
+        gate.set()
+        _wait(lambda: all(j.status in (jobs_mod.DONE, jobs_mod.FAILED) for j in jobs))
+        time.sleep(0.2)
+        return seen
+
+    def test_notice_once_when_queue_drains(self) -> None:
+        seen = self._drain(["a", "b", "bad"], min_sec=0.0)
+        self.assertEqual(len(seen), 1, "одно уведомление на всю пачку")
+        self.assertEqual(seen[0][0], "Story Video: есть ошибки")
+        self.assertIn("Готово: 2, с ошибкой: 1", seen[0][1])
+
+    def test_quick_jobs_do_not_notify(self) -> None:
+        self.assertEqual(self._drain(["a", "b"], min_sec=None), [], "секундные задачи — без уведомления")
+
+    def test_notice_texts_and_off_switch(self) -> None:
+        from server import notify
+
+        self.assertEqual(notify.queue_message(1, 0, "Ролик"), ("Story Video: готово", "Задача готова. Последняя: Ролик"))
+        self.assertEqual(notify.queue_message(0, 2, "")[0], "Story Video: ошибка")
+        with mock.patch.object(notify.subprocess, "run") as run:
+            notify.notify("т", "х")  # в тестах STORY_VIDEO_NO_NOTIFY включён
+            time.sleep(0.1)
+        run.assert_not_called()
+
+    def test_stop_feedback_is_not_overwritten_by_progress(self) -> None:
+        """«Стоп» нажат, шаг ещё доделывается: прогресс не затирает «Останавливаю…» и видно флаг stopping."""
+        in_step = threading.Event()
+        proceed = threading.Event()
+
+        def builder(kind, params, state):
+            def run(job, progress, cancel):
+                in_step.set()
+                proceed.wait(3)
+                progress(0.5, "Рендер 50%")  # код, который ещё не заметил «Стоп»
+                cancel.check()
+                return {}
+            return "Шаг", run
+
+        m = jobs_mod.JobManager(builder)
+        job = m.add(m.create("x", {}))
+        in_step.wait(3)
+        self.assertFalse(job.public()["stopping"])
+        self.assertIsNone(job.public()["stop_at"])
+        m.cancel(job.id)
+        self.assertTrue(job.public()["stopping"])
+        self.assertLess(abs(job.public()["stop_at"] - time.time()), 5, "время нажатия «Стоп» — для счётчика секунд")
+        proceed.set()
+        _wait(lambda: job.status == jobs_mod.CANCELLED)
+        self.assertNotIn("Рендер 50%", " ".join([job.message]))
+        self.assertFalse(job.public()["stopping"], "остановлена — флаг снят")
+
+    def test_stop_kills_ffmpeg_inside_a_job(self) -> None:
+        """Настоящий долгий процесс в задаче умирает по «Стоп» сразу (токен задачи доходит до run_ffmpeg)."""
+        from engine.slides import ffprobe_util
+
+        started = threading.Event()
+
+        def builder(kind, params, state):
+            def run(job, progress, cancel):
+                started.set()
+                ffprobe_util.run_ffmpeg(["sleep", "30"], label="долгий")
+                return {}
+            return "Долгий", run
+
+        m = jobs_mod.JobManager(builder)
+        job = m.add(m.create("x", {}))
+        started.wait(3)
+        time.sleep(0.2)
+        t0 = time.monotonic()
+        m.cancel(job.id)
+        _wait(lambda: job.status == jobs_mod.CANCELLED, timeout=5)
+        self.assertLess(time.monotonic() - t0, 3)
+
+    def test_scheduled_analytics_runs_right_after_current_upload(self) -> None:
+        """Идёт заливка, в очереди ещё ролики; аналитика по расписанию встаёт перед ними, заливку не прерывает."""
+        gate = threading.Event()
+        order: list[str] = []
+
+        def builder(kind, params, state):
+            def run(job, p, c):
+                order.append(params.get("n") or kind)
+                if params.get("n") == "первая":
+                    gate.wait(3)
+                return {}
+            return kind, run
+
+        m = jobs_mod.JobManager(builder)
+        first = m.add(m.create("publish", {"n": "первая"}))
+        _wait(lambda: first.status == jobs_mod.RUNNING)
+        m.add(m.create("publish", {"n": "вторая"}))
+        m.add(m.create("publish", {"n": "третья"}))
+        sync = m.add(m.create("analytics", {"auto": True}))
+        m.move(sync.id, "top")
+        self.assertEqual(order, ["первая"], "идущая заливка не тронута")
+        gate.set()
+        _wait(lambda: len(order) == 4)
+        self.assertEqual(order, ["первая", "analytics", "вторая", "третья"])
+
     def test_reset_running_job_refused(self) -> None:
         gate = threading.Event()
 
@@ -487,5 +638,9 @@ class AnalyticsGroupsConfigTest(unittest.TestCase):
             {"id": "g1", "name": "дубль"}, {"id": "", "name": "без id"}, {"id": "g2", "name": ""}, "мусор",
         ], "analytics_view": {"sort": "subscribers", "лишнее": 1}})
         self.assertEqual(cfg["analytics_groups"], [{"id": "g1", "name": "Рассказы", "channels": ["UC1", "UC2"]}])
-        self.assertEqual(cfg["analytics_view"], {"group": "", "sort": "subscribers", "dir": "desc"})
+        self.assertEqual(cfg["analytics_view"], {"group": "", "profile": "", "sort": "subscribers", "dir": "desc"})
+        kept = _normalize({"analytics_view": {"profile": "p12", "group": "g1"}})["analytics_view"]
+        self.assertEqual((kept["profile"], kept["group"]), ("p12", "g1"), "фильтр по профилю сохраняется")
+        multi = _normalize({"analytics_view": {"profile": "p12,p3", "group": "g1,g2,none"}})["analytics_view"]
+        self.assertEqual((multi["profile"], multi["group"]), ("p12,p3", "g1,g2,none"), "можно выбрать несколько групп и профилей")
         self.assertEqual(_normalize({})["analytics_groups"], [])

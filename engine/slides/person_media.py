@@ -12,9 +12,12 @@
 
 from __future__ import annotations
 
+import math
 import random
 import re
+import threading
 import unicodedata
+from urllib.parse import urlparse
 from concurrent.futures import as_completed
 from pathlib import Path
 
@@ -60,9 +63,14 @@ def name_in(text: str, name: str) -> bool:
     return bool(parts) and (parts[-1] in folded or _fold(name) in folded)
 
 
-def person_query_set(plan: ThemePlan, name: str, kind: str) -> tuple[list[str], list[str]]:
+_RU_VIDEO = ("интервью", "документальный фильм", "вечер памяти", "творческий вечер", "передача")
+
+
+def person_query_set(plan: ThemePlan, name: str, kind: str, limit: int = 16, *, only_plan: bool = False) -> tuple[list[str], list[str]]:
     """Все запросы — с именем героя в кавычках (точное совпадение в поиске)."""
     images, videos = person_queries(name, plan.context.era, plan.context.place, kind)
+    if kind == "photo" and re.search("[а-яё]", name, re.I):
+        videos = [*videos, *[f"{name} {x}" for x in _RU_VIDEO]]
     extra_i = [q for q in plan.image_queries if name.lower() in q.lower()]
     extra_v = [q for q in plan.video_queries if name.lower() in q.lower()]
     if kind == "photo":
@@ -78,12 +86,56 @@ def person_query_set(plan: ThemePlan, name: str, kind: str) -> tuple[list[str], 
         return out
 
     # запросы плана с уточнением («… советский актёр») — первыми: точнее, тёзка в выдаче реже
-    return quoted(extra_i + images)[:16], quoted(extra_v + videos)[:8]
+    # only_plan — добор: только запросы плана (стандартные уже были в первом проходе)
+    if only_plan:  # добор: без кавычек — шире выдача, чужих отсеет проверка по лицу
+        return list(dict.fromkeys(extra_i))[:limit], quoted(extra_v + videos)[:10]
+    return quoted(extra_i + images)[:limit], quoted(extra_v + videos)[:10]
 
 
 def quote_name(query: str, name: str) -> str:
     """Имя героя в кавычках — поиск ищет точное совпадение."""
     return re.sub(re.escape(name), f'"{name}"', query, flags=re.I) if '"' not in query else query
+
+
+class HostGuard:
+    """Сайты, которые не отдают файлы (рукопожатие SSL висит, блокировка): после нескольких подряд неудач без единой
+    удачи — больше туда не ходим. Такая попытка стоила до 20 секунд, а таких адресов в выдаче треть."""
+
+    LIMIT = 3
+
+    def __init__(self) -> None:
+        self._fails: dict[str, int] = {}
+        self._ok: set[str] = set()
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def host(url: str) -> str:
+        return urlparse(url).netloc.lower()
+
+    def blocked(self, url: str) -> bool:
+        h = self.host(url)
+        with self._lock:
+            return h not in self._ok and self._fails.get(h, 0) >= self.LIMIT
+
+    def report(self, url: str, ok: bool) -> None:
+        h = self.host(url)
+        with self._lock:
+            if ok:
+                self._ok.add(h)
+            else:
+                self._fails[h] = self._fails.get(h, 0) + 1
+
+
+def _merge(lists: list[list[StockCandidate]]) -> list[StockCandidate]:
+    """Источники вперемешку (по кругу), без повторов одного адреса: если один отвалился, остальные держат."""
+    out: list[StockCandidate] = []
+    seen: set[str] = set()
+    for rank in range(max((len(x) for x in lists), default=0)):
+        for lst in lists:
+            if rank < len(lst) and lst[rank].download_url not in seen:
+                seen.add(lst[rank].download_url)
+                out.append(lst[rank])
+    return out
 
 
 def _search(clients: dict, source: str, queries: list[str], *, video: bool, cancel: CancelToken | None) -> list[StockCandidate]:
@@ -148,6 +200,9 @@ def collect_person_pool(
     image_need: int,
     video_need: int,
     anchors: list[str] | None = None,
+    max_images_queries: int = 16,
+    max_cands: int | None = None,
+    only_plan: bool = False,
 ) -> tuple[list[dict], list[dict], int, int]:
     """Пул только с героем → (videos, images, отбраковано видео, картинок).
     anchors — точные запросы (имя + кто это + годы): лицо героя узнаём по их выдаче, а не по всем
@@ -155,24 +210,51 @@ def collect_person_pool(
     from engine.slides.theme_media import CLIP_SEC, _extract_frames
 
     span = pct_hi - pct_lo
-    img_q, vid_q = person_query_set(plan, name, kind)
+    img_q, vid_q = person_query_set(plan, name, kind, limit=max_images_queries, only_plan=only_plan)
+    if only_plan:  # точные запросы — в кавычках: по ним опознаётся лицо героя (защита от тёзок)
+        exact_q = set(anchors or [])
+        img_q = [quote_name(q, name) if q in exact_q else q for q in img_q]
     photo = kind == "photo"
     log(f"Герой «{name}» ({kind}): только его кадры. Запросы: {img_q[:6]}…")
     progress(pct_lo, f"Ищу фото: {name}")
 
-    # --- картинки: Google + Wikimedia, скачиваем с запасом ---
-    cands = _search(clients, "google", img_q, video=False, cancel=cancel)
-    cands += _search(clients, "wikimedia", img_q[:6], video=False, cancel=cancel)
+    # --- картинки: сначала источники без браузера (статья Википедии, Яндекс, Commons), потом Google/Bing на добор ---
+    cap = max_cands or max(image_need * 4, 120)
+    lists: list[list[StockCandidate]] = []
+    wiki = clients.get("wikipedia")
+    if wiki is not None and photo and not only_plan:
+        try:
+            article, lead = wiki.photos(name)
+        except Exception as exc:
+            log(f"Википедия: {str(exc)[:100]}")
+            article, lead = [], None
+        if lead is not None:
+            lists.append([lead])  # главное фото статьи — по нему опознаётся лицо героя
+        lists.append(article)
+    lists.append(_search(clients, "yandex", img_q[:10], video=False, cancel=cancel))
+    lists.append(_search(clients, "wikimedia", img_q[:6], video=False, cancel=cancel))
+    cands = _merge(lists)
+    if len(cands) < cap * 0.8:  # мало — браузерный поиск (медленный и капризный: капча, обрывы)
+        log(f"Герой: без браузера набралось {len(cands)} — добавляю Google/Bing")
+        lists.append(_search(clients, "google", img_q, video=False, cancel=cancel))
+        cands = _merge(lists)
     cands.sort(key=lambda c: bool((c.meta or {}).get("watermark")))  # водяной знак — в конец
-    cands = cands[: max(image_need * 4, 120)]
+    cands = cands[:cap]
     log(f"Герой: кандидатов-картинок {len(cands)}")
+
+    guard = HostGuard()
 
     def fetch(i: int, cand: StockCandidate) -> dict | None:
         if cancel and cancel.is_cancelled():
             raise CancelledError("Остановлено пользователем")
         ext = Path(cand.download_url.split("?")[0]).suffix.lower()
         trial = trials / f"hero_{i:03d}{ext if ext in ('.jpg', '.jpeg', '.png', '.webp') else '.jpg'}"
-        if not _download(http, cand.download_url, trial, retries=2):
+        if guard.blocked(cand.download_url):
+            return None
+        # фото — быстро: рукопожатие дольше 4 с и вторая попытка не нужны (кандидатов с запасом)
+        ok = _download(http, cand.download_url, trial, retries=1, connect_timeout=4.0, max_seconds=30.0, max_bytes=30_000_000)
+        guard.report(cand.download_url, ok)
+        if not ok:
             trial.unlink(missing_ok=True)
             return None
         from engine.slides.theme_media import _image_short_side
@@ -190,26 +272,65 @@ def collect_person_pool(
             return None
         return {"trial": trial, "cand": cand, "side": side, "faces": vecs}
 
+    # Качаем волнами и останавливаемся, как только подходящих (с лицом героя, разных) набралось на ролик:
+    # раньше скачивалось и проверялось всё, что нашла выдача (в 3–4 раза больше нужного).
     got: list[dict] = []
     rejected_i = 0
-    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as ex:
-        futs = [ex.submit(fetch, i, c) for i, c in enumerate(cands)]
-        for n, fut in enumerate(as_completed(futs), 1):
-            if cancel:
-                cancel.check()
-            hit = fut.result()
-            if hit is None:
-                rejected_i += 1
-            else:
-                got.append(hit)
-            if n % 10 == 0:
-                progress(pct_lo + span * 0.55 * n / max(1, len(futs)), f"Фото героя: проверено {n}/{len(futs)}, подходит {len(got)}")
-
     hero = None
-    if photo and anchors:
-        exact = {quote_name(q, name).lower() for q in anchors}
-        sure = [h["faces"] for h in got if str(h["cand"].query or "").lower() in exact]
-        hero = faces.find_hero(sure)
+    exact = {quote_name(q, name).lower() for q in anchors} if photo and anchors else set()
+
+    def exact_faces() -> list:
+        # лицо героя: фото из точных запросов и главное фото его статьи в Википедии
+        return [h["faces"] for h in got if str(h["cand"].query or "").lower() in exact or (h["cand"].meta or {}).get("hero_ref")]
+
+    def enough() -> bool:
+        """Подходящих разных фото уже хватает (лицо героя известно) — остальное качать незачем."""
+        if photo and hero is None:
+            return False
+        mine = [h for h in got if not photo or faces.is_hero_shot(h["faces"], hero)]
+        hashes: list[int] = []
+        for h in mine:
+            if "hash" not in h:
+                h["hash"] = image_hash(h["trial"])
+            if h["hash"] is None or not any(_hamming(h["hash"], k) <= DUP_BITS for k in hashes):
+                if h["hash"] is not None:
+                    hashes.append(h["hash"])
+                else:
+                    hashes.append(-1)
+        return len(hashes) >= image_need
+
+    pos, done_n = 0, 0
+    wave = max(40, math.ceil(image_need * 1.4))
+    while pos < len(cands):
+        batch = list(enumerate(cands[pos:pos + wave], start=pos))
+        pos += wave
+        with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as ex:
+            futs = [ex.submit(fetch, i, c) for i, c in batch]
+            for fut in as_completed(futs):
+                if cancel:
+                    cancel.check()
+                hit = fut.result()
+                done_n += 1
+                if hit is None:
+                    rejected_i += 1
+                else:
+                    got.append(hit)
+                if done_n % 10 == 0:
+                    progress(pct_lo + span * 0.55 * min(1.0, done_n / max(1, len(cands))),
+                             f"Фото героя: проверено {done_n}/{len(cands)}, подходит {len(got)}")
+        if photo and hero is None and len(exact_faces()) >= faces.MIN_HERO_IMAGES:
+            hero = faces.find_hero(exact_faces())
+            if hero is not None:
+                log(f"Герой: лицо «{name}» взято по точным запросам ({len(exact_faces())} фото) — тёзки отсекаются")
+        if enough():
+            if pos < len(cands):
+                log(f"Герой: фото набралось ({len(got)} проверено, остальные {len(cands) - pos} адресов не качаю)")
+            break
+    log(f"Герой: проверено {done_n} адресов, не отвечали/не подошли {rejected_i}")
+
+    if photo and hero is None and exact:
+        sure = exact_faces()
+        hero = faces.find_hero(sure) if sure else None
         if hero is not None:
             log(f"Герой: лицо «{name}» взято по точным запросам ({len(sure)} фото) — тёзки отсекаются")
     if photo and hero is None:

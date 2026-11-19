@@ -21,6 +21,11 @@ export const MEDIA_MODES = [
   },
 ] as const;
 
+export const TRANSITIONS = [
+  { id: "calm", title: "Спокойные", text: "Фото плавно гаснет и появляется из чёрного. Видео — встык." },
+  { id: "flash", title: "Со вспышками", text: "Между фото короткая светлая вспышка (белая или тёплый свет) — динамичнее и дороже на вид." },
+] as const;
+
 /** Рассказы: футажи, голова диктора, надпись в углу. */
 export function BrollFootageCard() {
   const { settings, update } = useLoadedSettings();
@@ -85,6 +90,26 @@ export function MediaModeCard() {
               </span>
             </button>
           ))}
+        </div>
+        <div>
+          <div className="field-label">Переходы между фото</div>
+          <div className="provider-picker" role="radiogroup">
+            {TRANSITIONS.map((t) => (
+              <button
+                key={t.id}
+                role="radio"
+                aria-checked={settings.transition === t.id}
+                className={`provider ${settings.transition === t.id ? "active" : ""}`}
+                onClick={() => update({ transition: t.id })}
+              >
+                <span className="radio" />
+                <span className="provider-text">
+                  <span className="provider-name">{t.title}</span>
+                  <span className="muted small">{t.text}</span>
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
         <div className="notice small">
           Ролик про конкретных людей (один человек или несколько) программа распознаёт сама в любом режиме: пока

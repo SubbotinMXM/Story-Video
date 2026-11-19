@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
-import { Clapperboard, FolderOpen, Images, Play, RefreshCw, Search } from "lucide-react";
+import { Clapperboard, Eraser, FolderOpen, Images, Play, RefreshCw, Search } from "lucide-react";
 import { api, type Run } from "../lib/api";
 import { useJobs, useToasts } from "../lib/store";
 import { Badge, Button, Card, Empty, PageHeader } from "../components/ui";
 
 const STAGES = ["script_saved", "tts_done", "timings_done", "chunks_done", "media_done", "render_done"];
 const STAGE_SHORT = ["Текст", "Озвучка", "Тайминги", "Тема", "Кадры", "Ролик"];
+
+function gb(bytes: number) {
+  return bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} ГБ` : `${Math.max(1, Math.round(bytes / 1e6))} МБ`;
+}
 
 function stageIndex(stage: string) {
   return STAGES.indexOf(stage);
@@ -29,6 +33,8 @@ export function RunsPage({ active }: { active: boolean }) {
   const [runs, setRuns] = useState<Run[] | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
+  const [confirmFree, setConfirmFree] = useState(false);
+  const [freeing, setFreeing] = useState(false);
   const { enqueue, jobs } = useJobs();
   const { push } = useToasts();
 
@@ -56,6 +62,25 @@ export function RunsPage({ active }: { active: boolean }) {
       .filter(Boolean),
   );
 
+  // кадры уже собранных роликов: ролик из них сделан, дальше они нужны только для пересборки
+  const freeable = (runs ?? [])
+    .filter((r) => r.has_final && !busyRuns.has(r.name))
+    .reduce((sum, r) => sum + r.stock_bytes, 0);
+
+  const freeSpace = async () => {
+    setFreeing(true);
+    try {
+      const res = await api.freeRunSpace();
+      push({ kind: "ok", title: `Освобождено ${gb(res.freed)}`, text: `Очищено запусков: ${res.runs}. Готовые ролики на месте.` });
+      setConfirmFree(false);
+      await load();
+    } catch (e) {
+      push({ kind: "error", title: "Не получилось освободить место", text: (e as Error).message });
+    } finally {
+      setFreeing(false);
+    }
+  };
+
   const shown = (runs ?? []).filter(
     (r) => !query.trim() || `${r.name} ${r.snippet}`.toLowerCase().includes(query.trim().toLowerCase()),
   );
@@ -71,6 +96,35 @@ export function RunsPage({ active }: { active: boolean }) {
           </Button>
         }
       />
+      {freeable > 50e6 && (
+        <Card>
+          {confirmFree ? (
+            <div className="stack">
+              <div className="small">
+                Удалю скачанные фото и видео у собранных роликов — {gb(freeable)}. Сами ролики, озвучка, тексты и субтитры
+                останутся. Чтобы пересобрать такой ролик, кадры придётся подобрать заново (шаг 2).
+              </div>
+              <div className="row gap-sm">
+                <Button size="sm" variant="primary" loading={freeing} onClick={() => void freeSpace()}>
+                  Освободить {gb(freeable)}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setConfirmFree(false)}>
+                  Отмена
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="row gap-sm wrap" style={{ justifyContent: "space-between", alignItems: "center" }}>
+              <div className="small">
+                Скачанные кадры собранных роликов занимают <b>{gb(freeable)}</b>. Если ролик уже выложен, они не нужны.
+              </div>
+              <Button size="sm" icon={<Eraser size={14} />} onClick={() => setConfirmFree(true)}>
+                Освободить место
+              </Button>
+            </div>
+          )}
+        </Card>
+      )}
       <Card>
         <div className="input-group search">
           <span className="input-prefix">
@@ -97,6 +151,7 @@ export function RunsPage({ active }: { active: boolean }) {
                 </div>
                 {r.snippet && <div className="run-snippet">{r.snippet}</div>}
                 <Steps stage={r.stage} />
+                {r.stock_bytes > 0 && <div className="muted small">Кадры: {gb(r.stock_bytes)}</div>}
                 <div className="row gap-sm wrap">
                   {!r.has_final && (
                     <Button
@@ -121,8 +176,8 @@ export function RunsPage({ active }: { active: boolean }) {
                   <Button
                     size="sm"
                     icon={<Clapperboard size={14} />}
-                    disabled={busy || idx < stageIndex("media_done")}
-                    title="Заново собрать mp4 из подобранных кадров"
+                    disabled={busy || idx < stageIndex("media_done") || r.stock_bytes === 0}
+                    title={r.stock_bytes === 0 ? "Кадры удалены — сначала шаг 2" : "Заново собрать mp4 из подобранных кадров"}
                     onClick={() => enqueue([{ kind: "slides_render", params: { run: r.name } }])}
                   >
                     Шаг 3: собрать

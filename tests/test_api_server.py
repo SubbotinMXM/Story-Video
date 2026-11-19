@@ -249,6 +249,37 @@ class RunsFilesSpaTests(ApiTestCase):
         self.assertEqual(runs[0]["snippet"], "Текст сценария вторая строка")
         self.assertFalse(runs[0]["has_final"])
 
+    def _done_run(self, name: str, pool_bytes: int = 5000) -> Path:
+        run = self.root / "runs" / name
+        (run / "pool").mkdir(parents=True)
+        (run / "pool" / "a.jpg").write_bytes(b"x" * pool_bytes)
+        (run / "final.mp4").write_bytes(b"v" * 5000)
+        (run / "script.txt").write_text("текст", encoding="utf-8")
+        return run
+
+    def test_free_space_removes_only_stock_of_finished_runs(self) -> None:
+        done = self._done_run("20261012_100000_готов")
+        unfinished = self.root / "runs" / "20261012_110000_в_процессе"
+        (unfinished / "pool").mkdir(parents=True)
+        (unfinished / "pool" / "b.jpg").write_bytes(b"y" * 3000)
+        listing = {r["name"]: r for r in self.client.get("/api/runs").json()}
+        self.assertEqual(listing[done.name]["stock_bytes"], 5000)
+        res = self.client.post("/api/runs/free-space").json()
+        self.assertEqual(res, {"freed": 5000, "runs": 1})
+        self.assertFalse((done / "pool").exists())
+        self.assertTrue((done / "final.mp4").is_file(), "готовый ролик остаётся")
+        self.assertTrue((done / "script.txt").is_file())
+        self.assertTrue((unfinished / "pool" / "b.jpg").is_file(), "недоделанный запуск — не трогаем")
+        self.assertEqual(self.client.post("/api/runs/free-space").json(), {"freed": 0, "runs": 0}, "второй раз — нечего")
+
+    def test_free_space_skips_run_in_queue(self) -> None:
+        busy = self._done_run("20261012_120000_в_очереди")
+        fake = [{"id": "j", "status": "running", "run": busy.name}]
+        with mock.patch.object(app_mod, "get_manager", lambda: mock.MagicMock(list=lambda: fake)):
+            res = self.client.post("/api/runs/free-space").json()
+        self.assertEqual(res["freed"], 0)
+        self.assertTrue((busy / "pool" / "a.jpg").is_file(), "с запуском работает очередь — кадры нужны")
+
     def test_check_path(self) -> None:
         r = self.client.post("/api/check-path", json={"path": str(self.root)}).json()
         self.assertEqual(r, {"exists": True, "is_dir": True, "is_file": False})

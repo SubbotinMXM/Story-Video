@@ -6,9 +6,9 @@ import {
   Clapperboard,
   Copy,
   History,
-  ImageIcon,
   Images,
   Info,
+  LayoutTemplate,
   Loader2,
   MessageCircleHeart,
   Telescope,
@@ -16,11 +16,14 @@ import {
   Moon,
   Palette,
   Settings as SettingsIcon,
+  Sparkles,
   Sun,
   X,
   XCircle,
 } from "lucide-react";
 import { JobsPanel } from "./components/JobsPanel";
+import { WhatsNewDialog } from "./components/WhatsNew";
+import { api, type WhatsNew } from "./lib/api";
 import { useJobs, useSettings, useToasts } from "./lib/store";
 import { BrollPage } from "./pages/BrollPage";
 import { StepsPage } from "./pages/StepsPage";
@@ -28,21 +31,22 @@ import { CopiesPage } from "./pages/CopiesPage";
 import { RunsPage } from "./pages/RunsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { SlidesPage } from "./pages/SlidesPage";
-import { ThumbnailPage } from "./pages/ThumbnailPage";
 import { CoversPage } from "./pages/CoversPage";
 import { AnalyticsPage } from "./pages/AnalyticsPage";
 import { CommentsPage } from "./pages/CommentsPage";
 import { PollsPage } from "./pages/PollsPage";
 import { NichesPage } from "./pages/NichesPage";
+import { TemplatesPage } from "./pages/TemplatesPage";
+import { setEditingTemplate, useEditingTemplate } from "./lib/templateEdit";
 
 import type { PageId } from "./lib/nav";
 
 const NAV: { id: PageId; label: string; icon: ReactNode; group: string }[] = [
   { id: "steps", label: "Генерация по шагам", icon: <ListChecks size={18} />, group: "Создать" },
+  { id: "templates", label: "Шаблоны", icon: <LayoutTemplate size={18} />, group: "Создать" },
   { id: "broll", label: "Рассказы", icon: <Clapperboard size={18} />, group: "Создать" },
   { id: "slides", label: "Стоковые слайды", icon: <Images size={18} />, group: "Создать" },
   { id: "covers", label: "Обложки", icon: <Palette size={18} />, group: "Создать" },
-  { id: "thumbnail", label: "Обложки звёзд", icon: <ImageIcon size={18} />, group: "Создать" },
   { id: "runs", label: "Запуски слайдов", icon: <History size={18} />, group: "Работа" },
   { id: "copies", label: "Копии ролика", icon: <Copy size={18} />, group: "Работа" },
   { id: "comments", label: "Комментарии", icon: <MessageCircleHeart size={18} />, group: "Работа" },
@@ -116,7 +120,9 @@ function SaveIndicator() {
 export default function App() {
   const [page, setPage] = useState<PageId>(readPage);
   const [theme, setTheme] = useTheme();
-  const { settings, meta } = useSettings();
+  const { settings, meta, flush } = useSettings();
+  const { push } = useToasts();
+  const editing = useEditingTemplate();
   const { jobs } = useJobs();
   const running = jobs.filter((j) => j.status === "running");
 
@@ -140,6 +146,36 @@ export default function App() {
   }, [page]);
 
   const needsSetup = settings && !settings.llm_api_key;
+
+  // «Что нового»: после обновления один раз показываем окно со всем, что человек ещё не видел
+  const [news, setNews] = useState<WhatsNew | null>(null);
+  const [newsOpen, setNewsOpen] = useState<"auto" | "history" | null>(null);
+  useEffect(() => {
+    if (!settings) return;
+    void api.whatsNew().then((w) => {
+      setNews(w);
+      if (w.unseen.length) setNewsOpen("auto");
+    }).catch(() => undefined); // нет списка версий — просто без окна
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [Boolean(settings)]);
+  const saveEditing = async () => {
+    if (!editing) return;
+    try {
+      await flush();
+      await api.saveTemplate(editing.id);
+      push({ kind: "ok", title: `Шаблон «${editing.name}» обновлён`, text: "Новые запуски пойдут с этими настройками" });
+      setEditingTemplate(null);
+    } catch (e) {
+      push({ kind: "error", title: "Шаблон не сохранился", text: (e as Error).message });
+    }
+  };
+  const closeNews = () => {
+    if (newsOpen === "auto") {
+      void api.whatsNewSeen().catch(() => undefined);
+      setNews((w) => (w ? { ...w, unseen: [] } : w));
+    }
+    setNewsOpen(null);
+  };
 
   let group = "";
   return (
@@ -175,6 +211,13 @@ export default function App() {
             </div>
           ))}
           <SaveIndicator />
+          {news?.version && (
+            <button className="ver-btn" onClick={() => setNewsOpen("history")} title="Что нового: история версий">
+              <Sparkles size={13} />
+              <span>Версия {news.version}</span>
+              {news.unseen.length > 0 && <span className="dot" />}
+            </button>
+          )}
           <div className="theme-switch">
             {(["light", "system", "dark"] as Theme[]).map((t) => (
               <button key={t} className={theme === t ? "active" : ""} onClick={() => setTheme(t)} title={t === "system" ? "Как в системе" : t === "light" ? "Светлая" : "Тёмная"}>
@@ -185,7 +228,24 @@ export default function App() {
         </div>
       </nav>
 
+      {newsOpen && news && (
+        <WhatsNewDialog releases={newsOpen === "auto" ? news.unseen : news.history} mode={newsOpen} onClose={closeNews} />
+      )}
       <main className="content">
+        {editing && (
+          <div className="tpl-banner" role="status">
+            <LayoutTemplate size={18} />
+            <div className="tpl-banner-text">
+              <b>Правишь шаблон «{editing.name}».</b> Настройки на экранах сейчас — из шаблона. Поправь и сохрани — или закрой без сохранения.
+            </div>
+            <button className="btn btn-primary btn-sm" onClick={() => void saveEditing()}>
+              Сохранить в шаблон
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setEditingTemplate(null)}>
+              Закрыть
+            </button>
+          </div>
+        )}
         {!settings || !meta ? (
           <div className="loading">
             <Loader2 className="spin" size={28} />
@@ -196,6 +256,9 @@ export default function App() {
             <div hidden={page !== "steps"}>
               <StepsPage />
             </div>
+            <div hidden={page !== "templates"}>
+              <TemplatesPage active={page === "templates"} />
+            </div>
             <div hidden={page !== "broll"}>
               <BrollPage />
             </div>
@@ -204,9 +267,6 @@ export default function App() {
             </div>
             <div hidden={page !== "covers"}>
               <CoversPage />
-            </div>
-            <div hidden={page !== "thumbnail"}>
-              <ThumbnailPage />
             </div>
             <div hidden={page !== "runs"}>
               <RunsPage active={page === "runs"} />

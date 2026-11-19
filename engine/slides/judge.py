@@ -12,17 +12,15 @@ from __future__ import annotations
 
 import base64
 import io
-import json
-import re
-import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from engine.core.jsonish import json_object
 from engine.core.cancel import CancelledError
 from engine.core.logutil import log
-from engine.slides.ffmpeg_util import find_ffmpeg
+from engine.slides.ffprobe_util import grab_frame
 from engine.slides.llm_client import LLMClient
 from engine.slides.theme_plan import ThemePlan
 
@@ -125,9 +123,7 @@ def _frames_of(path: Path, tmp: Path, *, video: bool) -> list[Path]:
     for k, frac in enumerate((0.2, 0.75)):
         dest = tmp / f"{path.stem}_{k}.jpg"
         at = max(0.0, dur * frac) if dur > 0 else float(k)
-        subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-ss", f"{at:.2f}", "-i", str(path), "-frames:v", "1",
-                        "-vf", f"scale={_TILE_W}:-2", "-q:v", "4", str(dest)], capture_output=True, timeout=60)
-        if dest.is_file():
+        if grab_frame(path, dest, at=at, quality=4, width=_TILE_W):
             out.append(dest)
     return out
 
@@ -137,7 +133,9 @@ def contact_sheet(rows: list[list[Path]]) -> bytes:
     from PIL import Image, ImageDraw, ImageFont
 
     label_w = 70
-    width = label_w + 2 * _TILE_W + 10
+    # у фото в строке один кадр (у видео — два): пустую половину листа не шлём — картинка в запросе дешевле на ~40%
+    cols = max(1, min(2, max((len(r) for r in rows), default=1)))
+    width = label_w + cols * _TILE_W + (cols - 1) * 5 + 5
     sheet = Image.new("RGB", (width, len(rows) * (_TILE_H + 10)), (24, 24, 24))
     draw = ImageDraw.Draw(sheet)
     try:
@@ -161,12 +159,8 @@ def contact_sheet(rows: list[list[Path]]) -> bytes:
 
 
 def _parse(raw: str, n: int) -> list[Verdict] | None:
-    m = re.search(r"\{.*\}", raw or "", re.S)
-    if not m:
-        return None
-    try:
-        data = json.loads(m.group(0))
-    except json.JSONDecodeError:
+    data = json_object(raw)
+    if data is None:
         return None
     got: dict[int, Verdict] = {}
     for item in data.get("items") or []:
@@ -287,6 +281,11 @@ def make_judge(api_key: str, model: str, base_url: str, plan: ThemePlan) -> Judg
     return Judge(LLMClient(api_key, model, base_url), plan)
 
 
+# Одновременно в LLM — не больше стольких листов на всё приложение: сервис держит ~10–12 запросов (4 фото/с),
+# при сотне потоков запросы стоят в очереди по минуте и ролик собирается дольше, а не быстрее.
+JUDGE_SLOTS = threading.BoundedSemaphore(10)
+
+
 class PoolBatcher:
     """Кадры пула (без привязки к фразе) проверяются листами по size: потоки сдают по кадру,
     лист уходит, как только набрался или прошло wait секунд. Запросов к LLM — в size раз меньше."""
@@ -316,7 +315,8 @@ class PoolBatcher:
         if not batch:
             return
         try:
-            verdicts = self.judge.rate([e["path"] for e in batch], thematic=True, label="judge_pool")
+            with JUDGE_SLOTS:
+                verdicts = self.judge.rate([e["path"] for e in batch], thematic=True, label="judge_pool")
         except BaseException:
             for e in batch:
                 e["done"].set()

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { AlertTriangle, ArrowLeft, ArrowRight, Check, Clapperboard, Images, Play } from "lucide-react";
 import { Button, Card, PageHeader } from "../components/ui";
+import { SaveTemplateButton } from "../components/SaveTemplate";
 import { useSource } from "../components/SourceCard";
 import { VoiceTextsCard } from "../components/VoiceTextsCard";
 import { VideoOptionsCard, VoiceCard } from "../components/SharedCards";
@@ -98,6 +99,7 @@ export function StepsPage() {
   const coauthors = coauthorsOn ? ((settings[`${section}_publish_coauthors`] as string[]) ?? []) : [];
   const dates = (settings[`${section}_publish_dates`] as string[]) ?? [];
   const time = settings[`${section}_publish_time`] as string;
+  const pubStep = Math.max(1, Number(settings[`${section}_publish_step`]) || 1);
   const outDir = section === "slides" ? settings.slides_output_dir : settings.broll_output_dir;
   const engineName = settings.rewrite_engine === "claude_code" ? "Claude" : settings.rewrite_engine === "codex" ? "Codex" : "встроенная нейросеть";
 
@@ -315,7 +317,7 @@ export function StepsPage() {
                 />
                 <Row
                   label="Когда выходят"
-                  value={`${dates.length ? `даты: ${dates.map((d) => d.split("-").reverse().join(".")).join(", ")}` : "каждый день после последнего запланированного"}` +
+                  value={`${dates.length ? `даты: ${dates.map((d) => d.split("-").reverse().join(".")).join(", ")}` : pubStep === 1 ? "каждый день после последнего запланированного" : pubStep === 2 ? "через день после последнего запланированного" : `раз в ${pubStep} дн. после последнего запланированного`}` +
                     ` · ${time ? `в ${time} МСК` : "время случайное 16:00–20:00 МСК"}`}
                   onEdit={() => go("publish")}
                 />
@@ -330,7 +332,11 @@ export function StepsPage() {
   const cur = STEPS[index];
   return (
     <div className="page">
-      <PageHeader title="Генерация по шагам" subtitle="Все настройки ролика по порядку — ничего не пропустить. Шаги можно проходить в любом порядке." />
+      <PageHeader
+        title="Генерация по шагам"
+        subtitle="Все настройки ролика по порядку — ничего не пропустить. Шаги можно проходить в любом порядке."
+        actions={<SaveTemplateButton section={section} />}
+      />
       <ol className="steps-rail">
         {STEPS.map((s, i) => {
           const st = status[s.id];

@@ -16,6 +16,7 @@ DESKTOP = Path.home() / "Desktop"
 DEFAULT_SUBSCRIBE_PATH = PROJECT_ROOT / "assets" / "subscribe.mp4"
 
 SCRIPT_NAME = "script.txt"
+SOURCE_NAME = "source.json"  # ссылка на оригинал рерайта (по его обложке определяем героев)
 AUDIO_NAME = "voice.mp3"
 TIMINGS_NAME = "timings.json"
 TIMINGS_PREVIEW_NAME = "timings_preview.txt"

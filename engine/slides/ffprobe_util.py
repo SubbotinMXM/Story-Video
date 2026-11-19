@@ -6,7 +6,8 @@ import json
 import subprocess
 from pathlib import Path
 
-from engine.slides.ffmpeg_util import find_ffmpeg, find_ffprobe
+from engine.core.cancel import CancelledError, run_cancellable
+from engine.slides.ffmpeg_util import find_ffmpeg, find_ffprobe, low_priority
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -162,8 +163,28 @@ def disk_full_hint(cmd: list[str], err: str = "") -> str:
     )
 
 
+def grab_frame(path: Path, dest: Path, *, at: float | str = 0.0, quality: int = 3, width: int = 0) -> bool:
+    """Один кадр видео в JPEG (быстрая перемотка до кадра). width>0 — уменьшить до такой ширины.
+    Один способ на все места, где нужен кадр клипа (проверка, красота, отпечаток, плитки)."""
+    dest.unlink(missing_ok=True)
+    cmd = [find_ffmpeg(), "-v", "error", "-y", "-ss", f"{float(at):.2f}", "-i", str(path), "-frames:v", "1"]
+    if width > 0:
+        cmd += ["-vf", f"scale={width}:-2"]
+    cmd += ["-q:v", str(quality), str(dest)]
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return dest.is_file() and dest.stat().st_size > 32
+
+
+def grab_first_frame(path: Path, dest: Path, *, times: tuple[float, ...] = (2.0, 0.0), quality: int = 3) -> bool:
+    """Кадр с первой подходящей секунды (короткий клип на 2-й секунде уже закончился — берём с начала)."""
+    return any(grab_frame(path, dest, at=t, quality=quality) for t in times)
+
+
 def run_ffmpeg(cmd: list[str], *, label: str = "ffmpeg") -> None:
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = run_cancellable(low_priority(cmd), text=True)
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "")[-1200:]
         hint = disk_full_hint(cmd, err)
@@ -204,6 +225,8 @@ def concat_demuxer(parts: list[Path], dest: Path, *, reencode: bool = False) -> 
         cmd += ["-c", "copy", str(dest)]
     try:
         run_ffmpeg(cmd, label="concat")
+    except CancelledError:
+        raise
     except RuntimeError:
         # fallback re-encode
         cmd = [

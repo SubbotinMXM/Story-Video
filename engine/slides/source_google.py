@@ -161,7 +161,7 @@ class GoogleImagesClient:
             self._loop,
         )
         try:
-            return fut.result(timeout=120)
+            return fut.result(timeout=240)  # очередь вкладок тоже считается
         except Exception as exc:
             log(f"Google Images search fail ({q!r}): {exc}")
             return []
@@ -204,7 +204,8 @@ class GoogleImagesClient:
             self._pw = await async_playwright().start()
             launch_kwargs = {
                 "headless": True,
-                "args": ["--disable-blink-features=AutomationControlled"],
+                # без HTTP/2: Bing под нагрузкой рвёт его (ERR_HTTP2_PROTOCOL_ERROR) — по HTTP/1.1 отвечает стабильно
+                "args": ["--disable-blink-features=AutomationControlled", "--disable-http2"],
             }
             # Системный Chrome реже ловит /sorry, чем bundled chromium.
             try:
@@ -314,13 +315,34 @@ class GoogleImagesClient:
         if len(urls) >= max(3, limit // 3):
             return urls
         log(f"Google Images пусто/капча ({query!r}) → Bing")
-        bing = await _scrape_bing(page, query, limit)
+        bing = await _bing_with_retry(page, query, limit)
         urls = _uniq_good(urls + bing)
         if len(urls) >= max(3, limit // 3):
             return urls
         log(f"Bing мало ({query!r}) → DuckDuckGo")
         ddg = await asyncio.to_thread(_scrape_ddg_http, query, limit)
         return _uniq_good(urls + ddg)[: limit * 2]
+
+
+# Bing рвёт соединение, когда вкладок много: пробуем ещё раз с паузой, а не сдаёмся пустым ответом
+_BING_TRIES = 3
+
+
+async def _bing_with_retry(page, query: str, limit: int) -> list[str]:
+    import random
+
+    for attempt in range(1, _BING_TRIES + 1):
+        try:
+            got = await _scrape_bing(page, query, limit)
+            if got:
+                return got
+            reason = "пусто"
+        except Exception as exc:
+            reason = str(exc).splitlines()[0][:90]
+        if attempt < _BING_TRIES:
+            await asyncio.sleep(1.5 * attempt + random.random() * 1.5)
+    log(f"Bing не ответил ({query!r}): {reason}")
+    return []
 
 
 async def _scrape_google(page, query: str, limit: int) -> list[str]:
@@ -393,8 +415,15 @@ async def _scrape_bing(page, query: str, limit: int) -> list[str]:
     return _uniq_good(urls)
 
 
+# DuckDuckGo отвечает JS-проверкой (HTTP 202 «challenge») — без браузера не пройти; после первого отказа не лезем
+_DDG_OFF = False
+
+
 def _scrape_ddg_http(query: str, limit: int) -> list[str]:
     """Запасной путь без браузера — i.js DuckDuckGo."""
+    global _DDG_OFF
+    if _DDG_OFF:
+        return []
     try:
         import httpx
     except ImportError:
@@ -430,6 +459,10 @@ def _scrape_ddg_http(query: str, limit: int) -> list[str]:
                 },
                 headers={**headers, "Referer": "https://duckduckgo.com/"},
             )
+            if resp.status_code == 202 or '"challenge"' in resp.text[:200]:
+                _DDG_OFF = True
+                log("DDG: просит проверку на робота — больше не спрашиваю")
+                return []
             if resp.status_code >= 400:
                 log(f"DDG i.js HTTP {resp.status_code}")
                 return []

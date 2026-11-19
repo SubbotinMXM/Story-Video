@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import os
 import threading
 import time
 import traceback
@@ -17,8 +18,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from engine.core.cancel import CancelledError, CancelToken
+from engine.core.cancel import CancelledError, CancelToken, current_cancel
 from engine.core.config import DATA_DIR
+from engine.core import usage
 from engine.core.logutil import current_job, log, set_log_callback
 from server.events import hub
 from server.keepawake import KeepAwake
@@ -43,7 +45,7 @@ _PROGRESS_EVERY = 0.25  # сек между событиями прогресс�
 # по одному (engine.core.throttle), параллельно идут озвучка, LLM и подбор кадров.
 MAX_PARALLEL = 2
 # выкладка на YouTube — своя полоса: идёт параллельно с монтажом, но по одной (окно браузера в фокусе одно)
-UPLOAD_KINDS = frozenset({"publish", "comments", "polls", "analytics", "scan"})  # профили AdsPower — по одной задаче
+UPLOAD_KINDS = frozenset({"publish", "comments", "polls", "analytics", "scan", "collabs"})  # профили AdsPower — по одной задаче
 # лёгкие задачи (генерация обложек — только сеть) — своя полоса: не ждут ни монтажа, ни выкладки
 LIGHT_KINDS = frozenset({"cover", "niches"})
 
@@ -93,6 +95,7 @@ class Job:
     started: float | None = None
     finished: float | None = None
     cancel: CancelToken = field(default_factory=CancelToken)
+    stop_at: float | None = None  # когда нажали «Стоп» на идущей задаче (для счётчика в карточке)
     on_state: Callable[[], None] | None = None
 
     @property
@@ -140,6 +143,8 @@ class Job:
             "error": self.error,
             "attempts": self.attempts,
             "resumable": self.status in RESUMABLE,
+            "stopping": self.status == RUNNING and self.cancel.is_cancelled(),
+            "stop_at": self.stop_at if self.status == RUNNING and self.cancel.is_cancelled() else None,
             "run": self.run_name,
             "created": self.created,
             "started": self.started,
@@ -148,6 +153,8 @@ class Job:
             "live": self._live_view(),
             # автосмены инструмента/модели: Claude → Codex → встроенная, модель недоступна → другая
             "switches": self.state.get("switches") or [],
+            # расход токенов встроенной нейросети по этапам (Claude Code и Codex — по подписке, не считаются)
+            "tokens": usage.summary(self.state.get("tokens")),
             "notice": "",  # предупреждение при постановке (заполняет /api/jobs, например «мало денег RoyalTechno»)
         }
 
@@ -181,9 +188,13 @@ class JobManager:
         self._jobs: list[Job] = []
         self._work = threading.Condition(self._lock)
         self._last_emit: dict[str, float] = {}
+        # итоги пачки задач с прошлого простоя очереди — для уведомления «всё готово»
+        self._batch = {"done": 0, "failed": 0, "sec": 0.0, "last": ""}
+        self._uncounted: set[str] = set()  # идут или только что закончились, ещё не учтены в пачке
         self.awake = KeepAwake()
         self._load()
         set_log_callback(self._on_log)
+        usage.set_usage_callback(self._on_usage)
         from engine.core import switches
 
         switches.set_callback(self._on_switch)
@@ -326,6 +337,7 @@ class JobManager:
                 job.finished = time.time()
             else:
                 job.message = "Останавливаю…"
+                job.stop_at = time.time()
             job.cancel.cancel()
         self._save()
         self._emit(job)
@@ -441,18 +453,25 @@ class JobManager:
                 current_job.set(None)
 
     def _run(self, job: Job) -> None:
+        with self._lock:
+            self._uncounted.add(job.id)
         self._save()
         self._emit(job)
         log(f"▶ {job.title}" + (f" (попытка {job.attempts})" if job.attempts > 1 else ""))
 
         def progress(pct: float, msg: str) -> None:
             job.progress = max(0.0, min(1.0, float(pct)))
-            if msg:
+            if job.cancel.is_cancelled():
+                # «Стоп» нажат, шаг ещё доделывается: не затираем «Останавливаю…» обычным прогрессом —
+                # иначе выглядит, будто кнопка не сработала
+                job.message = f"Останавливаю — дожидаюсь конца шага ({msg})" if msg else "Останавливаю…"
+            elif msg:
                 job.message = msg
             self._emit(job, throttle=True)
 
         try:
             job.cancel.check()
+            current_cancel.set(job.cancel)  # внешние программы (ffmpeg) убиваются по «Стоп» сразу
             job.result = job.runner(job, progress, job.cancel)
             job.status = DONE
             job.progress = 1.0
@@ -474,7 +493,28 @@ class JobManager:
             job.finished = time.time()
             self._save()
             self._emit(job)
+            self._count_for_notice(job)
             self._notify()  # исполнитель свободен — проверить сон и очередь
+
+    NOTICE_MIN_SEC = 45.0  # быстрые задачи (секунды) не стоят уведомления — пользователь ещё у окна
+
+    def _count_for_notice(self, job: Job) -> None:
+        """Пачка задач закончилась (очередь опустела) — одно уведомление macOS с итогом.
+        Остановленные самим пользователем не считаем; задача, ждущая автоповтор, очередь не опустошает."""
+        with self._lock:
+            self._uncounted.discard(job.id)
+            if job.status in (DONE, FAILED):
+                self._batch["done" if job.status == DONE else "failed"] += 1
+                self._batch["sec"] += max(0.0, (job.finished or 0) - (job.started or job.finished or 0))
+                self._batch["last"] = job.title
+            # соседняя задача уже поставила статус «готово», но ещё не учтена — уведомит она, одним на всех
+            if self._uncounted or any(j.status in (QUEUED, RUNNING) for j in self._jobs):
+                return
+            batch, self._batch = self._batch, {"done": 0, "failed": 0, "sec": 0.0, "last": ""}
+        if (batch["done"] or batch["failed"]) and batch["sec"] >= self.NOTICE_MIN_SEC:
+            from server.notify import notify, queue_message
+
+            notify(*queue_message(batch["done"], batch["failed"], batch["last"]))
 
     def _maybe_retry(self, job: Job, exc: BaseException) -> None:
         """Краткий сбой сети/сервиса — поставить задачу обратно в очередь с паузой (с места падения)."""
@@ -519,6 +559,16 @@ class JobManager:
 
     def _on_log(self, line: str) -> None:
         hub.publish("log", {"line": line, "job_id": current_job.get()})
+
+    def _on_usage(self, job_id: str | None, label: str, tokens_in: int, cached: int, tokens_out: int) -> None:
+        """Токены встроенной нейросети — в карточку задачи, которая их тратит. На диск уйдут со следующим
+        сохранением очереди (конец задачи, смена этапа), на каждый ответ файл не переписываем."""
+        with self._lock:
+            job = self._find(job_id) if job_id else None
+            if job is None:
+                return
+            usage.add_to(job.state.setdefault("tokens", {}), label, tokens_in, cached, tokens_out)
+        self._emit(job, throttle=True)
 
     SWITCHES_MAX = 30  # столько смен инструмента храним в карточке задачи
 
@@ -578,4 +628,20 @@ def get_manager() -> JobManager:
         # «Аналитика» → автообновление по расписанию: проверка раз в 30 с, пока работает приложение
         threading.Thread(target=analytics_auto.loop, args=(manager, load_config), name="analytics-auto",
                          daemon=True).start()
+        # приглашения соавторов обязаны быть приняты: ждущие пары (в т. ч. от прошлых выкладок) подтверждает фоновая проверка
+        from engine.publish import collabs
+
+        if os.environ.get("STORY_VIDEO_NO_BACKGROUND"):
+            return manager  # тесты: фоновых проверок нет
+        try:
+            with manager._lock:
+                states = [dict(j.state) for j in manager._jobs if j.kind == "publish"]
+            n = collabs.backfill(states)
+            if n:
+                from engine.core.logutil import log
+
+                log(f"Соавторства: в списке на проверку {n} приглашений из прошлых выкладок — подтвержу в фоне")
+        except Exception:  # noqa: BLE001 — список не собрался: новые приглашения всё равно записываются
+            pass
+        threading.Thread(target=collabs.loop, args=(manager,), name="collabs-auto", daemon=True).start()
     return manager

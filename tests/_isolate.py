@@ -11,10 +11,15 @@ os.environ["STORY_VIDEO_LLM_OFFLINE"] = "1"
 os.environ["STORY_VIDEO_CHAPTERS_DIR"] = tempfile.mkdtemp(prefix="story-video-chapters-")
 # учёт выкладки (обложки, даты, каналы) — во временную папку, не в data/publish
 os.environ["STORY_VIDEO_PUBLISH_DIR"] = tempfile.mkdtemp(prefix="story-video-publish-")
+# память проверки фото героев между роликами — во временную папку, не в data/cache
+os.environ["STORY_VIDEO_JUDGE_CACHE_DIR"] = tempfile.mkdtemp(prefix="story-video-judgecache-")
 # распознавание надписей macOS не собирается в data/bin (тесты, где оно нужно, подменяют чтение)
 os.environ["STORY_VIDEO_OCR_OFF"] = "1"
 # баланс RoyalTechno при постановке задач — без запроса в сеть
 os.environ["STORY_VIDEO_ROYAL_OFFLINE"] = "1"
+# уведомления macOS о конце очереди — не в тестах
+os.environ["STORY_VIDEO_NO_NOTIFY"] = "1"
+os.environ["STORY_VIDEO_NO_BACKGROUND"] = "1"  # фоновые проверки (соавторства) в тестах не стартуют
 # Claude Code и Codex: тесты не запускают настоящие CLI (лимиты подписок, минуты ожидания)
 os.environ["STORY_VIDEO_SUBS_OFF"] = "1"
 # модели Whisper / CLIP — только из локального кэша HuggingFace, без проверки обновлений в сети

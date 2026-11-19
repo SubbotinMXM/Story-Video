@@ -17,12 +17,14 @@ import {
   NumberInput,
   PathInput,
   Progress,
+  Select,
   Textarea,
   Toggle,
 } from "./ui";
 import { goTo } from "../lib/nav";
 import { LANGS } from "../lib/langs";
 import { CoverSettingsFields } from "./CoverSettings";
+import { GroupFilter, inFilter, useGroupFilter } from "./GroupFilter";
 
 export type PublishSection = "broll" | "slides";
 
@@ -37,10 +39,28 @@ function keys(section: PublishSection) {
     coauthorsOn: k("_coauthors_on"),
     dates: k("_dates"),
     time: k("_time"),
+    step: k("_step"),
     visible: k("_visible"),
     keep: k("_keep"),
     comment: k("_comment"),
   };
+}
+
+/** Варианты шага между роликами (дней). Своё сохранённое значение — тоже в списке. */
+export function stepOptions(current: number) {
+  const base: Record<number, string> = {
+    1: "Каждый день",
+    2: "Через день (раз в 2 дня)",
+    3: "Раз в 3 дня",
+    4: "Раз в 4 дня",
+    5: "Раз в 5 дней",
+    7: "Раз в неделю",
+    10: "Раз в 10 дней",
+    14: "Раз в 2 недели",
+  };
+  const days = Object.keys(base).map(Number);
+  if (!days.includes(current)) days.push(current);
+  return days.sort((a, b) => a - b).map((d) => ({ value: String(d), label: base[d] ?? `Раз в ${d} дн.` }));
 }
 
 const key = (profileId: string, channelId: string) =>
@@ -72,6 +92,7 @@ export function PublishCard({
     broll_publish_coauthors_on: all[K.coauthorsOn] as boolean | null,
     broll_publish_dates: all[K.dates] as string[],
     broll_publish_time: all[K.time] as string,
+    broll_publish_step: Math.max(1, Number(all[K.step]) || 1),
     broll_publish_visible: Boolean(all[K.visible]),
     broll_publish_keep: Boolean(all[K.keep]),
     broll_publish_comment: all[K.comment] as string,
@@ -83,6 +104,7 @@ export function PublishCard({
     broll_publish_coauthors_on: K.coauthorsOn,
     broll_publish_dates: K.dates,
     broll_publish_time: K.time,
+    broll_publish_step: K.step,
     broll_publish_visible: K.visible,
     broll_publish_keep: K.keep,
     broll_publish_comment: K.comment,
@@ -95,6 +117,9 @@ export function PublishCard({
     );
   const { push } = useToasts();
   const { profiles, setProfiles } = useProfiles();
+  // фильтры по группам из «Аналитики»: отдельно для каналов выкладки и для соавторов (у каждого раздела свои)
+  const [fTarget, setFTarget, groups] = useGroupFilter(`publish-${section}`);
+  const [fCo, setFCo] = useGroupFilter(`coauthors-${section}`);
   const [busy, setBusy] = useState("");
   const [day, setDay] = useState("");
 
@@ -153,6 +178,20 @@ export function PublishCard({
     (k) => !known.has(k),
   ).length;
   const count = settings.broll_publish_channels.length;
+  const allChannelIds = useMemo(
+    () => profiles.filter((p) => !p.missing).flatMap((p) => p.channels.map((c) => c.id)),
+    [profiles],
+  );
+  /** Отметить / снять сразу все показанные каналы (после фильтра по группам). */
+  const setMany = (
+    field: "broll_publish_channels" | "broll_publish_coauthors",
+    keys: string[],
+    on: boolean,
+  ) => {
+    const cur = new Set(settings[field]);
+    keys.forEach((k) => (on ? cur.add(k) : cur.delete(k)));
+    update({ [field]: [...cur] });
+  };
 
   return (
     <Card
@@ -214,8 +253,46 @@ export function PublishCard({
                 Профилей пока нет — нажми «Синхронизировать с AdsPower».
               </div>
             )}
+            {(() => {
+              const keysShown = profiles
+                .filter((p) => !p.missing)
+                .flatMap((p) =>
+                  p.channels.filter((c) => inFilter(fTarget, c.id, groups)).map((c) => key(p.id, c.id)),
+                );
+              const on = keysShown.filter((k) => settings.broll_publish_channels.includes(k)).length;
+              return (
+                <GroupFilter
+                  value={fTarget}
+                  onChange={setFTarget}
+                  groups={groups}
+                  channelIds={allChannelIds}
+                  right={
+                    <span className="gf-bulk">
+                      <button
+                        type="button"
+                        className="link-btn small"
+                        disabled={keysShown.length === 0 || on === keysShown.length}
+                        onClick={() => setMany("broll_publish_channels", keysShown, true)}
+                      >
+                        {fTarget.length ? "Отметить показанные" : "Отметить все"}
+                      </button>
+                      <button
+                        type="button"
+                        className="link-btn small"
+                        disabled={on === 0}
+                        onClick={() => setMany("broll_publish_channels", keysShown, false)}
+                      >
+                        {fTarget.length ? "Снять показанные" : "Снять все"}
+                      </button>
+                    </span>
+                  }
+                />
+              );
+            })()}
             <div className="pub-profiles">
-              {profiles.map((p) => {
+              {profiles
+                .filter((p) => fTarget.length === 0 || p.channels.some((c) => inFilter(fTarget, c.id, groups)))
+                .map((p) => {
                 const j = scanOf(p.id);
                 const active =
                   j && (j.status === "running" || j.status === "queued");
@@ -311,7 +388,7 @@ export function PublishCard({
                       </div>
                     ) : (
                       <div className="pub-rows">
-                        {p.channels.map((c) => {
+                        {p.channels.filter((c) => inFilter(fTarget, c.id, groups)).map((c) => {
                           const k = key(p.id, c.id);
                           const warns = [
                             c.language && c.language_auto
@@ -477,9 +554,43 @@ export function PublishCard({
                           </div>
                         );
                       })}
+                  {coOn && (() => {
+                    const keysShown = all
+                      .filter(({ c, k }) => inFilter(fCo, c.id, groups) && !settings.broll_publish_channels.includes(k))
+                      .map((x) => x.k);
+                    const on = keysShown.filter((k) => settings.broll_publish_coauthors.includes(k)).length;
+                    return (
+                      <GroupFilter
+                        value={fCo}
+                        onChange={setFCo}
+                        groups={groups}
+                        channelIds={all.map((x) => x.c.id)}
+                        right={
+                          <span className="gf-bulk">
+                            <button
+                              type="button"
+                              className="link-btn small"
+                              disabled={keysShown.length === 0 || on === keysShown.length}
+                              onClick={() => setMany("broll_publish_coauthors", keysShown, true)}
+                            >
+                              {fCo.length ? "Отметить показанные" : "Отметить все"}
+                            </button>
+                            <button
+                              type="button"
+                              className="link-btn small"
+                              disabled={on === 0}
+                              onClick={() => setMany("broll_publish_coauthors", keysShown, false)}
+                            >
+                              {fCo.length ? "Снять показанные" : "Снять все"}
+                            </button>
+                          </span>
+                        }
+                      />
+                    );
+                  })()}
                   {coOn && (
                     <div className="pub-rows pub-co">
-                      {all.map(({ p, c, k }) => {
+                      {all.filter(({ c }) => inFilter(fCo, c.id, groups)).map(({ p, c, k }) => {
                         const target =
                           settings.broll_publish_channels.includes(k);
                         return (
@@ -719,10 +830,10 @@ export function PublishCard({
             )}
 
             <div className="pub-divider" />
-            <div className="grid grid-2">
+            <div className="grid grid-3">
               <Field
                 label="Даты выхода (необязательно)"
-                hint="Пусто — каждый день подряд после последнего запланированного на канале. Свои даты — ролики займут их по порядку готовности; роликов больше — дальше по дню подряд. На канал — не больше одного ролика в день."
+                hint="Пусто — после последнего запланированного на канале ролика, с выбранным шагом. Свои даты — ролики займут их по порядку готовности; роликов больше — дальше с тем же шагом. На канал — не больше одного ролика в день."
               >
                 <div className="row gap-sm wrap">
                   <input
@@ -766,6 +877,16 @@ export function PublishCard({
                     </Badge>
                   ))}
                 </div>
+              </Field>
+              <Field
+                label="Шаг между роликами"
+                hint="Через сколько дней друг от друга выходят ролики на одном канале. Свои даты из календаря шаг не меняет — он работает без дат и для роликов сверх выбранных дат."
+              >
+                <Select
+                  value={String(settings.broll_publish_step)}
+                  onChange={(v) => update({ broll_publish_step: Number(v) })}
+                  options={stepOptions(settings.broll_publish_step)}
+                />
               </Field>
               <Field
                 label="Время выхода по Москве (необязательно)"

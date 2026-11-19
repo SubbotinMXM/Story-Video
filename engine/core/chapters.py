@@ -14,6 +14,7 @@ import re
 import time
 from pathlib import Path
 
+from engine.core.jsonish import json_dict
 from engine.core.logutil import log
 
 CHAPTERS_NAME = "главы.txt"
@@ -151,24 +152,16 @@ def translate_chapters(base_text: str, sents: list[Sentence], duration: float, *
     return chapters if len(chapters) >= 3 else []
 
 
-def wanted_count(duration: float) -> tuple[int, int]:
-    """Сколько глав просить: ролик короче — меньше (каждая глава хотя бы ~MIN_GAP)."""
-    fit = int(duration // (MIN_GAP * 2))
-    hi = max(3, min(MAX_CHAPTERS, fit))
+def wanted_count(duration: float, cap: int | None = None, gap: float | None = None) -> tuple[int, int]:
+    """Сколько глав просить: ролик короче — меньше (каждая глава хотя бы ~MIN_GAP).
+    cap/gap — свои пределы (ролик про людей: не больше 10 глав и не чаще, чем раз в полторы минуты)."""
+    fit = int(duration // ((gap or MIN_GAP) * 2))
+    hi = max(3, min(cap or MAX_CHAPTERS, fit))
     lo = max(3, min(MIN_CHAPTERS, hi))
     return lo, hi
 
 
-def _parse_json(raw: str) -> dict:
-    raw = (raw or "").strip()
-    m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
-        return {}
-    try:
-        data = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
+_parse_json = json_dict
 
 
 _SYSTEM = (
@@ -241,6 +234,8 @@ def plan_chapters(
     *,
     language: str = "",
     llm: tuple[str, str, str] | None = None,
+    cap: int | None = None,
+    gap: float | None = None,
 ) -> list[Sentence]:
     """Главы: [(начало от начала рассказа, название)]. Первая — с 0.
 
@@ -253,7 +248,7 @@ def plan_chapters(
     from engine.slides import llm_models
     from engine.slides.llm_client import LLMClient, LLMQuotaError
 
-    lo, hi = wanted_count(duration)
+    lo, hi = wanted_count(duration, cap, gap)
     key, base, model = llm
     # своя модель из настроек, потом самые дешёвые по прайсу
     models = list(dict.fromkeys([m for m in [model, *llm_models.chain(base, key, "light")] if m]))[:_MODEL_TRIES]
@@ -268,7 +263,7 @@ def plan_chapters(
         try:
             picked = _ask_parts(client, sents, lo, hi, language)
             picked = [(i, t) for i, t in picked if _title_ok(t)]
-            chapters = _tidy([(sents[i][0], title) for i, title in sorted(picked)], duration, hi)
+            chapters = _tidy([(sents[i][0], title) for i, title in sorted(picked)], duration, hi, gap or MIN_GAP)
             if len(chapters) >= 3:
                 return chapters
             log(f"Главы: модель {use} дала мало годных глав ({len(chapters)})")
@@ -329,7 +324,7 @@ def _ask_parts(client, sents: list[Sentence], lo: int, hi: int, language: str, *
         got = _ask_parts(client, chunk, max(1, lo // 2), max(2, (hi + 1) // 2), language, head=first, depth=depth + 1)
         return [(i + shift, t) for i, t in got]
 
-    from concurrent.futures import ThreadPoolExecutor
+    from engine.core.threads import ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=2) as ex:
         a, b = ex.map(one, halves)
@@ -341,13 +336,13 @@ def _clean_title(title: str) -> str:
     return title.strip().strip("«»\"'").rstrip(".").strip()
 
 
-def _tidy(chapters: list[Sentence], duration: float, hi: int) -> list[Sentence]:
+def _tidy(chapters: list[Sentence], duration: float, hi: int, gap: float = MIN_GAP) -> list[Sentence]:
     out: list[Sentence] = []
     for t, title in sorted(chapters):
         if not out:
             out.append((0.0, title))
             continue
-        if t - out[-1][0] < MIN_GAP or duration - t < MIN_GAP:
+        if t - out[-1][0] < gap or duration - t < gap:
             continue
         out.append((t, title))
     return out[:hi]
@@ -398,13 +393,15 @@ def write_chapters(
     footer: str = "",
     preset: list[Sentence] | None = None,
     base_text: str = "",
+    cap: int | None = None,
+    gap: float | None = None,
 ) -> Path | None:
     """главы.txt в папку ролика (+ «99 процентов главы.txt» для копий: copies = [(имя, скорость)]).
 
     footer — дописать после глав (авторы нарезок YouTube): файл целиком вставляется в описание.
     base_text — текст оригинала, если это перевод ролика: главы берутся оттуда, названия переводятся.
     """
-    chapters: list[Sentence] = list(preset or [])  # готовые главы (режим «Звёзды»: по героям)
+    chapters: list[Sentence] = list(preset or [])  # готовые главы (ролик про нескольких людей: по героям)
     if not chapters and cache is not None and cache.is_file():
         try:
             chapters = [(float(t), str(s)) for t, s in json.loads(cache.read_text(encoding="utf-8"))]
@@ -422,7 +419,7 @@ def write_chapters(
         if base_text.strip() and " ".join(base_text.split()) != " ".join(text.split()):
             chapters = translate_chapters(base_text, sents, voice_duration, language=language, llm=llm)
         if not chapters:
-            chapters = plan_chapters(sents, voice_duration, language=language, llm=llm)
+            chapters = plan_chapters(sents, voice_duration, language=language, llm=llm, cap=cap, gap=gap)
             if chapters and not base_text.strip():
                 _save_base(text, sents, chapters, language)
         if cache is not None and chapters:

@@ -67,7 +67,6 @@ from engine.slides.theme_media import (
     _llm,
     _middle_first,
 )
-from engine.slides.ffmpeg_util import find_ffmpeg
 from engine.slides.hook import HOOK_SEC as HOOK_SEC_COMMON
 from engine.slides.hook import NO_AI_SEC, add_beauty, head_rank, hook_first
 from engine.slides.look import fingerprint, seen
@@ -1329,17 +1328,13 @@ def _beauty_of(path: Path, video: bool) -> float:
 
     if not video:
         return beauty_scores([path]).get(path, 0.0)
-    import subprocess
     import tempfile
+
+    from engine.slides.ffprobe_util import grab_first_frame
 
     with tempfile.TemporaryDirectory() as tmp:
         frame = Path(tmp) / "f.jpg"
-        subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-ss", "2", "-i", str(path), "-frames:v", "1", "-q:v", "3", str(frame)],
-                       capture_output=True, timeout=60)
-        if not frame.is_file():
-            subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-i", str(path), "-frames:v", "1", "-q:v", "3", str(frame)],
-                           capture_output=True, timeout=60)
-        return beauty_scores([frame]).get(frame, 0.0) if frame.is_file() else 0.0
+        return beauty_scores([frame]).get(frame, 0.0) if grab_first_frame(path, frame) else 0.0
 
 
 def _media_height(path: Path, *, video: bool) -> int:

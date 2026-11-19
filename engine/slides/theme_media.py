@@ -7,7 +7,6 @@ import re
 import json
 import random
 import shutil
-import subprocess
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, as_completed, wait
@@ -18,9 +17,9 @@ import httpx
 from engine.core.threads import ThreadPoolExecutor
 from engine.slides import checkpoint as cp
 from engine.core.cancel import CancelToken, CancelledError
-from engine.slides.ffmpeg_util import find_ffmpeg
 from engine.slides.clip_ranker import get_clip
 from engine.slides.ffprobe_util import (
+    grab_frame,
     candidate_height_ok,
     candidate_is_landscape,
     is_landscape,
@@ -847,29 +846,10 @@ def _middle_first(samples: list[Path]) -> list[Path]:
 def _extract_frames(video: Path, dest_dir: Path, window_sec: float) -> list[Path]:
     window = max(0.4, min(window_sec, CLIP_SEC))
     stamps = [max(0.05, window * frac) for frac in (0.12, 0.5, 0.82)]
-    ffmpeg = find_ffmpeg()
     out: list[Path] = []
     for i, t in enumerate(stamps):
         dest = dest_dir / f"{video.stem}_f{i}.jpg"
-        cmd = [
-            ffmpeg,
-            "-y",
-            "-ss",
-            f"{t:.3f}",
-            "-i",
-            str(video),
-            "-frames:v",
-            "1",
-            "-q:v",
-            "3",
-            str(dest),
-        ]
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
-        except Exception as exc:
-            log(f"frame fail {video.name}: {exc}")
-            continue
-        if proc.returncode == 0 and dest.is_file() and dest.stat().st_size > 32:
+        if grab_frame(video, dest, at=t):
             out.append(dest)
         else:
             dest.unlink(missing_ok=True)

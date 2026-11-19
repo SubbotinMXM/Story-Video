@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import asdict, dataclass, field
 
+from engine.core.jsonish import json_object
 from engine.slides.llm_client import LLMClient
 from engine.core.logutil import log
 
-_JSON_FENCE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.I)
 
 CONTEXT_SYSTEM = """\
 You extract VISUAL production context from a narration script for stock footage search.
@@ -175,18 +174,7 @@ def extract_story_context(
 
 
 def _parse_json_obj(raw: str) -> dict:
-    text = (raw or "").strip()
-    m = _JSON_FENCE.search(text)
-    if m:
-        text = m.group(1).strip()
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start < 0 or end <= start:
-            raise ValueError(f"no JSON object: {text[:200]!r}")
-        data = json.loads(text[start : end + 1])
-    if not isinstance(data, dict):
-        raise ValueError("expected JSON object")
+    data = json_object(raw)
+    if data is None:
+        raise ValueError(f"no JSON object: {(raw or '')[:200]!r}")
     return data

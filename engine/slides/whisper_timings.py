@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -11,7 +10,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from engine.core.cancel import CancelToken, CancelledError
+from engine.core.cancel import CancelToken, CancelledError, run_cancellable
 from engine.core.logutil import log
 
 DEFAULT_MODEL_SIZE = "base"
@@ -103,7 +102,7 @@ def _load_audio_16k(src: Path) -> np.ndarray:
         "pcm_s16le",
         "-",
     ]
-    proc = subprocess.run(cmd, capture_output=True)
+    proc = run_cancellable(cmd)
     if proc.returncode != 0 or not proc.stdout:
         err = (proc.stderr or b"").decode("utf-8", errors="replace")[-500:]
         raise WhisperError(f"Не удалось декодировать аудио для Whisper:\n{err}")

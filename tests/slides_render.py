@@ -65,7 +65,8 @@ class SubtitlesTests(unittest.TestCase):
         self.assertEqual(frames, 300)
         self.assertIn("scale=3840:2160:flags=lanczos", vf)  # движение на 2× кадре (полпикселя на выходе)
         self.assertIn("zoompan=", vf)
-        self.assertIn("s=3840x2160", vf)
+        self.assertIn("s=1920x1080", vf, "зум отдаёт сразу 1080p — без 4K-кадра и обратного уменьшения")
+        self.assertNotIn("s=3840x2160", vf)
         self.assertNotIn("-loop", vf)
 
 

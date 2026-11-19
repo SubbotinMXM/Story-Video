@@ -10,6 +10,7 @@ import time
 import httpx
 from openai import APIConnectionError, APITimeoutError, Omit, OpenAI
 
+from engine.core import usage
 from engine.core.cancel import CancelledError
 from engine.core.logutil import log
 
@@ -215,13 +216,16 @@ class _Streamed:
         self.usage = usage
 
 
-def _usage_line(resp) -> str:
-    """Реальный расход токенов из ответа сервиса: вход (из них кеш), ответ (из них скрытые размышления)."""
+def _usage_line(resp, label: str = "") -> str:
+    """Реальный расход токенов из ответа сервиса: вход (из них кеш), ответ (из них скрытые размышления).
+    Заодно сообщает его в учёт задачи (engine.core.usage)."""
     u = getattr(resp, "usage", None)
     if u is None:
         return ""
     cached = getattr(getattr(u, "prompt_tokens_details", None), "cached_tokens", None) or 0
     think = getattr(getattr(u, "completion_tokens_details", None), "reasoning_tokens", None) or 0
+    if label:
+        usage.record(label, u.prompt_tokens, cached, u.completion_tokens)
     return (f" tokens in={u.prompt_tokens}" + (f" (кеш {cached})" if cached else "")
             + f" out={u.completion_tokens}" + (f" (размышл. {think})" if think else ""))
 
@@ -450,8 +454,8 @@ class LLMClient:
         models = self.chain(label, model, vision=vision)
         # простым задачам глубокие размышления не нужны: ответ (в 5 раз дороже входа) короче, качество то же
         extra: dict = {}
-        if not vision and llm_models.reasoning_for(label) and self._reasoning_ok:
-            extra["reasoning_effort"] = llm_models.reasoning_for(label)
+        if llm_models.reasoning_for(label, vision=vision) and self._reasoning_ok:
+            extra["reasoning_effort"] = llm_models.reasoning_for(label, vision=vision)
         idx = 0
         use_model = models[0]
         t0 = time.monotonic()
@@ -546,7 +550,7 @@ class LLMClient:
         if not content or not content.strip():
             log(f"{tag} ERR [{label}] ({ms} ms): пустой ответ")
             raise RuntimeError(f"Пустой ответ модели {use_model}")
-        log(f"{tag} OK  [{label}] ({ms} ms) model={use_model} out_chars={len(content)}{_usage_line(resp)}")
+        log(f"{tag} OK  [{label}] ({ms} ms) model={use_model} out_chars={len(content)}{_usage_line(resp, label)}")
         _mark_up()
         return content.strip()
 

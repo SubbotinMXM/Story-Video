@@ -5,12 +5,12 @@ from __future__ import annotations
 import html
 import random
 import re
-import subprocess
 import threading
 from pathlib import Path
 
 import httpx
 
+from engine.core.cancel import CancelledError, run_cancellable
 from engine.core.logutil import log
 from engine.slides.ffmpeg_util import find_ffmpeg
 from engine.slides.stocks_base import KeyPool, StockCandidate
@@ -316,7 +316,10 @@ class YouTubeClient:
         encode = head + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"] + tail
         for cmd in (copy, encode):
             try:
-                subprocess.run(cmd, check=True, capture_output=True, timeout=240)
+                if run_cancellable(cmd, timeout=240).returncode != 0:
+                    raise RuntimeError("ffmpeg не вырезал кусок")
+            except CancelledError:
+                raise
             except Exception as exc:
                 log(f"youtube cut fail: {exc}")
                 dest.unlink(missing_ok=True)

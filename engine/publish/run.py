@@ -19,7 +19,7 @@ from typing import Any
 
 from engine.core.cancel import CancelToken
 from engine.core.logutil import log
-from engine.publish import materials, registry, schedule, youtube
+from engine.publish import collabs, materials, registry, schedule, youtube
 from engine.publish.adspower import AdsPower, AdsPowerDown
 
 ProgressCb = Callable[[float, str], None]
@@ -212,7 +212,8 @@ def run_publish(req: PublishRequest, state: dict[str, Any], save: Callable[..., 
     save(assign=assign, channels=results)
     if "plan_date" not in state:
         wanted, at = schedule.take_plan_date(req.plan_id) if req.plan_id else (None, "")
-        save(plan_date=wanted.isoformat() if wanted else "", plan_time=at)
+        save(plan_date=wanted.isoformat() if wanted else "", plan_time=at,
+             plan_step=schedule.plan_step(req.plan_id))
     wanted = date.fromisoformat(state["plan_date"]) if state.get("plan_date") else None
     live = _Live(targets, results, save, progress)
     todo = [t for t in targets if t.key in assign and (results.get(t.key) or {}).get("status") != DONE]
@@ -253,7 +254,7 @@ def run_publish(req: PublishRequest, state: dict[str, Any], save: Callable[..., 
                     if "publish_at" not in rec:
                         studio_last = date.fromisoformat(t.channel.last_scheduled) if t.channel.last_scheduled else None
                         when = schedule.slot(t.channel.id, wanted=wanted, at=state.get("plan_time") or "",
-                                             studio_last=studio_last)
+                                             studio_last=studio_last, step=int(state.get("plan_step") or 1))
                         rec["publish_at"] = when.isoformat()
                     step(0.05 + 0.9 * done_n / len(targets),
                          f"Выкладка {done_n + 1}/{len(targets)}: {t.label()} — {a.get('pct')}%, "
@@ -299,6 +300,8 @@ def run_publish(req: PublishRequest, state: dict[str, Any], save: Callable[..., 
                                     "профиль закрывался во время загрузки — в Studio мог остаться лишний черновик, проверь")
                         rec.update(status=DONE, url=up.url, notes=[*rec.get("notes", []), *up.notes], error="",
                                    invites=up.invites or {}, title=job.title, file_ok=bool(up.file_ok))
+                        # приглашение создано — оно обязано быть принято, даже если дальше всё упадёт (см. collabs.py)
+                        collabs.record_invites(t.key, t.label(), rec["invites"], title=job.title, url=up.url)
                         for co in job.coauthors:  # приглашение не создалось — соавтора доделывать руками
                             if co.key not in rec["invites"]:
                                 _coauthor_failed(rec, co, next((n for n in up.notes if "соавтор" in n),
@@ -594,8 +597,9 @@ def _accept_coauthors(req: PublishRequest, targets: list, coauthors: list, resul
                     try:
                         link = (rec.get("invites") or {}).get(co.key, "")
                         for attempt in range(1, PROFILE_RESTARTS + 2):
-                            if link and _title_in(rec.get("title", ""), accepted):
-                                break  # уже принято вместе с другим приглашением от этого канала
+                            # Ссылка — на пару «владелец → соавтор», и приниматься должна КАЖДАЯ пара: у каналов одного
+                            # человека названия роликов совпадают, поэтому «этот ролик уже принят» по названию —
+                            # ошибка (так принималось одно приглашение из нескольких, остальные висели «Pending»)
                             try:
                                 got = youtube.accept_coauthor(session.cdp_url, co.channel, link,
                                                               title=rec.get("title", ""), cancel=cancel)
@@ -616,6 +620,7 @@ def _accept_coauthors(req: PublishRequest, targets: list, coauthors: list, resul
                         rec.setdefault("coauthors_ok", []).append(co.key)
                         rec["coauthors_failed"] = [f for f in rec.get("coauthors_failed") or []
                                                    if f.get("key") != co.key]
+                        collabs.mark_accepted(t.key, co.key)
                     except AdsPowerDown:
                         save(channels=results)  # принятое уже записано; остальное — когда AdsPower вернётся
                         raise PublishLimit(ADSPOWER_DOWN, time.time() + ADSPOWER_POLL_SEC) from None
@@ -623,10 +628,14 @@ def _accept_coauthors(req: PublishRequest, targets: list, coauthors: list, resul
                         if cancel is not None and cancel.is_cancelled():
                             raise
                         _coauthor_failed(rec, co, str(exc))
+                        collabs.mark_failed(t.key, co.key, str(exc), link=(rec.get("invites") or {}).get(co.key, ""),
+                                            owner_label=t.label())
                         if isinstance(exc, youtube.NeedsUser):  # Google просит пароль — остальные ролики так же
                             for other in pending[pending.index(t) + 1:]:
-                                if not _title_in(results[other.key].get("title", ""), accepted):
-                                    _coauthor_failed(results[other.key], co, str(exc))
+                                _coauthor_failed(results[other.key], co, str(exc))
+                                collabs.mark_failed(other.key, co.key, str(exc),
+                                                    link=(results[other.key].get("invites") or {}).get(co.key, ""),
+                                                    owner_label=other.label())
                             save(channels=results)
                             break
                     save(channels=results)

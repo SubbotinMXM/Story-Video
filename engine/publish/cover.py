@@ -29,6 +29,7 @@ from typing import Any
 
 import httpx
 
+from engine.core.jsonish import json_object
 from engine.core.cancel import CancelledError, CancelToken
 from engine.core.logutil import log
 from engine.publish.cover_prompts import render as _P
@@ -97,15 +98,9 @@ def _client(llm: tuple[str, str, str] | None):
 
 
 def _json(raw: str) -> dict:
-    m = re.search(r"\{.*\}", raw or "", re.S)
-    if not m:
-        raise CoverError(f"нейросеть ответила не JSON: {(raw or '')[:200]}")
-    try:
-        data = json.loads(m.group(0))
-    except ValueError as exc:
-        raise CoverError(f"нейросеть ответила кривой JSON: {exc}") from None
-    if not isinstance(data, dict):
-        raise CoverError("нейросеть ответила не объектом JSON")
+    data = json_object(raw)
+    if data is None:
+        raise CoverError(f"нейросеть ответила не JSON-объектом: {(raw or '')[:200]}")
     return data
 
 

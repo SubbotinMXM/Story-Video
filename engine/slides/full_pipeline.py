@@ -54,6 +54,7 @@ class FullRunRequest:
     subscribe: bool = False
     subscribe_path: Path | None = None
     subtitles: bool = False
+    transition: str = "calm"
     intro_dir: Path | None = None
     outro_dir: Path | None = None
     # фоновая музыка (assets/music): по кругу под рассказом, в переводах тоже
@@ -240,6 +241,7 @@ def run_full_pipeline(
                 subscribe=req.subscribe,
                 subscribe_path=req.subscribe_path,
                 subtitles=req.subtitles,
+                transition=req.transition,
                 intro_dir=req.intro_dir,
                 outro_dir=req.outro_dir,
                 music=req.music,
@@ -264,6 +266,7 @@ def run_full_pipeline(
                 subscribe=req.subscribe,
                 subscribe_path=req.subscribe_path,
                 subtitles=req.subtitles,
+                transition=req.transition,
                 intro_dir=req.intro_dir,
                 outro_dir=req.outro_dir,
                 music=req.music,

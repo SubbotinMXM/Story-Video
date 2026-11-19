@@ -15,6 +15,11 @@ DEFAULT_THRESHOLD = 0.20
 
 _lock = threading.Lock()
 _bundle: dict | None = None
+# признаки уже виденных файлов (нормированные): один и тот же кадр оценивают по запросу, потом «красота»,
+# «мусор», минус-запрос — каждый раз заново читать и кодировать его незачем. Ключ — размер и время файла
+# (файл переезжает из временной папки в пул — содержимое то же). Результаты оценок не меняются
+_FEATURE_CACHE_MAX = 6000
+_features: "dict[tuple[int, int], object]" = {}
 
 
 class ClipError(RuntimeError):
@@ -66,6 +71,53 @@ def get_clip(
         return _bundle
 
 
+def _file_key(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_size, st.st_mtime_ns
+
+
+def encode_images(paths: list[Path], bundle: dict) -> tuple[list[Path], object]:
+    """Нормированные признаки картинок → (читаемые файлы, матрица [n, d]); новые кодируются одним пакетом.
+    Вызывать БЕЗ _lock: кодирование берёт его само."""
+    torch, model, preprocess, device = bundle["torch"], bundle["model"], bundle["preprocess"], bundle["device"]
+    from PIL import Image
+
+    valid: list[Path] = []
+    rows: list[object | None] = []
+    fresh: list[tuple[int, object]] = []  # (позиция в valid, тензор после preprocess)
+    keys: list[tuple[int, int] | None] = []
+    for p in paths:
+        key = _file_key(p)
+        hit = _features.get(key) if key is not None else None
+        if hit is None:
+            try:
+                tensor = preprocess(Image.open(p).convert("RGB"))
+            except Exception as exc:
+                log(f"CLIP skip {p.name}: {exc}")
+                continue
+            fresh.append((len(valid), tensor))
+        valid.append(p)
+        rows.append(hit)
+        keys.append(key)
+    if fresh:
+        with _lock:
+            with torch.no_grad():
+                enc = model.encode_image(torch.stack([t for _i, t in fresh]).to(device))
+                enc = enc / enc.norm(dim=-1, keepdim=True)
+        for (i, _t), vec in zip(fresh, enc):
+            rows[i] = vec
+            if keys[i] is not None:
+                if len(_features) >= _FEATURE_CACHE_MAX:
+                    _features.pop(next(iter(_features)), None)  # самый старый
+                _features[keys[i]] = vec
+    if not valid:
+        return [], None
+    return valid, torch.stack(rows)  # type: ignore[arg-type]
+
+
 def score_image_paths(
     query: str,
     image_paths: list[Path],
@@ -77,34 +129,18 @@ def score_image_paths(
     if not q or not image_paths:
         return []
     bundle = get_clip()
+    model, tokenizer, device = bundle["model"], bundle["tokenizer"], bundle["device"]
     torch = bundle["torch"]
-    model = bundle["model"]
-    preprocess = bundle["preprocess"]
-    tokenizer = bundle["tokenizer"]
-    device = bundle["device"]
 
-    from PIL import Image
-
-    tensors = []
-    valid_paths: list[Path] = []
-    for p in image_paths:
-        try:
-            img = Image.open(p).convert("RGB")
-            tensors.append(preprocess(img))
-            valid_paths.append(p)
-        except Exception as exc:
-            log(f"CLIP skip {p.name}: {exc}")
-    if not tensors:
+    valid_paths, image_features = encode_images(image_paths, bundle)
+    if not valid_paths:
         return []
 
     # serialize encode — MPS/CPU не любят параллельные forward из worker-пула
     with _lock:
-        batch = torch.stack(tensors).to(device)
         text = tokenizer([q]).to(device)
         with torch.no_grad():
-            image_features = model.encode_image(batch)
             text_features = model.encode_text(text)
-            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
             sims = (image_features @ text_features.T).squeeze(-1)
             scores = sims.detach().float().cpu().tolist()
@@ -176,25 +212,15 @@ def beauty_scores(image_paths: list[Path]) -> dict[Path, float]:
     if not image_paths:
         return {}
     bundle = get_clip()
-    torch, model, preprocess, tokenizer, device = (bundle[k] for k in ("torch", "model", "preprocess", "tokenizer", "device"))
-    from PIL import Image
-
-    tensors, valid = [], []
-    for p in image_paths:
-        try:
-            tensors.append(preprocess(Image.open(p).convert("RGB")))
-            valid.append(p)
-        except Exception:
-            continue
-    if not tensors:
+    torch, model, tokenizer, device = (bundle[k] for k in ("torch", "model", "tokenizer", "device"))
+    valid, img = encode_images(image_paths, bundle)
+    if not valid:
         return {}
     with _lock:
         with torch.no_grad():
             if _beauty_text is None:
                 t = model.encode_text(tokenizer([*_BEAUTY_POS, *_BEAUTY_NEG]).to(device))
                 _beauty_text = t / t.norm(dim=-1, keepdim=True)
-            img = model.encode_image(torch.stack(tensors).to(device))
-            img = img / img.norm(dim=-1, keepdim=True)
             sims = (img @ _beauty_text.T).float().cpu()
             junk = _junk_probs(img, model, tokenizer, device)
     n = len(_BEAUTY_POS)
@@ -248,21 +274,11 @@ def junk_scores(image_paths: list[Path]) -> dict[Path, float]:
     if not image_paths:
         return {}
     bundle = get_clip()
-    torch, model, preprocess, tokenizer, device = (bundle[k] for k in ("torch", "model", "preprocess", "tokenizer", "device"))
-    from PIL import Image
-
-    tensors, valid = [], []
-    for p in image_paths:
-        try:
-            tensors.append(preprocess(Image.open(p).convert("RGB")))
-            valid.append(p)
-        except Exception:
-            continue
-    if not tensors:
+    torch, model, tokenizer, device = (bundle[k] for k in ("torch", "model", "tokenizer", "device"))
+    valid, img = encode_images(image_paths, bundle)
+    if not valid:
         return {}
     with _lock:
         with torch.no_grad():
-            img = model.encode_image(torch.stack(tensors).to(device))
-            img = img / img.norm(dim=-1, keepdim=True)
             probs = _junk_probs(img, model, tokenizer, device)
     return dict(zip(valid, probs))

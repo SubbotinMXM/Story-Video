@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import random
+import os
 import re
 import time
 import uuid
@@ -95,6 +96,9 @@ def catalog(*, refresh: bool = False) -> list[dict]:
     if not refresh and _catalog_cache and time.monotonic() - _catalog_cache[0] < 3600:
         return _catalog_cache[1]
     models = FALLBACK_MODELS
+    if os.environ.get("STORY_VIDEO_ROYAL_OFFLINE"):  # тесты в сеть не ходят: цены из документации
+        _catalog_cache = (time.monotonic(), models)
+        return models
     try:
         with httpx.Client(timeout=20.0, trust_env=False, transport=_TRANSPORT) as http:
             resp = http.get(f"{BASE_URL}/v1/public/pricing")

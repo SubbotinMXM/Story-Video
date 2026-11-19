@@ -1,26 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, Flame, Search, Trash2, X } from "lucide-react";
+import { ExternalLink, Flame, Link2, Search, Tags, Trash2, X } from "lucide-react";
 import { useJobs, useToasts } from "../lib/store";
-import { Badge, Button, Card, Disclosure, Field, NumberInput, PageHeader, Select } from "../components/ui";
+import { Badge, Button, Card, Disclosure, Field, NumberInput, PageHeader, TextInput } from "../components/ui";
+import { LANGS as APP_LANGS } from "../lib/langs";
 
 type Niche = { name: string; why: string; keywords: string[] };
 type Channel = {
   id: string; title: string; url: string; subs: number; videos: number; age_days: number;
   best_title: string; best_url: string; best_views: number; ratio: number; recent_median: number;
-  recent_count: number; hit_share?: number; hit_count?: number; top_views?: number; per_week: number; avg_minutes: number; anomaly: boolean;
+  recent_count: number; country?: string; hit_share?: number; hit_count?: number; top_views?: number; per_week: number; avg_minutes: number; anomaly: boolean;
 };
 type Run = {
   id: string; niche: string; keywords?: string[]; subniches?: string[]; queries: string[]; at: number;
-  filters?: { max_subs?: number };
+  filters?: { max_subs?: number; language?: string };
+  notes?: string[];
+  similar?: { id: string; title: string; url: string; subs: number; topic: string; language: string };
   stats: { videos: number; channels: number; checked?: number; passed: number; dropped?: Record<string, number> };
   channels: Channel[];
 };
 
-const LANGS = [
-  { value: "ru", label: "Русский" }, { value: "en", label: "Английский" }, { value: "es", label: "Испанский" },
-  { value: "pt", label: "Португальский" }, { value: "de", label: "Немецкий" }, { value: "fr", label: "Французский" },
-  { value: "it", label: "Итальянский" }, { value: "pl", label: "Польский" }, { value: "tr", label: "Турецкий" }, { value: "uk", label: "Украинский" },
-];
 
 const DROP_LABELS: Record<string, string> = {
   short: "короткие ролики (Shorts)",
@@ -33,6 +31,36 @@ const DROP_LABELS: Record<string, string> = {
   few_long: "мало длинных роликов",
   not_checked: "не дошла очередь разбора",
 };
+
+// языки поиска — те же, на которых программа делает ролики и переводы
+const LANGS = APP_LANGS.map((l) => ({ value: l.code, label: l.name }));
+const AUTO_LANG = { value: "auto", label: "Как у канала" };
+const LANG_KEY = "niches-lang";
+const SIM_LANG_KEY = "niches-similar-lang";
+
+function saved(key: string, fallback: string, allowed: string[]): string {
+  try {
+    const v = localStorage.getItem(key) || "";
+    return allowed.includes(v) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Язык поиска одним щелчком: все языки сразу на виду. */
+function LangChips({ value, onChange, options }: { value: string; onChange: (v: string) => void; options: { value: string; label: string }[] }) {
+  return (
+    <div className="chips" role="radiogroup" aria-label="Язык поиска">
+      {options.map((o) => (
+        <button key={o.value} type="button" role="radio" aria-checked={value === o.value} className={`chip ${value === o.value ? "active" : ""}`} onClick={() => onChange(o.value)}>
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+const URL_KEY = "niches-similar-url";
+const MODE_KEY = "niches-mode";
 
 const MAX_SUBS_KEY = "niches-max-subs";
 const MAX_SUBS_DEFAULT = 10000;
@@ -56,6 +84,12 @@ async function call<T>(method: string, url: string, body?: unknown): Promise<T> 
   return data as T;
 }
 
+/** « · Испанский» для поисков не на русском — в истории видно, на каком языке искали. */
+function langTag(r: Run): string {
+  const code = r.similar?.language || r.filters?.language || "ru";
+  return code === "ru" ? "" : ` · ${LANGS.find((l) => l.value === code)?.label ?? code}`;
+}
+
 function dropped(r: Run): string[] {
   return Object.entries(r.stats.dropped ?? {})
     .filter(([k, n]) => n > 0 && DROP_LABELS[k])
@@ -67,7 +101,55 @@ function dropped(r: Run): string[] {
 export function NichesPage({ active }: { active: boolean }) {
   const { enqueue, jobs } = useJobs();
   const { push } = useToasts();
-  const [language, setLanguage] = useState("ru");
+  const [language, setLangState] = useState(() => saved(LANG_KEY, "ru", LANGS.map((l) => l.value)));
+  const setLanguage = (v: string) => {
+    setLangState(v);
+    try {
+      localStorage.setItem(LANG_KEY, v);
+    } catch {
+      /* без запоминания */
+    }
+  };
+  // «Похожие на канал»: вместо ключевых слов — ссылка на канал-образец
+  const [mode, setModeState] = useState<"niche" | "similar">(() => {
+    try {
+      return localStorage.getItem(MODE_KEY) === "similar" ? "similar" : "niche";
+    } catch {
+      return "niche";
+    }
+  });
+  const setMode = (m: "niche" | "similar") => {
+    setModeState(m);
+    try {
+      localStorage.setItem(MODE_KEY, m);
+    } catch {
+      /* без запоминания */
+    }
+  };
+  const [simUrl, setSimUrlState] = useState(() => {
+    try {
+      return localStorage.getItem(URL_KEY) || "";
+    } catch {
+      return "";
+    }
+  });
+  const setSimUrl = (v: string) => {
+    setSimUrlState(v);
+    try {
+      localStorage.setItem(URL_KEY, v);
+    } catch {
+      /* без запоминания */
+    }
+  };
+  const [simLang, setSimLangState] = useState(() => saved(SIM_LANG_KEY, "auto", ["auto", ...LANGS.map((l) => l.value)]));
+  const setSimLang = (v: string) => {
+    setSimLangState(v);
+    try {
+      localStorage.setItem(SIM_LANG_KEY, v);
+    } catch {
+      /* без запоминания */
+    }
+  };
   const [maxSubs, setMaxSubsState] = useState(savedMaxSubs);
   const setMaxSubs = (v: number) => {
     setMaxSubsState(v);
@@ -132,9 +214,14 @@ export function NichesPage({ active }: { active: boolean }) {
     return [...keywords, ...extra.filter((w) => !keywords.includes(w))];
   }, [keywords, draft]);
 
+  const simOk = /youtu(\.be|be\.com)|^@|^UC[\w-]{22}$/.test(simUrl.trim());
   const run = async () => {
     setBusy(true);
-    await enqueue([{ kind: "niches", params: { niche: picked, keywords: all, filters: { language, max_subs: maxSubs } } }]);
+    await enqueue([
+      mode === "similar"
+        ? { kind: "niches", params: { similar_url: simUrl.trim(), filters: { language: simLang, max_subs: maxSubs } } }
+        : { kind: "niches", params: { niche: picked, keywords: all, filters: { language, max_subs: maxSubs } } },
+    ]);
     setDraft("");
     setBusy(false);
   };
@@ -161,12 +248,58 @@ export function NichesPage({ active }: { active: boolean }) {
     <div className="page">
       <PageHeader
         title="Поиск ниш"
-        subtitle="Каналы-ориентиры: небольшие каналы, ролики которых набирают десятки и сотни тысяч просмотров — в разы больше, чем у канала подписчиков. До 15 каналов — формат оцениваешь сам."
+        subtitle="Каналы-ориентиры: небольшие каналы, ролики которых набирают десятки и сотни тысяч просмотров — в разы больше, чем у канала подписчиков. До 15 каналов — формат оцениваешь сам. Ищи по нише или по ссылке на канал, на который хочешь быть похожим."
       />
       <div className="niche-layout">
         <div className="stack">
-          <Card title="1. Что ищем" description="Выбери нишу из списка — её ключевые слова подставятся сами. Или впиши свои: по ним ищутся ролики, а по роликам — каналы.">
+          <Card
+            title="1. Что ищем"
+            description={
+              mode === "similar"
+                ? "Вставь ссылку на канал-образец — программа прочитает его темы и найдёт такие же небольшие каналы с большими просмотрами."
+                : "Выбери нишу из списка — её ключевые слова подставятся сами. Или впиши свои: по ним ищутся ролики, а по роликам — каналы."
+            }
+          >
             <div className="stack">
+              <div className="tabs" role="tablist">
+                <button type="button" role="tab" aria-selected={mode === "niche"} className={mode === "niche" ? "active" : ""} onClick={() => setMode("niche")}>
+                  <Tags size={15} /> По нише
+                </button>
+                <button type="button" role="tab" aria-selected={mode === "similar"} className={mode === "similar" ? "active" : ""} onClick={() => setMode("similar")}>
+                  <Link2 size={15} /> Похожие на канал
+                </button>
+              </div>
+              <Field
+                label="Язык поиска"
+                hint={
+                  mode === "similar"
+                    ? simLang === "auto"
+                      ? "Определю по названиям роликов образца. Или выбери язык сам — искать будем каналы на нём."
+                      : "Ищем каналы на этом языке, даже если образец на другом."
+                    : language === "ru"
+                      ? "Каналы и ролики на этом языке и в его регионе."
+                      : "Слова можно писать по-русски — нейросеть переведёт их в запросы на этом языке."
+                }
+              >
+                {mode === "similar" ? (
+                  <LangChips value={simLang} onChange={setSimLang} options={[AUTO_LANG, ...LANGS]} />
+                ) : (
+                  <LangChips value={language} onChange={setLanguage} options={LANGS} />
+                )}
+              </Field>
+              {mode === "similar" && (
+                <div className="niche-words-row">
+                  <Field label="Ссылка на канал или на любой его ролик" hint="youtube.com/@имя, youtube.com/channel/UC… или ссылка на ролик этого канала">
+                    <TextInput value={simUrl} onChange={setSimUrl} placeholder="https://www.youtube.com/@имя" />
+                  </Field>
+                  <div className="niche-side">
+                    <Field label="Подписчиков до" hint={`с запасом: до ${Math.round(maxSubs * 1.15).toLocaleString("ru-RU")}`}>
+                      <NumberInput value={maxSubs} min={100} max={10000000} step={1000} onChange={setMaxSubs} width={180} />
+                    </Field>
+                  </div>
+                </div>
+              )}
+              {mode === "niche" && <>
               <div className="niche-words-row">
                 <Field label="Ключевые слова" hint="Enter или запятая — добавить; мало слов — нейросеть добавит похожие">
                   <div className="niche-words">
@@ -196,9 +329,6 @@ export function NichesPage({ active }: { active: boolean }) {
                   </div>
                 </Field>
                 <div className="niche-side">
-                  <Field label="Язык аудитории">
-                    <Select value={language} onChange={setLanguage} options={LANGS} />
-                  </Field>
                   <Field label="Подписчиков до" hint={`с запасом: до ${Math.round(maxSubs * 1.15).toLocaleString("ru-RU")}`}>
                     <NumberInput value={maxSubs} min={100} max={10000000} step={1000} onChange={setMaxSubs} width={180} />
                   </Field>
@@ -224,15 +354,30 @@ export function NichesPage({ active }: { active: boolean }) {
                   ))}
                 </div>
               </Field>
+              </>}
             </div>
           </Card>
 
           <div className="niche-run">
             <span className="muted small action-plan">
-              {all.length ? `Ищем: ${picked || all[0]} · ключевых слов: ${all.length}` : "Выбери нишу или впиши ключевые слова"}
+              {mode === "similar"
+                ? simOk
+                  ? "Ищем каналы, похожие на образец, по тем же критериям"
+                  : simUrl.trim()
+                    ? "Не похоже на ссылку YouTube — нужен канал или ролик"
+                    : "Вставь ссылку на канал-образец"
+                : all.length
+                  ? `Ищем: ${picked || all[0]} · ключевых слов: ${all.length}`
+                  : "Выбери нишу или впиши ключевые слова"}
             </span>
-            <Button variant="primary" icon={<Search size={16} />} disabled={!all.length} loading={busy || searching} onClick={() => void run()}>
-              {searching ? "Ищу…" : "Найти каналы"}
+            <Button
+              variant="primary"
+              icon={<Search size={16} />}
+              disabled={mode === "similar" ? !simOk : !all.length}
+              loading={busy || searching}
+              onClick={() => void run()}
+            >
+              {searching ? "Ищу…" : mode === "similar" ? "Найти похожие" : "Найти каналы"}
             </Button>
           </div>
           <Disclosure id="niche-rules" summary="Какие каналы подходят">
@@ -256,7 +401,7 @@ export function NichesPage({ active }: { active: boolean }) {
                   <select className="input niche-run-pick" value={res.id} onChange={(e) => setShown(e.target.value)}>
                     {runs.map((r) => (
                       <option key={r.id} value={r.id}>
-                        {r.niche || r.subniches?.[0]} · {when(r.at)}
+                        {r.niche || r.subniches?.[0]}{langTag(r)} · {when(r.at)}
                       </option>
                     ))}
                   </select>
@@ -269,7 +414,7 @@ export function NichesPage({ active }: { active: boolean }) {
           }
           description={
             res
-              ? `«${res.niche || res.subniches?.[0]}»: роликов ${res.stats.videos}, каналов ${res.stats.channels}${res.stats.checked != null ? `, разобрано ${res.stats.checked}` : ""}, подошли ${res.stats.passed}`
+              ? `«${res.niche || res.subniches?.[0]}»${langTag(res)}: роликов ${res.stats.videos}, каналов ${res.stats.channels}${res.stats.checked != null ? `, разобрано ${res.stats.checked}` : ""}, подошли ${res.stats.passed}`
               : "Здесь появятся найденные каналы."
           }
         >
@@ -282,6 +427,22 @@ export function NichesPage({ active }: { active: boolean }) {
                   : "Подходящих каналов не нашлось — попробуй другие ключевые слова или соседнюю нишу."}
             </div>
           )}
+          {res?.similar && (
+            <div className="notice small">
+              Образец:{" "}
+              <a href={res.similar.url} target="_blank" rel="noreferrer">
+                {res.similar.title}
+              </a>
+              {res.similar.subs ? ` · ${num(res.similar.subs)} подп.` : ""}
+              {res.similar.topic ? ` · тема: ${res.similar.topic}` : ""}
+              {res.similar.language ? ` · язык аудитории: ${LANGS.find((l) => l.value === res.similar!.language)?.label ?? res.similar.language}` : ""}
+            </div>
+          )}
+          {res?.notes?.map((n, i) => (
+            <div key={i} className="notice warn small">
+              {n}
+            </div>
+          ))}
           {res && dropped(res).length > 0 && <div className="muted small">Отсеяно: {dropped(res).join(" · ")}</div>}
           <div className="niche-list">
             {res?.channels.map((c) => (
@@ -309,6 +470,7 @@ export function NichesPage({ active }: { active: boolean }) {
                     c.hit_share != null && <span><b>{Math.round(c.hit_share * 100)}%</b> роликов 100 тыс.+</span>
                   )}
                   <span>канал <b>{c.age_days}</b> дн.</span>
+                  {c.country && <span>страна <b>{c.country}</b></span>}
                   <span><b>{c.videos}</b> роликов</span>
                   <span><b>{c.per_week}</b> в неделю</span>
                   <span><b>{c.avg_minutes}</b> мин</span>

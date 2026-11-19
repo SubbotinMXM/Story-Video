@@ -97,7 +97,7 @@ export function PollsPage() {
         title="Каналы"
         description="Отметь один канал — опросы можно посмотреть и поправить до запуска. Несколько — на каждом нейросеть напишет свои опросы по теме канала прямо в задаче."
       >
-        <ChannelPicker value={picked} onChange={setPicked} />
+        <ChannelPicker value={picked} onChange={setPicked} scope="polls" />
       </Card>
 
       <Card title="Расписание">

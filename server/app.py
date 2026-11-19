@@ -7,7 +7,7 @@ import json
 import re
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,7 @@ from engine.core.config import PROJECT_ROOT, load_config, save_config
 from engine.tts import PROVIDERS, get_provider, provider_options
 from engine.slides.llm_client import DEFAULT_BASE_URL, DEFAULT_MODEL, LLMClient
 from engine.slides.paths import RUNS_DIR
-from engine.slides.resume import detect_stage
+from engine.slides.resume import detect_stage, drop_stock, stock_bytes
 from server import dialogs
 from server.events import hub
 from server.jobs import get_manager
@@ -68,6 +68,30 @@ def _llm_models() -> list[str]:
         return llm_models.chain(base, str(cfg.get("llm_api_key") or ""), "light")
     except Exception:
         return [m for m, _i, _o in llm_models.FALLBACK_PRICES]
+
+
+@app.get("/api/whats-new")
+def whats_new() -> dict[str, Any]:
+    """Окно «Что нового»: выпуски, которых человек ещё не видел, и вся история версий."""
+    from engine.core import changelog
+
+    all_releases = changelog.releases()
+    return {
+        "version": all_releases[0]["version"] if all_releases else "",
+        "unseen": changelog.unseen(str(load_config().get("last_seen_version") or "")),
+        "history": all_releases,
+    }
+
+
+@app.post("/api/whats-new/seen")
+def whats_new_seen() -> dict[str, str]:
+    """Человек закрыл окно: текущая версия — просмотренная, до следующего обновления не показываем."""
+    from engine.core import changelog
+
+    version = changelog.current()
+    if version:
+        save_config({"last_seen_version": version})
+    return {"version": version}
 
 
 @app.get("/api/meta")
@@ -256,6 +280,7 @@ def analytics_get() -> dict[str, Any]:
                 "profile": p.label(), "language": ch.language,
                 "subscribers": st.subscribers if st else None, "views_48h": st.views_48h if st else None,
                 "watch_hours": st.watch_hours if st else None, "views_total": st.views_total if st else None,
+                "scheduled": st.scheduled if st else None,
                 "synced_at": st.synced_at if st else 0, "error": st.error if st else "",
                 "prev": prev,
             })
@@ -443,6 +468,218 @@ def rewrite_channels(body: ChannelsIn) -> dict[str, Any]:
     return {"jobs": jobs, "channels": report}
 
 
+class TemplateIn(BaseModel):
+    name: str
+    section: str = "broll"
+
+
+class TemplateRename(BaseModel):
+    name: str
+
+
+class TemplateLaunchIn(BaseModel):
+    count: int = 5
+    start: str = ""  # пусто — после последнего запланированного на канале; иначе дата первого ролика (YYYY-MM-DD)
+    step: int = 0  # дней между роликами; 0 — как в шаблоне
+    channels: list[str] | None = None  # каналы выкладки только для этого запуска (None — как в шаблоне)
+    save_channels: bool = False  # и сохранить их в шаблон
+
+
+def _template_view(tpl: dict[str, Any]) -> dict[str, Any]:
+    """Шаблон для интерфейса: настройки + короткая сводка для карточки."""
+    s = tpl.get("settings") or {}
+    sec = tpl["section"]
+    links = _competitor_links(str((s.get("rewrite_channels") or {}).get(sec) or ""))
+    return {**tpl, "summary": {
+        "publish": bool(s.get(f"{sec}_publish")),
+        "channels": list(s.get(f"{sec}_publish_channels") or []),
+        "step": max(1, int(s.get(f"{sec}_publish_step") or 1)),
+        "time": str(s.get(f"{sec}_publish_time") or ""),
+        "competitors": links,
+        "ai": bool(s.get("ai_gen_enabled")) if sec == "slides" else False,
+    }}
+
+
+def _competitor_links(text: str) -> list[str]:
+    """Каналы конкурентов из поля «Ссылки на каналы» (как в интерфейсе: через пробел/запятую/строку)."""
+    return [u for u in (x.strip() for x in re.split(r"[\s,]+", text or "")) if u and re.search(r"youtube\.com|^@", u)]
+
+
+@app.get("/api/templates")
+def templates_list() -> list[dict[str, Any]]:
+    from server import templates as tp
+
+    return [_template_view(t) for t in tp.listing()]
+
+
+@app.post("/api/templates")
+def templates_create(body: TemplateIn) -> dict[str, Any]:
+    """«Сохранить как шаблон»: текущие настройки раздела → новый шаблон."""
+    from server import templates as tp
+
+    try:
+        return _template_view(tp.create(body.name, body.section, load_config()))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+def _template_or_404(tid: str) -> dict[str, Any]:
+    from server import templates as tp
+
+    tpl = tp.get(tid)
+    if tpl is None:
+        raise HTTPException(404, "Такого шаблона уже нет")
+    return tpl
+
+
+@app.patch("/api/templates/{tid}")
+def templates_rename(tid: str, body: TemplateRename) -> dict[str, Any]:
+    from server import templates as tp
+
+    _template_or_404(tid)
+    try:
+        return _template_view(tp.rename(tid, body.name))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@app.post("/api/templates/{tid}/save")
+def templates_save(tid: str) -> dict[str, Any]:
+    """«Сохранить в шаблон»: текущие настройки раздела становятся содержимым шаблона."""
+    from server import templates as tp
+
+    _template_or_404(tid)
+    return _template_view(tp.recapture(tid, load_config()))
+
+
+@app.post("/api/templates/{tid}/apply")
+def templates_apply(tid: str) -> dict[str, Any]:
+    """«Изменить»: загрузить шаблон в настройки (поправить на привычных экранах, потом «Сохранить в шаблон»)."""
+    from server import templates as tp
+
+    tpl = _template_or_404(tid)
+    return _settings_out(save_config(tp.patch_for(load_config(), tpl)))
+
+
+@app.post("/api/templates/{tid}/copy")
+def templates_copy(tid: str) -> dict[str, Any]:
+    from server import templates as tp
+
+    _template_or_404(tid)
+    return _template_view(tp.copy_of(tid))
+
+
+@app.delete("/api/templates/{tid}")
+def templates_delete(tid: str) -> dict[str, bool]:
+    from server import templates as tp
+
+    if not tp.delete(tid):
+        raise HTTPException(404, "Такого шаблона уже нет")
+    return {"ok": True}
+
+
+@app.post("/api/templates/{tid}/launch")
+def templates_launch(tid: str, body: TemplateLaunchIn) -> dict[str, Any]:
+    """«Сделать N роликов по шаблону»: с каналов-конкурентов шаблона берутся N следующих ещё не переписанных роликов
+    (каналы — по очереди), для каждого — рерайт → ролик → выкладка по настройкам шаблона."""
+    from engine.publish.schedule import clamp_step
+    from engine.rewrite.channels import ChannelError, pick
+    from engine.rewrite.prompts import DEFAULT_PROMPTS
+    from engine.slides.stocks_base import parse_keys
+    from server import templates as tp
+
+    tpl = _template_or_404(tid)
+    sec = tpl["section"]
+    cfg = tp.merged(load_config(), tpl)
+    count = max(1, min(50, int(body.count or 1)))
+    step = clamp_step(body.step or cfg.get(f"{sec}_publish_step") or 1)
+    cfg[f"{sec}_publish_step"] = step
+    notes: list[str] = []
+    if body.channels is not None:
+        cfg[f"{sec}_publish_channels"] = [c for c in body.channels if c]
+        if body.save_channels:
+            tp.set_setting(tid, {f"{sec}_publish_channels": cfg[f"{sec}_publish_channels"]})
+    if cfg.get(f"{sec}_publish"):
+        if not cfg.get(f"{sec}_publish_channels"):
+            raise HTTPException(400, "В шаблоне не выбраны каналы выкладки — отметь их или выключи выкладку в шаблоне")
+    else:
+        notes.append("Выкладка в шаблоне выключена — ролики только соберутся")
+    if body.start.strip():
+        try:
+            first = date.fromisoformat(body.start.strip())
+        except ValueError:
+            raise HTTPException(400, "Дата начала — в виде ГГГГ-ММ-ДД") from None
+        if first < datetime.now().date():
+            raise HTTPException(400, "Дата начала уже прошла")
+        cfg[f"{sec}_publish_dates"] = [(first + timedelta(days=step * i)).isoformat() for i in range(count)]
+    else:
+        cfg[f"{sec}_publish_dates"] = []  # после последнего запланированного на канале, с шагом
+    urls = _competitor_links(str((cfg.get("rewrite_channels") or {}).get(sec) or ""))
+    if not urls:
+        raise HTTPException(400, "В шаблоне нет каналов-конкурентов — впиши их в «Источник → Ссылки на каналы» и сохрани шаблон")
+    prompts = [p for p in (cfg.get("rewrite_prompts") or DEFAULT_PROMPTS) if p.get("section") == sec]
+    chosen_prompt = (cfg.get("rewrite_prompt") or {}).get(sec)
+    common = {"section": sec, "prompt_id": chosen_prompt if any(p.get("id") == chosen_prompt for p in prompts)
+              else (prompts[0]["id"] if prompts else ""),
+              "language": cfg.get("rewrite_language"), "words": cfg.get("rewrite_words"),
+              "engine": cfg.get("rewrite_engine"), "review": cfg.get("rewrite_review"), "template": tid}
+    keys = parse_keys(cfg.get("youtube_api_keys") or cfg.get("youtube_api_key"))
+    states = _job_states()
+    lists: list[dict[str, Any]] = []
+    report: list[dict[str, Any]] = []
+    seen: set[str] = set()  # один канал двумя ссылками — ролики не повторяются
+    for url in urls:
+        try:
+            got = pick(url, count, section=sec, keys=keys, jobs=states, exclude=seen)
+        except ChannelError as exc:
+            report.append({"url": url, "error": str(exc)})
+            continue
+        seen.update(v.id for v in got["videos"])
+        entry = {"url": url, "channel": got["channel"], "taken": 0, "left": got["left"], "videos": got["videos"]}
+        lists.append(entry)
+        report.append(entry)
+    items: list[JobIn] = []
+    for rnd in range(count):  # по очереди: по ролику с каждого канала, пока не наберётся N
+        for ent in lists:
+            if len(items) < count and rnd < len(ent["videos"]):
+                v = ent["videos"][rnd]
+                ent["taken"] += 1
+                items.append(JobIn(kind="rewrite", params={**common, "url": v.url, "video_title": v.title,
+                                                           "channel_title": ent["channel"], "force": True}))
+    if not items:
+        errors = "; ".join(r["error"] for r in report if r.get("error"))
+        raise HTTPException(400, errors or "С каналов шаблона брать больше нечего — все подходящие ролики уже переписаны")
+    if len(items) < count:
+        notes.append(f"Подходящих роликов нашлось {len(items)} из {count} — столько и поставлено")
+    jobs = _enqueue(items, cfg, keep_dates=True)
+    _reserve_links(jobs)
+    return {"jobs": jobs, "notes": notes, "channels": [
+        {k: v for k, v in r.items() if k != "videos"} for r in report]}
+
+
+@app.get("/api/collabs")
+def collabs_status() -> dict[str, Any]:
+    """Приглашения соавторов, которые ещё ждут подтверждения (пары «канал → соавтор»)."""
+    from engine.publish import collabs
+
+    items = collabs.pending()
+    return {"pending": len(items), "items": [
+        {"owner": r.get("owner_label") or r["owner"], "co": r["co"], "videos": r.get("videos") or [],
+         "tries": int(r.get("tries") or 0), "error": r.get("error") or "", "since": r.get("since") or 0}
+        for r in items]}
+
+
+@app.post("/api/collabs/reconcile")
+def collabs_reconcile() -> dict[str, Any]:
+    """Подтвердить ждущие соавторства сейчас (обычно они подтверждаются сами в фоне)."""
+    from engine.publish import collabs
+
+    if not collabs.pending():
+        return {"queued": False, "pending": 0}
+    return {"queued": True, "pending": len(collabs.pending()),
+            "jobs": _enqueue([JobIn(kind="collabs", params={})])}
+
+
 @app.get("/api/rewrite/channels")
 def rewrite_channels_stats() -> dict[str, Any]:
     """Счётчики по каналам конкурентов: сколько взято и сколько подходящих осталось (на момент проверки)."""
@@ -489,19 +726,20 @@ def _reserve_links(jobs: list[dict[str, Any]]) -> None:
                     section=str(p.get("section") or "broll"), job=j["id"])
 
 
-def _enqueue(items: list[JobIn]) -> list[dict[str, Any]]:
+def _enqueue(items: list[JobIn], cfg: dict[str, Any] | None = None, *, keep_dates: bool = False) -> list[dict[str, Any]]:
     # сначала проверяем всё, потом ставим — чтобы не было «половины очереди»
+    # cfg — настройки запуска (шаблон поверх текущих); keep_dates — календарь в настройках не очищать (даты — из шаблона)
     from server.runners import SETTINGS_KEY, snapshot_settings
 
     mgr = get_manager()
-    cfg = load_config()
+    cfg = cfg if cfg is not None else load_config()
     snap = snapshot_settings(cfg)
     try:
         # снимок настроек на момент постановки: задача идёт по нему до конца, что бы ни поменяли потом
         jobs = [mgr.create(i.kind, {**i.params, SETTINGS_KEY: i.params.get(SETTINGS_KEY) or snap}) for i in items]
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
-    _publish_plan(cfg, jobs)
+    _publish_plan(cfg, jobs, keep_dates=keep_dates)
     from server.runners import royal_warning
 
     notice = royal_warning(cfg, jobs)  # денег на генерацию может не хватить — предупредить сразу
@@ -511,7 +749,7 @@ def _enqueue(items: list[JobIn]) -> list[dict[str, Any]]:
     return out
 
 
-def _publish_plan(cfg: dict[str, Any], jobs: list) -> None:
+def _publish_plan(cfg: dict[str, Any], jobs: list, *, keep_dates: bool = False) -> None:
     """Выкладка раздела включена: даты из календаря — на этот запуск (ролики берут их по порядку
     готовности), после запуска календарь очищается — следующий запуск их не займёт."""
     sections = {"broll": ("broll",), "slides": ("slides_full",)}
@@ -523,10 +761,11 @@ def _publish_plan(cfg: dict[str, Any], jobs: list) -> None:
         from engine.publish.schedule import create_plan
 
         dates_key = f"{section}_publish_dates"
-        plan_id = create_plan(list(cfg.get(dates_key) or []), str(cfg.get(f"{section}_publish_time") or ""))
+        plan_id = create_plan(list(cfg.get(dates_key) or []), str(cfg.get(f"{section}_publish_time") or ""),
+                              int(cfg.get(f"{section}_publish_step") or 1))
         for j in targets:
             j.params.setdefault("publish_plan", plan_id)
-        if cfg.get(dates_key):
+        if cfg.get(dates_key) and not keep_dates:
             save_config({dates_key: []})
 
 
@@ -621,9 +860,32 @@ def list_runs() -> list[dict[str, Any]]:
                 "updated": datetime.fromtimestamp(run.stat().st_mtime).isoformat(timespec="seconds"),
                 "snippet": snippet,
                 "has_final": stage == "render_done",
+                "stock_bytes": stock_bytes(run),
             }
         )
     return out
+
+
+def _busy_run_names() -> set[str]:
+    return {str(j.get("run") or "") for j in get_manager().list() if j.get("status") in ("queued", "running")}
+
+
+@app.post("/api/runs/free-space")
+def free_run_space() -> dict[str, Any]:
+    """Убирает скачанные кадры у уже собранных роликов. Сам ролик, озвучка, тексты и субтитры остаются.
+    Запуски, с которыми работает очередь, не трогаем."""
+    if not RUNS_DIR.is_dir():
+        return {"freed": 0, "runs": 0}
+    busy = _busy_run_names()
+    freed = runs = 0
+    for run in RUNS_DIR.iterdir():
+        if not run.is_dir() or run.name in busy or detect_stage(run) != "render_done":
+            continue
+        got = drop_stock(run)
+        if got:
+            freed += got
+            runs += 1
+    return {"freed": freed, "runs": runs}
 
 
 # ---------- файлы ----------
@@ -831,21 +1093,6 @@ def music_file(track_id: str) -> FileResponse:
     if path is None:
         raise HTTPException(404, "Нет такого трека")
     return FileResponse(path, media_type="audio/mpeg")
-
-
-@app.get("/api/thumbnail")
-def thumbnail_file(path: str) -> FileResponse:
-    """Готовое превью для показа на вкладке «Превью» — только файлы «Превью …jpg» на Desktop."""
-    from engine.slides.paths import DESKTOP
-
-    p = Path(path).expanduser()
-    try:
-        inside = p.resolve().parent == DESKTOP.resolve()
-    except OSError:
-        inside = False
-    if not inside or not p.name.startswith("Превью") or p.suffix.lower() != ".jpg" or not p.is_file():
-        raise HTTPException(404, "Нет такого превью")
-    return FileResponse(p, media_type="image/jpeg")
 
 
 class CoverUploadIn(BaseModel):

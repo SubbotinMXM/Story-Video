@@ -1,4 +1,5 @@
 import { Button, PageHeader } from "../components/ui";
+import { SaveTemplateButton } from "../components/SaveTemplate";
 import { VoiceTextsCard } from "../components/VoiceTextsCard";
 import { useSource } from "../components/SourceCard";
 import { VideoOptionsCard, VoiceCard } from "../components/SharedCards";
@@ -22,9 +23,12 @@ export function SlidesPage({ goRuns }: { goRuns: () => void }) {
         title="Стоковые слайды"
         subtitle="Текст → озвучка → фото и видео со стоков по смыслу → ролик 1080p"
         actions={
-          <Button variant="ghost" onClick={goRuns}>
-            Запуски →
-          </Button>
+          <span className="row gap-sm">
+            <SaveTemplateButton section="slides" />
+            <Button variant="ghost" onClick={goRuns}>
+              Запуски →
+            </Button>
+          </span>
         }
       />
       <div className="page-grid">

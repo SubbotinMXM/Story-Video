@@ -79,6 +79,7 @@ class MediaStageResult:
     selected: int
     skipped: int
     weak: int
+    notes: list[str] = field(default_factory=list)  # строки для карточки задачи («Люди: фото 96, видео 12»)
 
 
 class MediaError(RuntimeError):
@@ -132,6 +133,14 @@ def _build_clients(cfg: MediaSourcesConfig) -> dict[str, Any]:
     if cfg.unsplash:
         out["unsplash"] = UnsplashClient(KeyPool(cfg.unsplash))
     out["wikimedia"] = WikimediaClient()
+    try:  # запасные источники фото людей без браузера и ключей: Яндекс.Картинки, статьи Википедии
+        from engine.slides.source_wikipedia import WikipediaPhotosClient
+        from engine.slides.source_yandex import YandexImagesClient
+
+        out["yandex"] = YandexImagesClient()
+        out["wikipedia"] = WikipediaPhotosClient()
+    except Exception as exc:
+        log(f"Яндекс/Википедия недоступны: {exc}")
     out["archive"] = ArchiveOrgClient()
     if cfg.google:
         try:
@@ -205,16 +214,22 @@ def _download(
     *,
     require_image: bool = False,
     retries: int = 3,
+    max_seconds: float = 120.0,
+    max_bytes: int = _MAX_BYTES,
+    connect_timeout: float = 10.0,
 ) -> bool:
+    """Скачать файл. max_seconds — потолок на всю загрузку (медленный сервер, отдающий по байту, иначе держит
+    ролик бесконечно: таймаут httpx считается на каждый кусок, а не на файл); max_bytes — потолок размера."""
     if not url:
         return False
     last_exc: Exception | None = None
     for attempt in range(1, max(1, retries) + 1):
+        deadline = time.monotonic() + max_seconds
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             # Новое соединение на каждую попытку: после SSL EOF старый клиент мёртвый.
             with httpx.Client(
-                timeout=_DOWNLOAD_TIMEOUT,
+                timeout=_DOWNLOAD_TIMEOUT if connect_timeout == 10.0 else httpx.Timeout(45.0, connect=connect_timeout, read=20.0),
                 trust_env=False,
                 follow_redirects=True,
             ) as fresh:
@@ -223,18 +238,21 @@ def _download(
                         return False
                     expected = resp.headers.get("content-length")
                     try:
-                        if expected and int(expected) > _MAX_BYTES:
-                            log(f"download skip, файл > {_MAX_BYTES // 1_000_000}MB")
+                        if expected and int(expected) > max_bytes:
+                            log(f"download skip, файл > {max_bytes // 1_000_000}MB")
                             return False
                     except ValueError:
                         pass
                     got = 0
                     with dest.open("wb") as f:
-                        for chunk in resp.iter_bytes(65536):
+                        # без chunk_size: куски отдаются по мере прихода (иначе ждёт 64 КБ и срок не проверить)
+                        for chunk in resp.iter_bytes():
                             f.write(chunk)
                             got += len(chunk)
-                            if got > _MAX_BYTES:
+                            if got > max_bytes:
                                 raise OSError("file too large")
+                            if time.monotonic() > deadline:
+                                raise TimeoutError(f"загрузка дольше {max_seconds:.0f} с")
                     if expected:
                         try:
                             exp_n = int(expected)
@@ -254,6 +272,8 @@ def _download(
             last_exc = exc
             if dest.exists():
                 dest.unlink(missing_ok=True)
+            if isinstance(exc, TimeoutError):
+                break  # сервер слишком медленный — повтор его не ускорит
             if attempt < retries:
                 time.sleep(0.4 * attempt)
                 continue

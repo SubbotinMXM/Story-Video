@@ -12,20 +12,24 @@
      и в 10+ раз больше подписчиков (канал на 2,7 тыс. с роликами по 280 и 270 тыс. при медиане 26 тыс.).
    Возраст канала и сложность формата не учитываются — формат пользователь оценивает сам.
 5. Порядок: больше просмотров на подписчика, стабильнее и больше просмотры, меньше роликов на канале — выше.
-→ до 15 каналов. Пороги — в коде (константы ниже), в интерфейсе — язык и потолок подписчиков.
+→ до 15 каналов.
+
+«Похожие на канал» (find_similar): вместо ключевых слов — ссылка на канал-образец. Программа читает его (описание,
+ключевые слова, самые просматриваемые и свежие ролики), нейросеть выводит тему и язык аудитории и пишет запросы,
+плюс по названиям лучших роликов образца ищутся похожие ролики. Дальше — тот же конвейер и те же критерии (пункты 2–5);
+сам образец из выдачи исключается. Пороги — в коде (константы ниже), в интерфейсе — язык и потолок подписчиков.
 """
 
 from __future__ import annotations
 
-import json
 import math
-import re
 import statistics
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from engine.core.jsonish import json_dict
 from engine.core.cancel import CancelToken
 from engine.core.logutil import log
 from engine.publish.store import LOCK, read_json, write_json
@@ -53,7 +57,7 @@ MIN_LONG = 3  # хотя бы столько длинных роликов — �
 RESULTS = 15
 
 LANG_REGION = {"ru": "RU", "en": "US", "es": "ES", "pt": "BR", "de": "DE", "fr": "FR", "it": "IT", "pl": "PL",
-               "tr": "TR", "uk": "UA"}
+               "tr": "TR", "uk": "UA", "ro": "RO", "nl": "NL"}
 
 
 @dataclass
@@ -228,17 +232,14 @@ _QUERIES = """Ты аналитик YouTube. По ключевым словам 
 языке — переведи по смыслу). Ответ — только JSON: {"queries": ["…", "…"]}"""
 
 def _json(raw: str | None, key: str) -> list:
-    m = re.search(r"\{.*\}", raw or "", re.S)
-    try:
-        val = json.loads(m.group(0)).get(key) if m else None
-    except (json.JSONDecodeError, AttributeError):
-        val = None
+    val = json_dict(raw).get(key)
     return val if isinstance(val, list) else []
 
 
-def queries_for(keywords: list[str], language: str, llm, cancel) -> list[str]:
+def queries_for(keywords: list[str], language: str, llm, cancel, notes: list[str] | None = None) -> list[str]:
     """Поисковые запросы: ключевые слова пользователя + похожие от нейросети, если слов мало.
-    Язык аудитории не русский — запросы целиком от нейросети на этом языке (русские слова там ничего не найдут)."""
+    Язык аудитории не русский — запросы целиком от нейросети на этом языке (русские слова там ничего не найдут).
+    notes — сюда пишется предупреждение, если перевести слова не удалось (искали по словам как есть)."""
     words = list(dict.fromkeys(w.strip() for w in keywords if w and w.strip()))
     foreign = (language or "ru") not in ("ru", "uk")
     out = [] if foreign else list(words)
@@ -253,6 +254,10 @@ def queries_for(keywords: list[str], language: str, llm, cancel) -> list[str]:
             if cancel is not None:
                 cancel.check()
             log(f"Ниши: запросы от нейросети не получены ({str(exc)[:120]}) — ищу по ключевым словам")
+    if foreign and words and not out:
+        if notes is not None:
+            notes.append(f"Нейросеть не перевела слова на язык поиска ({language}) — искал по твоим словам как есть. "
+                         "Впиши слова на этом языке или подключи нейросеть (Настройки → LLM).")
     if not out:
         out = words
     return list(dict.fromkeys(out))[:MAX_QUERIES]
@@ -425,19 +430,31 @@ def find(niche: str, keywords: list[str], f: Filters, keys: list[str], llm: tupl
          cancel: CancelToken | None = None, progress=None) -> dict[str, Any]:
     """Весь поиск → {"channels": [...], "stats": {...}}; итог сохраняется в историю поисков.
     niche — подпись поиска (название выбранной ниши), keywords — по чему искать."""
-    from engine.rewrite.channels import _Api
-
     if not keys:
         raise ValueError("нужен ключ YouTube Data API (Настройки → YouTube)")
-    queries = queries_for(keywords or [niche], f.language, llm, cancel)
+    notes: list[str] = []
+    queries = queries_for(keywords or [niche], f.language, llm, cancel, notes)
     if not queries:
         raise ValueError("впиши ключевые слова или выбери нишу")
     label = niche.strip() or queries[0]
+    return _search_and_rank(label, list(keywords), queries, f, keys, extra={"notes": notes} if notes else None,
+                            cancel=cancel, progress=progress)
+
+
+def _search_and_rank(label: str, keywords: list[str], queries: list[str], f: Filters, keys: list[str], *,
+                     exclude: frozenset[str] = frozenset(), extra: dict | None = None,
+                     cancel: CancelToken | None = None, progress=None) -> dict[str, Any]:
+    """Общий конвейер: запросы → ролики → каналы → отсев по критериям → рейтинг → история.
+    exclude — каналы, которых в выдаче быть не должно (образец в «похожих»)."""
+    from engine.rewrite.channels import _Api
+
     log(f"Ниши: «{label}» — запросы: {', '.join(queries)}")
     api = _Api(keys)
     dropped: dict[str, int] = {}
     try:
         channels, videos = search(api, queries, f, cancel=cancel, progress=progress)
+        for cid in exclude:
+            channels.pop(cid, None)
         dropped["short"] = sum(1 for v in videos.values() if v["minutes"] < MIN_MINUTES)
         cands = []
         for c in channels.values():
@@ -478,12 +495,165 @@ def find(niche: str, keywords: list[str], f: Filters, keys: list[str], llm: tupl
     good.sort(key=lambda c: -c.score)
     top = good[:f.results]
     result = {"id": f"{time.time():.6f}", "niche": label, "keywords": list(keywords), "queries": queries,
-              "filters": asdict(f), "at": time.time(),
+              "filters": asdict(f), "at": time.time(), **(extra or {}),
               "stats": {"videos": len(videos), "channels": len(channels), "checked": len(deep), "passed": len(good),
                         "dropped": dropped},
               "channels": [c.as_dict() for c in top]}
     save(result)
     return result
+
+
+# ---------- похожие на канал ----------
+
+_VIDEO_ID = r"(?:youtu\.be/|youtube\.com/(?:watch\?(?:[^#\s]*&)?v=|shorts/|live/|embed/))([\w-]{11})"
+SAMPLE_TITLES = 12  # сколько названий роликов образца отдаём нейросети
+TITLE_QUERIES = 3  # по стольким названиям лучших роликов образца ищем похожие ролики
+
+_SIMILAR = """Ты аналитик YouTube. Тебе дан канал-образец: описание, ключевые слова и названия его роликов
+(самые просматриваемые и свежие). Нужно найти ПОХОЖИЕ каналы: та же тема и подача, та же аудитория.
+Определи:
+- topic — о чём канал, одной короткой фразой на русском (тема и формат: «судьбы советских актрис, документальные рассказы»);
+- language — язык аудитории канала, код (ru, en, es, pt, de, fr, it, pl, tr, uk);
+- queries — {n} поисковых запросов, которыми зритель такого канала ищет ролики на YouTube: короткие (2–5 слов),
+  разные по смыслу (тема, герои, формат, типичные формулировки названий), СТРОГО на языке аудитории.
+  Не называй сам канал и не ищи его имя — нужны другие каналы.
+Ответ — только JSON: {"topic": "…", "language": "ru", "queries": ["…", "…"]}"""
+
+
+class SimilarError(ValueError):
+    """Образец не найден или не понят — сообщение показывается пользователю."""
+
+
+def resolve_channel(api, url: str) -> dict:
+    """Ссылка на канал или на ролик → данные канала-образца (snippet, statistics, contentDetails, brandingSettings)."""
+    import re
+
+    from engine.rewrite.channels import ChannelError, _channel_query
+
+    text = (url or "").strip()
+    if not text:
+        raise SimilarError("Вставь ссылку на канал: youtube.com/@имя или youtube.com/channel/UC…")
+    part = "snippet,statistics,contentDetails,brandingSettings"
+    m = re.search(_VIDEO_ID, text)
+    if m and not re.search(r"(UC[\w-]{22})|youtube\.com/@", text):
+        data = api.get("videos", {"part": "snippet", "id": m.group(1)})
+        items = data.get("items") or []
+        if not items:
+            raise SimilarError(f"Ролик не найден: {text}")
+        query = {"id": items[0]["snippet"]["channelId"]}
+    else:
+        try:
+            query = _channel_query(text)
+        except ChannelError as exc:
+            custom = re.search(r"youtube\.com/c/([^/?#\s]+)", text)
+            if not custom:
+                raise SimilarError(str(exc)) from None
+            found = api.get("search", {"part": "snippet", "type": "channel", "q": custom.group(1), "maxResults": 1})
+            hit = (found.get("items") or [{}])[0].get("snippet", {}).get("channelId")
+            if not hit:
+                raise SimilarError(f"Канал не найден: {text}") from None
+            query = {"id": hit}
+    data = api.get("channels", {"part": part, **query})
+    items = data.get("items") or []
+    if not items and "forUsername" in query:  # у /c/имя часто нет «username» — ищем по названию
+        found = api.get("search", {"part": "snippet", "type": "channel", "q": query["forUsername"], "maxResults": 1})
+        hit = (found.get("items") or [{}])[0].get("snippet", {}).get("channelId")
+        items = (api.get("channels", {"part": part, "id": hit}).get("items") or []) if hit else []
+    if not items:
+        raise SimilarError(f"Канал не найден: {text}")
+    return items[0]
+
+
+def sample_videos(api, channel: dict) -> list[dict]:
+    """Ролики образца: [{title, views, minutes, ts}] — последние загрузки; Shorts в выборку не идут."""
+    from engine.rewrite.channels import _iso_duration, _iso_time
+
+    uploads = ((channel.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads") or ""
+    if not uploads:
+        return []
+    data = api.get("playlistItems", {"part": "contentDetails", "playlistId": uploads, "maxResults": UPLOADS_PAGE})
+    ids = [i["contentDetails"]["videoId"] for i in data.get("items") or [] if (i.get("contentDetails") or {}).get("videoId")]
+    out = []
+    for batch in _chunks(ids):
+        for v in api.get("videos", {"part": "snippet,statistics,contentDetails", "id": ",".join(batch)}).get("items") or []:
+            minutes = _iso_duration((v.get("contentDetails") or {}).get("duration") or "") / 60
+            if minutes >= MIN_MINUTES:
+                out.append({"title": (v.get("snippet") or {}).get("title") or "", "minutes": minutes,
+                            "views": _int((v.get("statistics") or {}).get("viewCount")),
+                            "ts": _iso_time((v.get("snippet") or {}).get("publishedAt") or "")})
+    return out
+
+
+def similar_queries(channel: dict, videos: list[dict], language: str, llm, cancel) -> tuple[list[str], str, str]:
+    """→ (запросы, тема, язык аудитории). Нейросеть выводит тему/язык и пишет запросы; плюс названия лучших роликов
+    образца — по ним YouTube сам находит ролики на то же. Нейросети нет — только названия и ключевые слова канала."""
+    sn = channel.get("snippet") or {}
+    keywords = ((channel.get("brandingSettings") or {}).get("channel") or {}).get("keywords") or ""
+    top = sorted(videos, key=lambda v: -v["views"])
+    fresh = sorted(videos, key=lambda v: -v["ts"])
+    titles = list(dict.fromkeys(v["title"] for v in [*top[:SAMPLE_TITLES // 2], *fresh] if v["title"]))[:SAMPLE_TITLES]
+    topic, lang, queries = "", language, []
+    if titles or sn.get("description"):
+        try:
+            from engine.publish.polls import ask
+
+            raw = ask(_SIMILAR.replace("{n}", "6"),
+                      f"Канал: {sn.get('title') or ''}\nОписание: {(sn.get('description') or '')[:600]}\n"
+                      f"Ключевые слова канала: {keywords[:300]}\nЗаписанный язык канала: {sn.get('defaultLanguage') or '—'}\n"
+                      "Названия роликов:\n" + "\n".join(f"- {t}" for t in titles), llm, cancel, "niche_similar")
+            data = json_dict(raw)
+            topic = str(data.get("topic") or "").strip()[:160]
+            lang = str(data.get("language") or "").strip().lower()[:2] or lang
+            queries = [str(q).strip() for q in (data.get("queries") or []) if str(q).strip()]
+        except Exception as exc:
+            if cancel is not None:
+                cancel.check()
+            log(f"Ниши: нейросеть не описала образец ({str(exc)[:120]}) — ищу по названиям его роликов")
+    if not queries:
+        import re
+
+        # ключевые слова канала: «слово "несколько слов" ещё» — берём фразы в кавычках и отдельные слова от 4 букв
+        words = [a or b for a, b in re.findall(r'"([^"]+)"|(\S+)', keywords)]
+        queries = [w for w in words if len(w) >= 4][:3]
+    # названия лучших роликов образца: ролик с таким названием найдёт соседей по теме
+    by_title = [v["title"] for v in top if v["title"]][:TITLE_QUERIES]
+    room = max(0, MAX_QUERIES - len(by_title))
+    return list(dict.fromkeys([*queries[:room], *by_title]))[:MAX_QUERIES], topic, lang
+
+
+def find_similar(url: str, f: Filters, keys: list[str], llm: tuple[str, str, str] | None, *,
+                 auto_language: bool = True, cancel: CancelToken | None = None, progress=None) -> dict[str, Any]:
+    """Каналы, похожие на образец по ссылке, с теми же критериями, что у поиска по нише.
+    auto_language — язык аудитории берём у образца (нейросеть выводит его по названиям), иначе — из Filters."""
+    from engine.rewrite.channels import _Api
+
+    if not keys:
+        raise ValueError("нужен ключ YouTube Data API (Настройки → YouTube)")
+    api = _Api(keys)
+    try:
+        if progress:
+            progress(0.02, "Читаю канал-образец…")
+        channel = resolve_channel(api, url)
+        videos = sample_videos(api, channel)
+    finally:
+        api.close()
+    sn, st = channel.get("snippet") or {}, channel.get("statistics") or {}
+    if not videos:
+        raise SimilarError("У канала нет длинных роликов (от 5 минут) — по чему искать похожие, непонятно")
+    if progress:
+        progress(0.04, "Определяю тему и язык образца…")
+    queries, topic, lang = similar_queries(channel, videos, f.language, llm, cancel)
+    if auto_language and lang in LANG_REGION:
+        f = Filters.of({**asdict(f), "language": lang, "region": ""})
+    if not queries:
+        raise SimilarError("Не удалось составить запросы по каналу — нужен ключ нейросети (Настройки → LLM)")
+    title = sn.get("title") or channel["id"]
+    source = {"id": channel["id"], "title": title, "url": f"https://www.youtube.com/channel/{channel['id']}",
+              "subs": 0 if st.get("hiddenSubscriberCount") else _int(st.get("subscriberCount")), "topic": topic,
+              "language": f.language}
+    log(f"Ниши: образец «{title}» — {topic or 'тема не определена'}, язык {f.language}")
+    return _search_and_rank(f"Похожие на «{title}»", [], queries, f, keys, exclude=frozenset({channel["id"]}),
+                            extra={"similar": source}, cancel=cancel, progress=progress)
 
 
 # ---------- история ----------

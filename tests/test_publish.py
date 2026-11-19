@@ -107,6 +107,67 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(got, [date(2026, 11, 15), date(2026, 11, 17), date(2026, 11, 18), date(2026, 11, 19)])
 
 
+class ScheduleStepTests(unittest.TestCase):
+    """Шаг между роликами: 1 — каждый день, 2 — через день, 3 — через два дня."""
+
+    NOW = datetime(2026, 11, 11, 12, 0, tzinfo=schedule.MSK)
+
+    def setUp(self) -> None:
+        fresh_store(self)
+
+    def test_step_two_means_every_other_day(self) -> None:
+        days = [schedule.slot("UC1", studio_last=date(2026, 11, 14), now=self.NOW, rng=random.Random(0), step=2).date()
+                for _ in range(3)]
+        self.assertEqual(days, [date(2026, 11, 16), date(2026, 11, 18), date(2026, 11, 20)])
+
+    def test_step_three(self) -> None:
+        a = schedule.slot("UC1", studio_last=date(2026, 11, 14), now=self.NOW, step=3).date()
+        b = schedule.slot("UC1", studio_last=date(2026, 11, 14), now=self.NOW, step=3).date()
+        self.assertEqual((a, b), (date(2026, 11, 17), date(2026, 11, 20)))
+
+    def test_default_step_is_every_day(self) -> None:
+        a = schedule.slot("UC1", studio_last=date(2026, 11, 14), now=self.NOW).date()
+        b = schedule.slot("UC1", studio_last=date(2026, 11, 14), now=self.NOW).date()
+        self.assertEqual((a, b), (date(2026, 11, 15), date(2026, 11, 16)))
+
+    def test_first_video_on_empty_channel_goes_to_the_nearest_day(self) -> None:
+        self.assertEqual(schedule.slot("UC9", at="18:00", now=self.NOW, step=3).date(), date(2026, 11, 11),
+                         "шаг считается от последнего ролика; своего нет — ближайший день")
+
+    def test_bad_step_values(self) -> None:
+        self.assertEqual([schedule.clamp_step(x) for x in (0, -3, "x", None, 2, "4", 99)], [1, 1, 1, 1, 2, 4, 30])
+
+    def test_plan_dates_continue_with_the_step(self) -> None:
+        plan = schedule.create_plan(["2026-11-15", "2026-11-17"], "", step=2)
+        got = [schedule.take_plan_date(plan)[0] for _ in range(5)]
+        self.assertEqual(got, [date(2026, 11, 15), date(2026, 11, 17), date(2026, 11, 19), date(2026, 11, 21), date(2026, 11, 23)])
+        self.assertEqual(schedule.plan_step(plan), 2)
+        self.assertEqual(schedule.plan_step(""), 1)
+        self.assertEqual(schedule.plan_step("нет такого"), 1)
+
+    def test_old_plan_without_step_is_daily(self) -> None:
+        plan = schedule.create_plan(["2026-11-15"], "")
+        self.assertEqual([schedule.take_plan_date(plan)[0] for _ in range(3)],
+                         [date(2026, 11, 15), date(2026, 11, 16), date(2026, 11, 17)])
+
+    def test_config_keeps_step_in_range(self) -> None:
+        from engine.core.config import _normalize
+
+        self.assertEqual(_normalize({})["broll_publish_step"], 1)
+        self.assertEqual(_normalize({"slides_publish_step": "3"})["slides_publish_step"], 3)
+        self.assertEqual(_normalize({"broll_publish_step": 0})["broll_publish_step"], 1)
+        self.assertEqual(_normalize({"broll_publish_step": 500})["broll_publish_step"], 30)
+
+    def test_run_passes_step_to_slot(self) -> None:
+        import inspect
+
+        from engine.publish import run
+
+        src = inspect.getsource(run)
+        self.assertIn("plan_step", src)
+        self.assertIn("step=int(state.get(\"plan_step\") or 1)", src)
+
+
 class StudioParseTests(unittest.TestCase):
     def test_private_and_unlisted_do_not_set_schedule(self) -> None:
         self.assertTrue(youtube.counts_for_schedule("… — Public 10 Nov 2026 Published 32 1"))
@@ -728,29 +789,29 @@ class AcceptAllInvitesTest(unittest.TestCase):
         self.assertFalse(pub._title_in("ПОГРУЗИТЕСЬ В МИР СПОКОЙНОГО СНА!", acc))
         self.assertFalse(pub._title_in("", acc))
 
-    def test_second_video_not_revisited(self):
-        """Две выкладки, один соавтор: первый заход принял оба приглашения — второй раз в Studio не идём."""
+    def test_every_owner_pair_is_accepted_even_with_the_same_title(self):
+        """Два канала-владельца одного человека, один соавтор, ОДИНАКОВОЕ название ролика: ссылка у каждой пары своя,
+        принимать надо обе (раньше вторую пропускали «по названию» — она оставалась в «Pending acceptance»)."""
         calls = []
 
         def fake_accept(cdp, ch, link, *, title="", cancel=None):
-            calls.append(title)
-            return ["Ролик первый про сон и тишину", "Ролик второй про дождь и уют"]
+            calls.append(link)
+            return ["Один и тот же ролик с длинным названием"]
 
         co = registry.Target(profile_id="pc", profile="№3", channel=registry.Channel(id="UCco", name="Соавтор"))
         t1 = registry.Target(profile_id="p1", profile="№8", channel=registry.Channel(id="UC1", name="А"))
         t2 = registry.Target(profile_id="p1", profile="№8", channel=registry.Channel(id="UC2", name="Б"))
-        results = {t1.key: {"status": pub.DONE, "title": "Ролик первый про сон и тишину", "invites": {co.key: "L"}},
-                   t2.key: {"status": pub.DONE, "title": "Ролик второй про дождь и уют", "invites": {co.key: "L"}}}
+        results = {t1.key: {"status": pub.DONE, "title": "Один и тот же ролик с длинным названием", "invites": {co.key: "L1"}},
+                   t2.key: {"status": pub.DONE, "title": "Один и тот же ролик с длинным названием", "invites": {co.key: "L2"}}}
         req = mock.Mock(adspower=("k", "u"), visible=False)
         ap = mock.MagicMock()
         ap.__enter__.return_value = ap
         with mock.patch.object(pub, "AdsPower", return_value=ap), \
                 mock.patch.object(youtube, "accept_coauthor", side_effect=fake_accept):
             pub._accept_coauthors(req, [t1, t2], [co], results, lambda **_: None, None)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls, ["L1", "L2"], "каждая ссылка-приглашение открыта")
         for t in (t1, t2):
             self.assertIn(co.key, results[t.key]["coauthors_ok"])
-            self.assertFalse(results[t.key].get("coauthors_failed"))
         self.assertEqual(pub.coauthor_warnings([t1, t2], results), [])
 
 
@@ -1272,3 +1333,27 @@ class SetThumbnailTest(unittest.TestCase):
 
         with self.assertRaises(CancelledError):
             self._run(cancelled)
+
+
+class AuditPlaylistErrorPathTest(unittest.TestCase):
+    """Сбой при выставлении плейлиста не должен превращаться в NameError (LayoutError не был импортирован)."""
+
+    def test_layout_error_is_reraised_not_name_error(self) -> None:
+        from engine.publish.studio_kit import LayoutError
+
+        page = mock.MagicMock()
+        page.locator.return_value.first.inner_text.return_value = ""  # плейлиста на ролике нет
+        job = youtube.UploadJob(file=Path("/x.mp4"), title="Т", description="Д", thumbnail=None,
+                                publish_at=datetime(2030, 1, 1, tzinfo=schedule.MSK), playlist_hint=["Для вас"], coauthors=[])
+        with mock.patch.object(youtube, "_pick_playlist", side_effect=LayoutError("нет поля")):
+            with self.assertRaises(LayoutError):
+                youtube._audit_playlist(page, "https://youtu.be/abcdefghijk", job, None)
+
+    def test_other_errors_become_a_note(self) -> None:
+        page = mock.MagicMock()
+        page.locator.return_value.first.inner_text.return_value = ""
+        job = youtube.UploadJob(file=Path("/x.mp4"), title="Т", description="Д", thumbnail=None,
+                                publish_at=datetime(2030, 1, 1, tzinfo=schedule.MSK), playlist_hint=["Для вас"], coauthors=[])
+        with mock.patch.object(youtube, "_pick_playlist", side_effect=RuntimeError("что-то странное")):
+            notes = youtube._audit_playlist(page, "https://youtu.be/abcdefghijk", job, None)
+        self.assertTrue(notes and "поставь в Studio" in notes[0])

@@ -16,7 +16,7 @@ export function CommentsCard() {
       description="Отметь каналы, где ответить зрителям, — галочка у профиля отмечает все его каналы. Спам, ссылки и оскорбления пропускаются; сначала — вариант ответа, который предложил YouTube, иначе пишет нейросеть в стиле канала."
     >
       <div className="stack">
-        <ChannelPicker value={picked} onChange={setPicked} />
+        <ChannelPicker value={picked} onChange={setPicked} scope="comments" />
         <div className="row gap-sm">
           <Button
             variant="primary"

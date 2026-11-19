@@ -62,6 +62,7 @@ class Stats:
     views_48h: int | None = None
     watch_hours: float | None = None  # за всё время
     views_total: int | None = None  # за всё время
+    scheduled: int | None = None  # запланировано, но ещё не вышло (страница «Контент»)
     synced_at: float = 0.0
     error: str = ""
     history: list[dict] = field(default_factory=list)
@@ -200,6 +201,11 @@ def read_channel(page, channel, cancel: CancelToken | None = None) -> Stats:
         log(f"Аналитика {channel.handle}: таблица «за всё время» не загрузилась — часы просмотра не обновлены")
     if st.subscribers is None and st.views_48h is None and st.watch_hours is None:
         raise AnalyticsError("цифры на страницах аналитики не нашлись (Studio поменяла вёрстку?)")
+    pause(cancel)
+    try:  # запланированные ролики — отдельным чтением; не вышло — столбец остаётся прежним, остальное не страдает
+        st.scheduled = youtube.count_scheduled(page, channel.id)
+    except Exception as exc:
+        log(f"Аналитика {channel.handle}: запланированные ролики не прочитались ({str(exc)[:100]})")
     return st
 
 
@@ -223,7 +229,7 @@ def collect(cdp_url: str, channels: list, *, cancel: CancelToken | None = None, 
             except (youtube.StudioError, youtube.NeedsUser, AnalyticsError) as exc:
                 st = Stats(channel_id=ch.id, name=ch.name, handle=ch.handle, error=str(exc)[:300])
             log(f"Аналитика {ch.name} ({ch.handle}): подписчиков {st.subscribers}, часов {st.watch_hours}, "
-                f"за 48 ч {st.views_48h}" + (f" — {st.error}" if st.error else ""))
+                f"за 48 ч {st.views_48h}, запланировано {st.scheduled}" + (f" — {st.error}" if st.error else ""))
             out.append(st)
             if on_channel:
                 on_channel(st)
@@ -252,12 +258,14 @@ def save_one(st: Stats) -> Stats:
         cur = dict(old)
         cur.update({k: v for k, v in asdict(st).items() if k not in ("history", "channel_id")})
         if st.error:  # не затираем последние известные цифры
-            for k in ("subscribers", "views_48h", "watch_hours", "views_total"):
+            for k in ("subscribers", "views_48h", "watch_hours", "views_total", "scheduled"):
                 if getattr(st, k) is None:
                     cur[k] = old.get(k)
             cur["synced_at"] = old.get("synced_at", 0.0)
             cur["error_at"] = time.time()
         else:
+            if st.scheduled is None:  # не прочиталось в этот раз — оставляем прежнее
+                cur["scheduled"] = old.get("scheduled")
             cur["synced_at"] = st.synced_at or time.time()
             hist = list(old.get("history") or [])
             hist.append({"t": cur["synced_at"], "subscribers": st.subscribers, "views_48h": st.views_48h,

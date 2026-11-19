@@ -10,12 +10,12 @@
 
 from __future__ import annotations
 
-import json
 import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from engine.core.jsonish import json_dict
 from engine.core.cancel import CancelToken
 from engine.core.logutil import log
 from engine.publish import human
@@ -136,11 +136,7 @@ def generate(name: str, titles: list[str], count: int, *, language: str = "", as
 
 
 def parse(raw: str | None) -> list[Poll]:
-    m = re.search(r"\{.*\}", raw or "", re.S)
-    try:
-        items = (json.loads(m.group(0)).get("polls") or []) if m else []
-    except (json.JSONDecodeError, AttributeError):
-        items = []
+    items = json_dict(raw).get("polls") or []
     return [p for p in (clean(it) for it in items) if p]
 
 

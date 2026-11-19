@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import threading
 from pathlib import Path
 
+from engine.core.jsonish import json_dict
 from engine.core.cancel import CancelledError
 from engine.core.logutil import log
 from engine.core.threads import ThreadPoolExecutor
@@ -101,11 +101,7 @@ class AiQuality:
         except Exception as exc:
             log(f"AI-кадры: LLM не написал описания ({exc}) — беру простые")
             return []
-        m = re.search(r"\{.*\}", raw or "", re.S)
-        try:
-            data = json.loads(m.group(0)) if m else {}
-        except json.JSONDecodeError:
-            data = {}
+        data = json_dict(raw)
         got = [str(x).strip() for x in (data.get("prompts") or []) if isinstance(x, str)]
         return got[: len(items)]
 

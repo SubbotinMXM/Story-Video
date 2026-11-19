@@ -87,6 +87,7 @@ def studio_page(cdp_url: str):
         context = browser.contexts[0] if browser.contexts else browser.new_context()
         page = context.new_page()
         page.bring_to_front()
+        fit_window(page)
         try:
             yield page
         finally:
@@ -94,6 +95,52 @@ def studio_page(cdp_url: str):
                 page.close()
             except Exception:
                 pass
+
+
+MIN_WINDOW = (1200, 650)  # окно меньше — Studio (редакторы заставки, подсказок, дат) не помещается: растим. 1280×713 у рабочих профилей — не трогаем
+TARGET_WINDOW = (1366, 860)  # до какого размера растим
+
+
+def fit_window(page, *, force: bool = False) -> tuple[int, int]:
+    """Окно браузера профиля — не меньше MIN_WINDOW. В профилях AdsPower окно бывает крошечным (800×513 у профиля
+    «Жизненные рассказы 2»): редактор конечной заставки не помещается, кнопка «Save» оказывается за краем экрана,
+    и выкладка падает «element is outside of the viewport». Сначала меняем само окно (как это сделал бы человек),
+    не вышло — размер области страницы. → (ширина, высота) области страницы после правки."""
+    min_w, min_h = MIN_WINDOW
+    want_w, want_h = TARGET_WINDOW
+
+    def size() -> tuple[int, int]:
+        w, h = page.evaluate("() => [window.innerWidth, window.innerHeight]")
+        return int(w), int(h)
+
+    try:
+        w, h = size()
+        if not force and w >= min_w and h >= min_h:
+            return w, h
+        log(f"Окно браузера мало ({w}×{h}) — увеличиваю до {want_w}×{want_h}")
+        try:
+            cdp = page.context.new_cdp_session(page)
+            win = cdp.send("Browser.getWindowForTarget")["windowId"]
+            cdp.send("Browser.setWindowBounds", {"windowId": win, "bounds": {"windowState": "normal"}})
+            cdp.send("Browser.setWindowBounds", {"windowId": win, "bounds": {"width": want_w + 16, "height": want_h + 110}})
+            page.wait_for_timeout(700)
+            w, h = size()
+            if w < want_w or h < want_h:  # экран меньше — на весь экран
+                cdp.send("Browser.setWindowBounds", {"windowId": win, "bounds": {"windowState": "maximized"}})
+                page.wait_for_timeout(700)
+                w, h = size()
+        except Exception as exc:
+            log(f"Окно браузера не удалось изменить ({str(exc)[:100]})")
+        if w < want_w or h < want_h:
+            # окно не растёт (меньше экрана, ограничение профиля) — задаём размер области страницы
+            page.set_viewport_size({"width": max(w, want_w), "height": max(h, want_h)})
+            page.wait_for_timeout(300)
+            w, h = size()
+        log(f"Окно браузера: {w}×{h}")
+        return w, h
+    except Exception as exc:
+        log(f"Размер окна не проверен ({str(exc)[:100]})")
+        return 0, 0
 
 
 def _check_signed_in(page) -> None:
@@ -286,6 +333,52 @@ def _last_date(page, channel_id_: str) -> str:
         new Intl.DateTimeFormat(document.documentElement.lang || 'en', {month: 'short'}).format(new Date(2026, m, 15)))""")
     days = [d for r in rows if counts_for_schedule(r) for d in find_dates(r, months)]
     return max(days).isoformat() if days else ""
+
+
+# слово «запланировано» в интерфейсе Studio на разных языках (строка ролика в «Контенте»)
+_SCHEDULED_WORDS = re.compile(r"scheduled|запланир|отложен|programad|geplant|programm|zaplanow|programat|заплануван|planlagt|planerad",
+                              re.I)
+SCHEDULED_PAGES = 10  # страниц «Контента» (по 30 роликов) — запланированных больше 300 не бывает
+
+
+def scheduled_in_rows(rows: list[str], months: list[str], today: date) -> tuple[int, bool]:
+    """Строки роликов из «Контента» → (сколько запланировано, все ли строки запланированные).
+    Запланированный — со словом «Scheduled» (на языке Studio) или с будущей датой у ролика не в черновиках/«по ссылке»."""
+    n = 0
+    for row in rows:
+        hit = bool(_SCHEDULED_WORDS.search(row)) or (
+            counts_for_schedule(row) and any(d > today for d in find_dates(row, months)))
+        n += hit
+    return n, bool(rows) and n == len(rows)
+
+
+def count_scheduled(page, channel_id_: str) -> int | None:
+    """Сколько роликов на канале запланировано, но ещё не вышло. Только чтение: страница «Контент» открыта по дате
+    (запланированные — сверху), считаем строки; пока вся страница запланированная — листаем дальше. None — не прочиталось."""
+    from engine.publish.schedule import MSK
+
+    page.goto(f"{STUDIO}/channel/{channel_id_}/videos/upload", wait_until="domcontentloaded")
+    try:
+        page.wait_for_selector("ytcp-video-row, .empty-state", timeout=25000)
+    except Exception:
+        return None
+    page.wait_for_timeout(2000)
+    months = page.evaluate("""() => [...Array(12).keys()].map(m =>
+        new Intl.DateTimeFormat(document.documentElement.lang || 'en', {month: 'short'}).format(new Date(2026, m, 15)))""")
+    today = datetime.now(MSK).date()
+    total = 0
+    for _ in range(SCHEDULED_PAGES):
+        rows = page.eval_on_selector_all("ytcp-video-row", "els => els.map(e => e.innerText.replace(/\\s+/g, ' ').slice(-200))")
+        n, every = scheduled_in_rows(rows, months, today)
+        total += n
+        if not every:
+            break  # дальше пошли вышедшие — запланированные кончились
+        nxt = page.locator("#navigate-after:not([disabled])").first
+        if not nxt.count() or nxt.get_attribute("aria-disabled") == "true":
+            break
+        nxt.click()
+        page.wait_for_timeout(2500)
+    return total
 
 
 # ролики с ограниченным доступом, по ссылке и черновики расписание канала не задают — только вышедшие и запланированные
@@ -1131,6 +1224,8 @@ def _check_file_uploaded(page, channel_id: str, url: str, title: str) -> bool:
 def _audit_playlist(page, url: str, job: UploadJob, cancel) -> list[str]:
     """После сохранения — прочитать плейлист на странице видео и, если он не стоит, поставить (14.11: на повторах
     плейлист снимался). Единственный плейлист канала должен быть выбран; не вышло — пометка, а не молчание."""
+    from engine.publish.studio_kit import LayoutError
+
     names = [str(x).strip() for x in (job.playlist_hint or []) if str(x).strip()]
     if len(names) != 1:
         return []  # несколько плейлистов / нет ни одного — это отдельная пометка при выборе
@@ -1527,7 +1622,7 @@ ACCEPT_ROUNDS = 12  # больше приглашений от одного ка
 
 
 def accept_coauthor(cdp_url: str, channel, invite_link: str, *, title: str = "",
-                    cancel: CancelToken | None = None) -> list[str]:
+                    cancel: CancelToken | None = None, allow_none: bool = False) -> list[str]:
     """В профиле соавтора: открыть ссылку-приглашение от имени его канала и принять ВСЕ ждущие приглашения
     от канала-поставщика. Ссылка — на пару каналов, не на ролик: одно приглашение — окно «Accept»,
     несколько — список «Collaboration requests»; тогда открываем ролики списка по очереди и принимаем каждый.
@@ -1559,9 +1654,45 @@ def accept_coauthor(cdp_url: str, channel, invite_link: str, *, title: str = "",
                 if len(accepted) > 1:
                     log(f"Соавтор {channel.name}: принято приглашений от канала — {len(accepted)}")
                 return accepted
+            if allow_none:
+                return []  # проверка: ждущих нет — значит, всё принято
             raise StudioError("ждущих приглашений нет — возможно, уже принято или отозвано"
                               + (f" (ролик «{title[:60]}»)" if title else ""))
     return accepted
+
+
+def accept_coauthor_links(cdp_url: str, channel, links: list[str], *,
+                          cancel: CancelToken | None = None) -> dict[str, list[str] | str]:
+    """Тот же соавтор, несколько ссылок-приглашений (от разных каналов-владельцев) за один заход в профиль:
+    для каждой принимаются ВСЕ ждущие приглашения от канала. → {ссылка: [принятые ролики] (пусто — ждущих не было)
+    или текст ошибки}. Одна ссылка не получилась — остальные всё равно проходим."""
+    from engine.publish.studio_kit import set_channel, step
+
+    set_channel(channel.handle or channel.id)
+    out: dict[str, list[str] | str] = {}
+    with studio_page(cdp_url) as page:
+        with step(page, "соавтор: переключение на канал"):
+            switch_to(page, channel, cancel=cancel)
+        for link in links:
+            if cancel:
+                cancel.check()
+            accepted: list[str] = []
+            try:
+                with step(page, "соавтор: ссылка-приглашение и «Принять»"):
+                    for _ in range(ACCEPT_ROUNDS):
+                        name = _accept_one(page, link, cancel, skip=accepted)
+                        if name is None:
+                            break
+                        accepted.append(name)
+                        log(f"Соавторство принято: {channel.name} {channel.handle} — «{name[:80]}»")
+                out[link] = accepted
+            except NeedsUser:
+                raise  # Google просит пароль — для всех остальных ссылок так же
+            except Exception as exc:
+                if browser_lost(exc) or (cancel is not None and cancel.is_cancelled()):
+                    raise
+                out[link] = " ".join(str(exc).split())[:300] or exc.__class__.__name__
+    return out
 
 
 def _accept_one(page, invite_link: str, cancel, skip: list[str] = ()) -> str | None:

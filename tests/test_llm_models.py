@@ -186,6 +186,25 @@ class ReasoningTests(ClientFallbackTests):
         self.assertNotIn("reasoning_effort", bodies[2])
         self.assertNotIn("reasoning_effort", bodies[3], "план рерайта думает в полную силу")
 
+    def test_pool_judging_of_photos_uses_low_reasoning_other_vision_does_not(self) -> None:
+        """Лист кадров (коллаж/надпись/водяной знак) — короткий JSON: замер 18 из 18 подделок найдено и при «low»
+        (полное размышление давало 2 ложных срабатывания на 24 чистых и на 24% больше токенов ответа)."""
+        bodies = []
+
+        def handler(req):
+            bodies.append(__import__("json").loads(req.content))
+            return self._ok()
+
+        c = self._client(handler)
+        c.complete_vision(label="judge_pool", system="s", user_text="u", image_b64="AAAA")
+        c.complete_vision(label="judge", system="s", user_text="u", image_b64="AAAA")
+        self.assertEqual(bodies[0].get("reasoning_effort"), "low")
+        self.assertNotIn("reasoning_effort", bodies[1], "прочие оценки кадров — как раньше")
+        from engine.slides import llm_models
+
+        self.assertEqual(llm_models.reasoning_for("judge_pool", vision=True), "low")
+        self.assertEqual(llm_models.reasoning_for("judge_pool"), "low" if llm_models.tier_of("judge_pool") == "light" else "")
+
     def test_unsupported_reasoning_param_dropped(self) -> None:
         bodies = []
 

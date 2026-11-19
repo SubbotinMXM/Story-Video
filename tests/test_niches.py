@@ -235,9 +235,171 @@ class NicheTests(unittest.TestCase):
         self.assertEqual((niches.Filters().results, niches.Filters().max_subs), (15, 10_000))
         self.assertEqual(niches.Filters.of({"max_subs": -5}).subs_limit, 0)
 
+    def test_new_search_languages_have_regions(self) -> None:
+        for lang, region in (("ro", "RO"), ("nl", "NL"), ("uk", "UA")):
+            api = FakeApi()
+            with mock.patch("engine.publish.polls.ask", return_value='{"queries": ["q"]}'), \
+                    mock.patch("engine.rewrite.channels._Api", lambda keys: api):
+                niches.find("Н", ["слово"], niches.Filters.of({"language": lang}), ["key"], None)
+            first = next(p for path, p in api.calls if path == "search")
+            self.assertEqual((first["relevanceLanguage"], first["regionCode"]), (lang, region))
+
+    def test_foreign_language_without_translation_warns(self) -> None:
+        api = FakeApi()
+        with mock.patch("engine.publish.polls.ask", side_effect=RuntimeError("нет нейросети")), \
+                mock.patch("engine.rewrite.channels._Api", lambda keys: api):
+            res = niches.find("Н", ["слово"], niches.Filters.of({"language": "ro"}), ["key"], None)
+        self.assertTrue(res["notes"] and "ro" in res["notes"][0], "видно, что слова не переведены")
+        self.assertEqual(res["queries"], ["слово"])
+        with mock.patch("engine.publish.polls.ask", side_effect=RuntimeError("нет")), \
+                mock.patch("engine.rewrite.channels._Api", lambda keys: FakeApi()):
+            ru = niches.find("Н", ["слово"], niches.Filters.of({"language": "ru"}), ["key"], None)
+        self.assertNotIn("notes", ru, "русский — перевод не нужен, предупреждения нет")
+
     def test_no_keys_is_error(self) -> None:
         with self.assertRaises(ValueError):
             niches.find("Ниша", [], niches.Filters(), [], None)
+
+
+class SourceApi(FakeApi):
+    """FakeApi + канал-образец UCsource: его читают по @handle, id или ссылке на ролик."""
+
+    SRC_ID = "UC" + "s" * 22
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.channels["UCsource"] = {"subs": 800, "created": 60, "found": (150_000, 25), "uploads": every(10, 3, 150_000)}
+        self.source_found = True
+
+    def _src(self) -> dict:
+        return {"id": self.SRC_ID, "snippet": {"title": "Образец", "description": "Судьбы актрис", "defaultLanguage": "ru"},
+                "statistics": {"subscriberCount": "800", "videoCount": "10"},
+                "brandingSettings": {"channel": {"keywords": 'актрисы "судьбы звёзд" кино'}},
+                "contentDetails": {"relatedPlaylists": {"uploads": "UUUCsource"}}}
+
+    def get(self, path: str, params: dict) -> dict:
+        if path == "channels" and ("forHandle" in params or params.get("id") == self.SRC_ID):
+            self.calls.append((path, params))
+            return {"items": [self._src()] if self.source_found else []}
+        if path == "videos" and params["id"] == "abcdefghijk":
+            self.calls.append((path, params))
+            return {"items": [{"id": "abcdefghijk", "snippet": {"channelId": self.SRC_ID}}]}
+        return super().get(path, params)
+
+
+class SimilarTests(unittest.TestCase):
+    def setUp(self) -> None:
+        shutil.rmtree(publish_dir(), ignore_errors=True)
+        self.addCleanup(shutil.rmtree, publish_dir(), True)
+
+    def _similar(self, api, url="https://www.youtube.com/@obrazets", answer=None, **kw):
+        # исходные ролики образца: у FakeApi канал UCsource — id «UCsource», а образец отдаётся как SRC_ID
+        orig = api._video
+
+        def video(vid):
+            return orig(vid.replace(api.SRC_ID, "UCsource"))
+
+        api._video = video
+        api.channels[api.SRC_ID] = api.channels["UCsource"]
+        ask = mock.MagicMock(return_value=answer if answer is not None else
+                             json.dumps({"topic": "судьбы актрис", "language": "ru", "queries": ["судьба актрисы", "актрисы СССР"]},
+                                        ensure_ascii=False))
+        with mock.patch("engine.rewrite.channels._Api", lambda keys: api), mock.patch("engine.publish.polls.ask", ask):
+            res = niches.find_similar(url, niches.Filters.of(kw.pop("flt", {})), ["key"], None, **kw)
+        return res, ask
+
+    def test_same_criteria_and_source_excluded(self) -> None:
+        res, _ask = self._similar(SourceApi())
+        ids = [c["id"] for c in res["channels"]]
+        self.assertNotIn(SourceApi.SRC_ID, ids, "образец в выдаче быть не должен")
+        self.assertIn("UCyoung", ids)
+        self.assertNotIn("UCbig", ids, "критерии те же: просмотры ниже подписчиков — мимо")
+        self.assertNotIn("UCshort", ids)
+        self.assertEqual(res["similar"]["title"], "Образец")
+        self.assertEqual(res["similar"]["topic"], "судьбы актрис")
+        self.assertEqual(res["niche"], "Похожие на «Образец»")
+        self.assertEqual(niches.runs()[0]["similar"]["id"], SourceApi.SRC_ID, "сохранено в историю")
+
+    def test_queries_are_model_queries_plus_best_video_titles(self) -> None:
+        api = SourceApi()
+        res, ask = self._similar(api)
+        self.assertEqual(res["queries"][:2], ["судьба актрисы", "актрисы СССР"])
+        self.assertEqual(len(res["queries"]), 2 + niches.TITLE_QUERIES)
+        self.assertTrue(all(q.startswith("Ролик ") for q in res["queries"][2:]), "названия лучших роликов образца")
+        self.assertLessEqual(len(res["queries"]), niches.MAX_QUERIES)
+        self.assertIn("судьбы звёзд", ask.call_args.args[1], "ключевые слова канала уходят нейросети")
+
+    def test_language_from_source_unless_chosen(self) -> None:
+        answer = json.dumps({"topic": "t", "language": "es", "queries": ["historias"]})
+        api = SourceApi()
+        res, _ = self._similar(api, answer=answer)
+        searches = [p for path, p in api.calls if path == "search"]
+        self.assertEqual((searches[0]["relevanceLanguage"], searches[0]["regionCode"]), ("es", "ES"))
+        self.assertEqual(res["similar"]["language"], "es")
+        api2 = SourceApi()
+        res2, _ = self._similar(api2, answer=answer, auto_language=False, flt={"language": "de"})
+        self.assertEqual(res2["similar"]["language"], "de", "язык выбрал пользователь — он главнее")
+
+    def test_url_forms(self) -> None:
+        for url in ("https://www.youtube.com/@obrazets", f"https://www.youtube.com/channel/{SourceApi.SRC_ID}",
+                    "https://youtu.be/abcdefghijk", "https://www.youtube.com/watch?v=abcdefghijk&t=5s"):
+            res, _ = self._similar(SourceApi(), url=url)
+            self.assertEqual(res["similar"]["id"], SourceApi.SRC_ID, url)
+
+    def test_bad_input_errors_are_human(self) -> None:
+        api = SourceApi()
+        with mock.patch("engine.rewrite.channels._Api", lambda keys: api):
+            with self.assertRaisesRegex(niches.SimilarError, "Вставь ссылку"):
+                niches.find_similar("  ", niches.Filters(), ["k"], None)
+            with self.assertRaisesRegex(niches.SimilarError, "не понял ссылку"):
+                niches.find_similar("https://example.com/x", niches.Filters(), ["k"], None)
+            api.source_found = False
+            with self.assertRaisesRegex(niches.SimilarError, "не найден"):
+                niches.find_similar("https://www.youtube.com/@net", niches.Filters(), ["k"], None)
+        with self.assertRaises(ValueError):
+            niches.find_similar("https://www.youtube.com/@x", niches.Filters(), [], None)
+
+    def test_without_llm_uses_titles_and_keywords(self) -> None:
+        api = SourceApi()
+        res, _ = self._similar(api, answer="")  # нейросеть вернула пустое
+        self.assertTrue(res["queries"], "запросы есть и без нейросети")
+        self.assertTrue(any(q.startswith("Ролик ") for q in res["queries"]))
+        self.assertIn("судьбы звёзд", res["queries"], "фразы из ключевых слов канала")
+
+    def test_source_without_long_videos_is_error(self) -> None:
+        api = SourceApi()
+        api.channels["UCsource"]["uploads"] = every(5, 2, 100_000, 0.5)  # одни Shorts
+        with self.assertRaisesRegex(niches.SimilarError, "нет длинных роликов"):
+            self._similar(api)
+
+    def test_job_runner_wires_similar_mode(self) -> None:
+        from engine.core.cancel import CancelToken
+        from server import runners
+
+        with self.assertRaisesRegex(ValueError, "YouTube Data API"):
+            runners._niches_job({}, {"similar_url": "https://www.youtube.com/@x"}, {})
+        seen = {}
+
+        def fake(url, f, keys, llm, **kw):
+            seen.update(url=url, lang=f.language, max_subs=f.max_subs, auto=kw["auto_language"])
+            return {"channels": [], "stats": {"videos": 1, "channels": 1, "checked": 0, "passed": 0},
+                    "similar": {"title": "Образец"}}
+
+        cfg = {"youtube_api_keys": "k1"}
+        with mock.patch.object(niches, "find_similar", fake):
+            title, run = runners._niches_job(cfg, {"similar_url": "https://www.youtube.com/@x",
+                                                   "filters": {"language": "auto", "max_subs": 5000}}, {})
+            out = run(None, lambda *a: None, CancelToken())
+            self.assertTrue(title.startswith("Поиск ниш: похожие"))
+            self.assertEqual((seen["auto"], seen["max_subs"]), (True, 5000))
+            self.assertIn("Образец", out["summary"])
+            _t, run2 = runners._niches_job(cfg, {"similar_url": "u", "filters": {"language": "de"}}, {})
+            run2(None, lambda *a: None, CancelToken())
+            self.assertEqual((seen["auto"], seen["lang"]), (False, "de"), "язык выбран вручную — авто выключено")
+        with mock.patch.object(niches, "find_similar", side_effect=niches.SimilarError("Канал не найден: u")):
+            _t, run3 = runners._niches_job(cfg, {"similar_url": "u"}, {})
+            with self.assertRaisesRegex(ValueError, "Канал не найден"):
+                run3(None, lambda *a: None, CancelToken())
 
 
 if __name__ == "__main__":

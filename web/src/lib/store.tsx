@@ -34,6 +34,8 @@ type SettingsApi = {
   saveState: SaveState;
   update: (patch: Partial<Settings>) => void;
   flush: () => Promise<void>;
+  /** Настройки целиком пришли с сервера (загрузили шаблон) — показать их, ничего не сохраняя. */
+  replace: (s: Settings) => void;
 };
 
 const SettingsCtx = createContext<SettingsApi | null>(null);
@@ -282,7 +284,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const toastApi = useMemo(() => ({ toasts, push, dismiss }), [toasts, push, dismiss]);
   const settingsApi = useMemo(
-    () => ({ meta, settings, saveState, update, flush }),
+    () => ({ meta, settings, saveState, update, flush, replace: setSettings }),
     [meta, settings, saveState, update, flush],
   );
   const jobsApi = useMemo(() => ({ jobs, logs, connected, enqueue }), [jobs, logs, connected, enqueue]);

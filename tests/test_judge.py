@@ -101,6 +101,22 @@ class JudgeTests(unittest.TestCase):
             sheet = jm.contact_sheet([frames, [image(Path(tmp) / "i.jpg", (10, 120, 10))]])
         self.assertGreater(len(sheet), 1000)
 
+    def test_photo_only_sheet_is_narrower_than_sheet_with_video(self) -> None:
+        """Фото — один кадр в строке: пустую половину листа не отправляем (токены картинки); у видео — два кадра."""
+        import io
+
+        from PIL import Image
+
+        from engine.slides import judge as jm
+
+        with tempfile.TemporaryDirectory() as tmp:
+            photos = [[image(Path(tmp) / f"p{k}.jpg", (10 * k, 120, 10))] for k in range(1, 4)]
+            narrow = Image.open(io.BytesIO(jm.contact_sheet(photos)))
+            wide = Image.open(io.BytesIO(jm.contact_sheet([photos[0] * 2, photos[1]])))
+        self.assertLess(narrow.width, wide.width * 0.7, "лист из одних фото заметно уже")
+        self.assertEqual(narrow.height, 3 * (jm._TILE_H + 10))
+        self.assertGreaterEqual(narrow.width, 70 + jm._TILE_W, "кадр помещается целиком")
+
     def test_low_context_is_not_ok(self) -> None:
         from engine.slides.judge import Verdict
 

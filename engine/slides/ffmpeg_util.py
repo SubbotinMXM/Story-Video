@@ -52,6 +52,17 @@ def find_ffprobe() -> str:
     )
 
 
+NICE_BIN = "/usr/bin/nice"
+RENDER_NICE = "10"
+
+
+def low_priority(cmd: list[str]) -> list[str]:
+    """Тяжёлая команда (кодирование ролика) — с пониженным приоритетом: Mac остаётся отзывчивым,
+    браузер и сама программа не тормозят. Скорость сборки почти та же: ffmpeg и так занимает все ядра,
+    приоритет влияет, только когда им делится кто-то ещё."""
+    return [NICE_BIN, "-n", RENDER_NICE, *cmd] if Path(NICE_BIN).is_file() else list(cmd)
+
+
 @functools.lru_cache(maxsize=8)
 def has_filter(name: str, ffmpeg: str | None = None) -> bool:
     bin_path = ffmpeg or find_ffmpeg()

@@ -8,10 +8,10 @@
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 
+from engine.core.jsonish import json_dict
 from engine.core.cancel import CancelToken
 from engine.core.logutil import log
 
@@ -259,12 +259,4 @@ def _ask(system: str, user: str, llm, subs: list[tuple[str, str]], cancel: Cance
         client.close()
 
 
-def _parse(raw: str) -> dict:
-    m = re.search(r"\{.*\}", raw or "", re.S)
-    if not m:
-        return {}
-    try:
-        data = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
+_parse = json_dict

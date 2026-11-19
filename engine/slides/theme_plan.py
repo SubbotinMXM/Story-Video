@@ -7,12 +7,12 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from engine.core.jsonish import json_dict
 from engine.slides.llm_client import LLMClient
 from engine.core.logutil import log
 from engine.slides.story_context import StoryContext, extract_story_context
 
 THEME_NAME = "theme.json"
-_JSON_FENCE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.I)
 
 QUERY_SYSTEM = """\
 You plan a documentary B-roll POOL for an entire narration.
@@ -308,17 +308,4 @@ def _str_list(raw: object) -> list[str]:
     return out
 
 
-def _parse_obj(raw: str) -> dict:
-    text = (raw or "").strip()
-    m = _JSON_FENCE.search(text)
-    if m:
-        text = m.group(1).strip()
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start < 0 or end <= start:
-            return {}
-        data = json.loads(text[start : end + 1])
-    return data if isinstance(data, dict) else {}
+_parse_obj = json_dict

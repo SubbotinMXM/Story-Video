@@ -56,6 +56,8 @@ class RenderRequest:
     subscribe: bool = False
     subscribe_path: Path | None = None
     subtitles: bool = False
+    # переходы между фото: calm — как раньше, flash — светлые вспышки (render_segment.TRANSITIONS)
+    transition: str = "calm"
     intro_dir: Path | None = None
     outro_dir: Path | None = None
     copy_to_desktop: bool = True
@@ -358,6 +360,7 @@ def build_silent(
                         dest=dest,
                         seed=seed,
                         fade_sec=fade_sec,
+                        transition=req.transition,
                     ),
                     label,
                 )
@@ -420,6 +423,7 @@ def export_chapters(
             footer=attribution_block(req.run_dir, language or detect_language(text) or ""),
             preset=_preset_chapters(req.run_dir, language or detect_language(text) or ""),
             base_text=base_text,
+            **_people_limits(req.run_dir),
         )
     except Exception as exc:  # без глав ролик всё равно готов
         log(f"Главы: не получилось ({exc})")
@@ -427,7 +431,7 @@ def export_chapters(
 
 
 def _preset_chapters(run_dir: Path, language: str) -> list[tuple[float, str]] | None:
-    """Режим «Звёзды»: главы — по героям («4:10 — Юрий Никулин»), LLM для них не нужен."""
+    """Ролик про нескольких людей: главы — по героям («4:10 — Юрий Никулин»), LLM для них не нужен."""
     try:
         raw = json.loads((run_dir / TIMELINE_NAME).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -436,7 +440,17 @@ def _preset_chapters(run_dir: Path, language: str) -> list[tuple[float, str]] | 
         return None  # один герой — обычные главы по смыслу, а не «Вступление — Ванга — Заключение»
     from engine.slides.stars_media import star_chapters
 
-    return star_chapters(raw, language) or None
+    chapters = star_chapters(raw, language)
+    return chapters if len(chapters) >= 3 else None  # меньше трёх YouTube не примет — главы по смыслу
+
+
+def _people_limits(run_dir: Path) -> dict:
+    """Ролик про людей: глав не больше 10 и не чаще, чем раз в полторы минуты (главы по смыслу, если героев мало)."""
+    try:
+        raw = json.loads((run_dir / TIMELINE_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {"cap": 10, "gap": 90.0} if isinstance(raw, dict) and raw.get("variant") == "stars" else {}
 
 
 def finish_video(

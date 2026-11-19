@@ -108,7 +108,14 @@ def _save(page, act, what: str) -> None:
         _close_unchanged(page, act)
         raise youtube.StudioError(f"{what}: Studio не даёт сохранить ({msg or 'кнопка Save недоступна'})")
     act(None)
-    human.click(page, save)
+    try:
+        human.click(page, save)
+    except Exception as exc:
+        if "outside of the viewport" not in str(exc).lower():
+            raise
+        # кнопка за краем маленького окна — увеличиваем окно/область страницы и нажимаем ещё раз
+        youtube.fit_window(page, force=True)
+        human.click(page, page.locator(SAVE).first)
     for _ in range(30):
         page.wait_for_timeout(1000)
         if not page.locator(MODAL).first.is_visible():
