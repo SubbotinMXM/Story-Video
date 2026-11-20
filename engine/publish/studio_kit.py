@@ -155,6 +155,9 @@ def step(page, name: str):
     Отмену, падение браузера и «нужен человек/лимит» пропускаем как есть (их разбирают выше)."""
     from engine.publish import youtube
 
+    from engine.publish.scan import beat
+
+    beat()
     log(f"Studio {current_channel()}: {name}…")
     report(name)
     try:

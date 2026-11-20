@@ -172,6 +172,18 @@ class CoverTest(unittest.TestCase):
         self.assertEqual(page.mouse.events[-1], ("up",), "после закрытия панели — обычный клик мышью")
         self.assertEqual(loc.clicked, 0)
 
+    def test_notice_window_got_it_is_pressed(self) -> None:
+        """Окно YouTube «Remember that anyone can see your posts» с кнопкой «Got it» закрывается мышью по кнопке."""
+        page = FakePage()
+        shown = [[640.0, 500.0, "Got it"], None]
+        page.evaluate = lambda js, arg=None: shown.pop(0) if shown else None
+        self.assertTrue(human.dismiss_notice(page))
+        self.assertEqual(page.mouse.events[-1], ("up",))
+        page2 = FakePage()
+        page2.evaluate = lambda js, arg=None: None
+        self.assertFalse(human.dismiss_notice(page2), "окна нет — ничего не нажимаем")
+        self.assertEqual(page2.mouse.events, [])
+
     def test_sticky_header_is_not_escaped(self) -> None:
         """Закреплённая шапка — не всплывашка: Escape не нажимаем (он мог бы закрыть окно загрузки)."""
         page = FakePage()

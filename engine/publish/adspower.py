@@ -75,6 +75,9 @@ class Session:
 BUSY_WAITS = (5, 15, 30, 40)  # «профиль занят» — освобождаем и ждём столько секунд между попытками
 
 
+GUARD_SEC = 10 * 60  # нет движения столько минут — браузер завис (большой файл при выборе в Studio идёт без отметок)
+
+
 class AdsPower:
     def __init__(self, api_key: str, base_url: str = "", *, transport: httpx.BaseTransport | None = None) -> None:
         self.base_url = (base_url or DEFAULT_URL).strip().rstrip("/")
@@ -82,7 +85,16 @@ class AdsPower:
         self._http = httpx.Client(base_url=self.base_url, timeout=_TIMEOUT, trust_env=False, transport=transport)
 
     def close(self) -> None:
+        self._end_guards()
         self._http.close()
+
+    def _end_guards(self) -> None:
+        for g in list(getattr(self, "_guards", {}).values()):
+            try:
+                g.__exit__(None, None, None)
+            except Exception:
+                pass
+        self._guards = {}
 
     def __enter__(self) -> AdsPower:
         return self
@@ -179,7 +191,24 @@ class AdsPower:
         self._guard(profile_id)
         session = self._start_retrying(profile_id, headless=headless)
         _claim(profile_id)
+        self._watch(profile_id)
         return session
+
+    def _watch(self, profile_id: str) -> None:
+        """Сторож зависаний: пока профиль открыт этим потоком, нет ни одного действия (пауза, клик, шаг, проверка
+        «Стоп») дольше GUARD_SEC — браузер завис: профиль закрывается, подвисшее действие обрывается ошибкой, выше
+        работа начинается заново. Так ночная работа не может простоять часами."""
+        if os.environ.get("STORY_VIDEO_NO_GUARD"):
+            return
+        from engine.publish.scan import guard
+
+        self._guards = getattr(self, "_guards", {})
+        old = self._guards.pop(profile_id, None)
+        if old is not None:
+            old.__exit__(None, None, None)
+        g = guard(self.api_key, self.base_url, profile_id, stall=GUARD_SEC, what="браузер профиля")
+        g.__enter__()
+        self._guards[profile_id] = g
 
     def _guard(self, profile_id: str) -> None:
         """Профиль занят другим процессом (программа выкладывает, а второй процесс — скрипт, вторая копия приложения —
@@ -223,6 +252,9 @@ class AdsPower:
         return Session(profile_id, ws, str(data.get("debug_port") or ""), str(data.get("webdriver") or ""))
 
     def stop(self, profile_id: str) -> None:
+        g = getattr(self, "_guards", {}).pop(profile_id, None)
+        if g is not None:
+            g.__exit__(None, None, None)
         self._guard(profile_id)
         self._call("POST", "/api/v2/browser-profile/stop", body={"profile_id": profile_id})
         _release(profile_id)

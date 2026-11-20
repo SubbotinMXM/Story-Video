@@ -39,6 +39,53 @@ class Pulse:
 
 STALL_SEC = 3 * 60
 
+# ---- сторож любой работы в браузере профиля (выкладка, голосования...) ----
+# Каждое действие (пауза, шаг, клик) отмечает «я жив» для своего потока. Нет отметок дольше предела — браузер завис
+# (у части действий Playwright нет своего предела по времени): профиль закрывается в AdsPower, зависшее действие
+# обрывается ошибкой «браузер закрылся», а выше работа начинается заново с того же места.
+_BEATS: dict[int, float] = {}
+GUARD_STALL = 4 * 60
+
+
+def beat() -> None:
+    """Отметка «поток работает» (дёшево, вызывается часто)."""
+    _BEATS[threading.get_ident()] = time.monotonic()
+
+
+class Hung(RuntimeError):
+    """Браузер профиля завис, сторож закрыл профиль (работу надо начать заново)."""
+
+
+class guard:  # noqa: N801 — контекстный менеджер
+    """with guard(key, url, profile_id): ... — следит за этим потоком. После выхода: .fired — сторож сработал."""
+
+    def __init__(self, api_key: str, url: str, profile_id: str, *, stall: float | None = None, what: str = "работа в браузере") -> None:
+        self.api_key, self.url, self.profile_id = api_key, url, profile_id
+        self.stall = GUARD_STALL if stall is None else stall
+        self.what = what
+        self.fired = False
+        self._stop = threading.Event()
+
+    def __enter__(self) -> "guard":
+        self.tid = threading.get_ident()
+        beat()
+        self._t = threading.Thread(target=self._watch, name=f"guard-{self.profile_id}", daemon=True)
+        self._t.start()
+        return self
+
+    def _watch(self) -> None:
+        while not self._stop.wait(5.0):
+            idle = time.monotonic() - _BEATS.get(self.tid, time.monotonic())
+            if idle > self.stall:
+                self.fired = True
+                log(f"⚠ {self.what.capitalize()} {self.profile_id}: нет движения {idle / 60:.0f} мин — браузер завис, "
+                    "закрываю профиль в AdsPower и начинаю заново")
+                release(self.api_key, self.url, self.profile_id)
+                return
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+
 
 def scan_profile(api_key: str, url: str, profile_id: str, *, headless: bool = True, timeout: float = SCAN_TIMEOUT,
                  cancel=None, progress=None, env: dict | None = None) -> list:

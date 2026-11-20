@@ -248,6 +248,29 @@ class RunPollsTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self._run({})
 
+    def test_browser_lost_restarts_and_finishes(self) -> None:
+        """Браузер упал/завис посреди опросов: заход начинается заново, выложенное не повторяется."""
+        memo: dict = {}
+        self.fail["Вопрос 1?"] = RuntimeError("Target closed")
+        with mock.patch("engine.publish.scan.release"):
+            res = self._run(memo)
+        self.assertEqual(memo["done"], [0, 1, 2])
+        self.assertEqual([q for q, _ in self.posted], ["Вопрос 0?", "Вопрос 1?", "Вопрос 2?"])
+        self.assertEqual(res["warnings"], [])
+
+    def test_guard_closes_profile_when_browser_is_silent(self) -> None:
+        import time as _t
+
+        from engine.publish import scan
+
+        calls: list[str] = []
+        with mock.patch.object(scan, "release", lambda k, u, pid: calls.append(pid)), \
+                mock.patch.object(scan.threading.Event, "wait", lambda self, t=None: _t.sleep(0.01) or self.is_set()):
+            with scan.guard("k", "", "pX", stall=0.05) as g:
+                _t.sleep(0.4)
+            self.assertTrue(g.fired)
+        self.assertEqual(calls, ["pX"])
+
     def test_unknown_channel(self) -> None:
         with self.assertRaises(ValueError):
             pub.run_polls("p1/UCzzz", self.POLLS, 2, 3, ("k", ""), None, [])

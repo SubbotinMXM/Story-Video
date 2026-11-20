@@ -26,6 +26,9 @@ PASTE_FROM = 400  # текст длиннее — вставляем (как и�
 
 
 def _sleep(page, lo: float, hi: float) -> None:
+    from engine.publish.scan import beat
+
+    beat()
     page.wait_for_timeout(int(random.uniform(lo, hi) * 1000))
 
 
@@ -138,6 +141,44 @@ _COVER_JS = """(el) => { const r = el.getBoundingClientRect();
     return pop && !pop.contains(el) ? pop.tagName.toLowerCase() : ''; }"""
 
 
+# Информационное окно YouTube с одной кнопкой («Remember that anyone can see your posts» — «Got it», «Что нового» и т.п.):
+# оно затемняет страницу и ждёт нажатия. Ищем кнопку подтверждения в видимом диалоге.
+_NOTICE_JS = """() => { const ok = /^\\s*(got it|понятно|ok|okay|ок|хорошо|i understand|я понимаю)\\s*$/i;
+    const boxes = document.querySelectorAll('tp-yt-paper-dialog, [role=dialog], ytd-modal-with-title-and-button-renderer, '
+        + 'yt-confirm-dialog-renderer, ytd-popup-container yt-dialog-view-model, yt-dialog-view-model');
+    for (const box of boxes) {
+        const r = box.getBoundingClientRect();
+        if (r.width < 50 || r.height < 50 || getComputedStyle(box).visibility === 'hidden') continue;
+        if (box.matches('ytd-backstage-post-dialog-renderer, ytcp-uploads-dialog') || box.closest('ytcp-uploads-dialog')) continue;
+        for (const b of box.querySelectorAll('button, yt-button-renderer, ytcp-button, tp-yt-paper-button, [role=button]')) {
+            const t = (b.innerText || b.textContent || b.getAttribute('aria-label') || '').trim();
+            const br = b.getBoundingClientRect();
+            if (ok.test(t) && br.width > 4 && br.height > 4) return [br.left + br.width / 2, br.top + br.height / 2, t]; } }
+    return null; }"""
+
+
+def dismiss_notice(page) -> bool:
+    """Закрыть информационное окно YouTube «Got it / Понятно», если оно на экране (как человек — мышью по кнопке).
+    Нет окна — ничего не делает. → было ли окно."""
+    done = False
+    for _ in range(3):
+        try:
+            hit = page.evaluate(_NOTICE_JS)
+        except Exception:
+            return done
+        if not hit:
+            return done
+        log(f"YouTube: информационное окно — нажимаю «{hit[2]}»")
+        page.mouse.move(hit[0], hit[1], steps=random.randint(6, 14))
+        _sleep(page, 0.1, 0.3)
+        page.mouse.down()
+        _sleep(page, 0.05, 0.14)
+        page.mouse.up()
+        _sleep(page, 0.6, 1.0)
+        done = True
+    return done
+
+
 def _dismiss_cover(page, locator) -> bool:
     """Кнопку перекрыла всплывашка (раскрытый календарь, список, меню — после неудачного шага они остаются на
     экране): закрываем её, как человек, клавишей Escape (закрывается верхняя всплывашка, окно загрузки остаётся)."""
@@ -166,8 +207,12 @@ def click(page, locator, *, timeout: int = 15000) -> None:
     перекрыт — докручиваем его как браузер; всё равно перекрыт — обычный клик Playwright (тоже настоящая мышь,
     со своей проверкой). Элемент без рамки — обычный клик Playwright."""
     locator.wait_for(state="visible", timeout=timeout)
+    dismiss_notice(page)
     box = reach(page, locator)
     point = _free_point(locator, box)
+    if point is None and dismiss_notice(page):
+        box = reach(page, locator)
+        point = _free_point(locator, box)
     if point is None:
         # перекрыт (закреплённая шапка окна, нижняя панель) — колесом в середину прокручиваемой области
         box = center(page, locator)

@@ -259,6 +259,7 @@ def _open_composer(page, channel, cancel) -> None:
     youtube._act(cancel)
     human.click(page, box)
     page.wait_for_timeout(1500)
+    human.dismiss_notice(page)  # «Remember that anyone can see your posts» — «Got it»
     youtube._act(cancel)
     human.click(page, el(page, "poll_add"))
     el(page, "poll_question")
@@ -379,6 +380,7 @@ def _set_time(page, local: datetime, cancel) -> None:
 def _submit(page, cancel) -> None:
     from engine.publish import youtube
 
+    human.dismiss_notice(page)
     button = page.locator(DIALOG).get_by_role("button", name=_SUBMIT).last
     button.wait_for(state="visible", timeout=10000)
     youtube._act(cancel)

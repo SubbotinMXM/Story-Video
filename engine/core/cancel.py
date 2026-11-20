@@ -27,6 +27,7 @@ class CancelToken:
         return self._event.is_set()
 
     def check(self) -> None:
+        _beat()  # заодно «поток жив» для сторожа зависаний браузера (engine.publish.scan)
         if self._event.is_set():
             raise CancelledError("Остановлено пользователем")
 
@@ -112,3 +113,12 @@ def run_cancellable(cmd: list[str], *, text: bool = False, capture_output: bool 
             proc.wait()
             raise
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def _beat() -> None:
+    try:
+        from engine.publish.scan import beat
+
+        beat()
+    except Exception:
+        pass

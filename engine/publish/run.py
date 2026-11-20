@@ -899,7 +899,9 @@ def run_polls(channel: str, polls: list[dict], step_days: float, count: int, ads
     lines: list[str] = [f"• уже выложен раньше: «{items[n].question}»" for n in sorted(done) if n < len(items)]
     failed = 0
     key, url = adspower
-    if todo:
+    def browse(todo_now: list) -> None:
+        """Один заход в браузер профиля: выкладывает опросы из todo_now (не вышедшие — в failed и строки итогов)."""
+        nonlocal failed
         with AdsPower(key, url) as ap:
             was_open = ap.is_open(t.profile_id)
             session = ap.start(t.profile_id)
@@ -911,11 +913,11 @@ def run_polls(channel: str, polls: list[dict], step_days: float, count: int, ads
                     pl.accept_dialogs(page)
                     with step(page, "голосования: переключение на канал"):
                         youtube.switch_to(page, t.channel, cancel=cancel)
-                    for k, (n, poll, when) in enumerate(todo, 1):
+                    for k, (n, poll, when) in enumerate(todo_now, 1):
                         if cancel:
                             cancel.check()
                         if progress:
-                            progress((k - 1) / len(todo), f"Голосования {t.label()}: {k}/{len(todo)}")
+                            progress((k - 1) / len(todo_now), f"Голосования {t.label()}: {k}/{len(todo_now)}")
                         try:
                             lines.append("✓ " + pl.post_poll(page, t.channel, poll, when, cancel=cancel))
                             pl.remember(t.channel.id, poll, when, "scheduled" if when else "published")
@@ -942,6 +944,31 @@ def run_polls(channel: str, polls: list[dict], step_days: float, count: int, ads
                         ap.stop(t.profile_id)
                     except Exception:
                         pass
+
+    if todo:
+        # браузер завис или упал посреди работы — профиль закрывается (сторож), заход начинается заново, уже
+        # выложенные опросы (done) пропускаются; не больше трёх заходов, и ни один не стоит дольше 4 минут без движения
+        from engine.publish.scan import guard
+
+        for attempt in range(1, 4):
+            left = [x for x in todo if x[0] not in done]
+            if not left:
+                break
+            g = guard(key, url, t.profile_id, what="голосования")
+            try:
+                with g:
+                    browse(left)
+                break
+            except Exception as exc:
+                if cancel is not None and cancel.is_cancelled():
+                    raise
+                if not (g.fired or youtube.browser_lost(exc)) or attempt == 3:
+                    raise
+                log(f"Голосования {t.label()}: браузер {'завис' if g.fired else 'закрылся'} — "
+                    f"начинаю заново (заход {attempt + 1} из 3)")
+                from engine.publish.scan import release
+
+                release(key, url, t.profile_id)
     if todo and failed == len(todo):
         raise RuntimeError("Голосования: ни один опрос не вышел — " + "; ".join(lines))
     summary = f"Голосования {t.label()}: {len(items) - failed} из {len(items)} (шаг {step_days:g} дн.)"
