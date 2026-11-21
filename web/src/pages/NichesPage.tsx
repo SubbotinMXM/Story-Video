@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, Flame, Link2, Search, Tags, Trash2, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ExternalLink, Flame, Link2, Search, Star, Tags, Trash2, X } from "lucide-react";
 import { useJobs, useToasts } from "../lib/store";
 import { Badge, Button, Card, Disclosure, Field, NumberInput, PageHeader, TextInput } from "../components/ui";
 import { LANGS as APP_LANGS } from "../lib/langs";
@@ -10,6 +10,7 @@ type Channel = {
   best_title: string; best_url: string; best_views: number; ratio: number; recent_median: number;
   recent_count: number; country?: string; hit_share?: number; hit_count?: number; top_views?: number; per_week: number; avg_minutes: number; anomaly: boolean;
 };
+type Favorite = Channel & { saved_at: number; found_in?: string; language?: string; found_at?: number };
 type Run = {
   id: string; niche: string; keywords?: string[]; subniches?: string[]; queries: string[]; at: number;
   filters?: { max_subs?: number; language?: string };
@@ -61,6 +62,7 @@ function LangChips({ value, onChange, options }: { value: string; onChange: (v: 
 }
 const URL_KEY = "niches-similar-url";
 const MODE_KEY = "niches-mode";
+const VIEW_KEY = "niches-view";
 
 const MAX_SUBS_KEY = "niches-max-subs";
 const MAX_SUBS_DEFAULT = 10000;
@@ -95,6 +97,47 @@ function dropped(r: Run): string[] {
     .filter(([k, n]) => n > 0 && DROP_LABELS[k])
     .sort((a, b) => b[1] - a[1])
     .map(([k, n]) => `${DROP_LABELS[k]} — ${n}`);
+}
+
+
+/** Карточка канала с цифрами; кнопки справа — снаружи (в поиске звёздочка и «убрать», в избранном — «удалить»). */
+function ChannelCard({ c, actions, note }: { c: Channel; actions: ReactNode; note?: ReactNode }) {
+  return (
+    <div className="niche-item">
+      <div className="niche-head">
+        <a className="an-name" href={c.url} target="_blank" rel="noreferrer">
+          {c.title} <ExternalLink size={13} />
+        </a>
+        <span className="row gap-sm">
+          {c.anomaly && <Badge tone="warn"><Flame size={12} /> аномалия</Badge>}
+          {actions}
+        </span>
+      </div>
+      {note}
+      <div className="niche-metrics">
+        <span><b>{num(c.subs)}</b> подп.</span>
+        <span>медиана <b>{num(c.recent_median)}</b></span>
+        <span><b>×{c.ratio}</b> просм./подп.</span>
+        {c.hit_count != null ? (
+          <span title="Длинные ролики за ~полгода: от 50 тыс. просмотров и в 10+ раз больше подписчиков">
+            залётов <b>{c.hit_count}</b>{c.top_views ? <>, лучший <b>{num(c.top_views)}</b></> : null}
+          </span>
+        ) : (
+          c.hit_share != null && <span><b>{Math.round(c.hit_share * 100)}%</b> роликов 100 тыс.+</span>
+        )}
+        <span>канал <b>{c.age_days}</b> дн.</span>
+        {c.country && <span>страна <b>{c.country}</b></span>}
+        <span><b>{c.videos}</b> роликов</span>
+        <span><b>{c.per_week}</b> в неделю</span>
+        <span><b>{c.avg_minutes}</b> мин</span>
+      </div>
+      {c.best_url && (
+        <a className="small niche-best" href={c.best_url} target="_blank" rel="noreferrer">
+          Лучший ролик: {c.best_title} — {num(c.best_views)} просм.
+        </a>
+      )}
+    </div>
+  );
 }
 
 /** Поиск ниш: ниша из списка или свои ключевые слова → каналы-ориентиры (небольшие, много просмотров: стабильно или залётами). */
@@ -166,6 +209,26 @@ export function NichesPage({ active }: { active: boolean }) {
   const [runs, setRuns] = useState<Run[]>([]);
   const [shown, setShown] = useState("");
   const [busy, setBusy] = useState(false);
+  // вкладки страницы: «Поиск» и «Избранное» (каналы, которые я отметил: лежат, пока сам не удалю)
+  const [view, setViewState] = useState<"search" | "favs">(() => {
+    try {
+      return localStorage.getItem(VIEW_KEY) === "favs" ? "favs" : "search";
+    } catch {
+      return "search";
+    }
+  });
+  const setView = (v: "search" | "favs") => {
+    setViewState(v);
+    try {
+      localStorage.setItem(VIEW_KEY, v);
+    } catch {
+      /* без запоминания */
+    }
+  };
+  const [favs, setFavs] = useState<Favorite[]>([]);
+  const favIds = useMemo(() => new Set(favs.map((f) => f.id)), [favs]);
+  const loadFavs = () =>
+    void call<{ favorites: Favorite[] }>("GET", "/api/niches/favorites").then((r) => setFavs(r.favorites)).catch(() => undefined);
 
   const loadRuns = () =>
     void call<{ runs: Run[]; evergreen: Niche[] }>("GET", "/api/niches/runs")
@@ -175,7 +238,10 @@ export function NichesPage({ active }: { active: boolean }) {
       })
       .catch(() => undefined);
   useEffect(() => {
-    if (active) loadRuns();
+    if (active) {
+      loadRuns();
+      loadFavs();
+    }
   }, [active]);
   // поиск закончился — показать свежий результат
   const doneKey = jobs.filter((j) => j.kind === "niches" && j.status === "done").map((j) => j.id).join(",");
@@ -236,6 +302,26 @@ export function NichesPage({ active }: { active: boolean }) {
       push({ kind: "error", title: "Не удалилось", text: (e as Error).message });
     }
   };
+  const addFavorite = async (r: Run, c: Channel) => {
+    if (favIds.has(c.id)) {
+      setView("favs");
+      return;
+    }
+    try {
+      setFavs((await call<{ favorites: Favorite[] }>("POST", "/api/niches/favorites", { run_id: r.id, channel_id: c.id })).favorites);
+      push({ kind: "ok", title: "Канал в избранном", text: `«${c.title}» — вкладка «Избранное». Лежит там, пока сам не удалишь.` });
+    } catch (e) {
+      push({ kind: "error", title: "Не добавилось", text: (e as Error).message });
+    }
+  };
+  const removeFavorite = async (f: Favorite) => {
+    if (!window.confirm(`Убрать «${f.title}» из избранного?`)) return;
+    try {
+      setFavs((await call<{ favorites: Favorite[] }>("DELETE", `/api/niches/favorites/${encodeURIComponent(f.id)}`)).favorites);
+    } catch (e) {
+      push({ kind: "error", title: "Не удалилось", text: (e as Error).message });
+    }
+  };
   const removeChannel = async (r: Run, c: Channel) => {
     try {
       setRuns((await call<{ runs: Run[] }>("DELETE", `/api/niches/runs/${encodeURIComponent(r.id)}/channels/${encodeURIComponent(c.id)}`)).runs);
@@ -250,7 +336,48 @@ export function NichesPage({ active }: { active: boolean }) {
         title="Поиск ниш"
         subtitle="Каналы-ориентиры: небольшие каналы, ролики которых набирают десятки и сотни тысяч просмотров — в разы больше, чем у канала подписчиков. До 15 каналов — формат оцениваешь сам. Ищи по нише или по ссылке на канал, на который хочешь быть похожим."
       />
-      <div className="niche-layout">
+      <div className="tabs niche-views" role="tablist">
+        <button type="button" role="tab" aria-selected={view === "search"} className={view === "search" ? "active" : ""} onClick={() => setView("search")}>
+          <Search size={15} /> Поиск
+        </button>
+        <button type="button" role="tab" aria-selected={view === "favs"} className={view === "favs" ? "active" : ""} onClick={() => setView("favs")}>
+          <Star size={15} /> Избранное{favs.length ? ` (${favs.length})` : ""}
+        </button>
+      </div>
+      {view === "favs" && (
+        <Card
+          title="Избранные каналы"
+          description="Каналы, которые ты отметил звёздочкой в результатах поиска. Лежат здесь, пока сам не удалишь — не пропадают, даже когда поиск уходит из истории. Цифры — на момент сохранения."
+        >
+          {favs.length === 0 ? (
+            <div className="muted small">
+              Пока пусто. В результатах поиска нажми на звёздочку у канала, к которому стоит вернуться, — он появится здесь.
+            </div>
+          ) : (
+            <div className="niche-list">
+              {favs.map((f) => (
+                <ChannelCard
+                  key={f.id}
+                  c={f}
+                  note={
+                    <div className="muted small">
+                      В избранном с {when(f.saved_at)}
+                      {f.found_in ? ` · найден: ${f.found_in}` : ""}
+                      {f.language && f.language !== "ru" ? ` · ${LANGS.find((l) => l.value === f.language)?.label ?? f.language}` : ""}
+                    </div>
+                  }
+                  actions={
+                    <button type="button" className="icon-btn" title="Удалить из избранного" onClick={() => void removeFavorite(f)}>
+                      <Trash2 size={15} />
+                    </button>
+                  }
+                />
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
+      <div className="niche-layout" hidden={view !== "search"}>
         <div className="stack">
           <Card
             title="1. Что ищем"
@@ -446,41 +573,25 @@ export function NichesPage({ active }: { active: boolean }) {
           {res && dropped(res).length > 0 && <div className="muted small">Отсеяно: {dropped(res).join(" · ")}</div>}
           <div className="niche-list">
             {res?.channels.map((c) => (
-              <div key={c.id} className="niche-item">
-                <div className="niche-head">
-                  <a className="an-name" href={c.url} target="_blank" rel="noreferrer">
-                    {c.title} <ExternalLink size={13} />
-                  </a>
-                  <span className="row gap-sm">
-                    {c.anomaly && <Badge tone="warn"><Flame size={12} /> аномалия</Badge>}
+              <ChannelCard
+                key={c.id}
+                c={c}
+                actions={
+                  <>
+                    <button
+                      type="button"
+                      className={`icon-btn fav-btn ${favIds.has(c.id) ? "on" : ""}`}
+                      title={favIds.has(c.id) ? "В избранном — открой вкладку «Избранное»" : "В избранное: канал останется там, пока сам не удалишь"}
+                      onClick={() => void addFavorite(res, c)}
+                    >
+                      <Star size={15} fill={favIds.has(c.id) ? "currentColor" : "none"} />
+                    </button>
                     <button type="button" className="icon-btn" title="Убрать канал из списка" onClick={() => void removeChannel(res, c)}>
                       <X size={15} />
                     </button>
-                  </span>
-                </div>
-                <div className="niche-metrics">
-                  <span><b>{num(c.subs)}</b> подп.</span>
-                  <span>медиана <b>{num(c.recent_median)}</b></span>
-                  <span><b>×{c.ratio}</b> просм./подп.</span>
-                  {c.hit_count != null ? (
-                    <span title="Длинные ролики за ~полгода: от 50 тыс. просмотров и в 10+ раз больше подписчиков">
-                      залётов <b>{c.hit_count}</b>{c.top_views ? <>, лучший <b>{num(c.top_views)}</b></> : null}
-                    </span>
-                  ) : (
-                    c.hit_share != null && <span><b>{Math.round(c.hit_share * 100)}%</b> роликов 100 тыс.+</span>
-                  )}
-                  <span>канал <b>{c.age_days}</b> дн.</span>
-                  {c.country && <span>страна <b>{c.country}</b></span>}
-                  <span><b>{c.videos}</b> роликов</span>
-                  <span><b>{c.per_week}</b> в неделю</span>
-                  <span><b>{c.avg_minutes}</b> мин</span>
-                </div>
-                {c.best_url && (
-                  <a className="small niche-best" href={c.best_url} target="_blank" rel="noreferrer">
-                    Лучший ролик: {c.best_title} — {num(c.best_views)} просм.
-                  </a>
-                )}
-              </div>
+                  </>
+                }
+              />
             ))}
           </div>
           {res && res.queries.length > 0 && (

@@ -123,5 +123,70 @@ class ExcludeTest(LedgerTest):
         self.assertFalse({v.id for v in a["videos"]} & {v.id for v in b["videos"]})
 
 
+class SpreadTests(unittest.TestCase):
+    """Сколько роликов человек написал, столько и берётся — сколько бы каналов-доноров ни было."""
+
+    def entry(self, name, ids, before=0):
+        from types import SimpleNamespace
+
+        return {"channel": name, "videos": [SimpleNamespace(id=i) for i in ids], "left": 0, "taken_before": before}
+
+    def test_exact_total_not_per_channel(self) -> None:
+        a, b = self.entry("A", ["a1", "a2", "a3", "a4", "a5"]), self.entry("B", ["b1", "b2", "b3", "b4", "b5"])
+        out = ch.spread([a, b], 5)
+        self.assertEqual([v.id for _e, v in out], ["a1", "b1", "a2", "b2", "a3"])
+        self.assertEqual((a["taken"], b["taken"]), (3, 2))
+        self.assertEqual((a["left"], b["left"]), (2, 3), "неиспользованные кандидаты остаются в «осталось»")
+
+    def test_ten_donors_one_video(self) -> None:
+        entries = [self.entry(f"C{i}", [f"c{i}"]) for i in range(10)]
+        self.assertEqual(len(ch.spread(entries, 1)), 1)
+        self.assertEqual(len(ch.spread([self.entry(f"C{i}", [f"c{i}"]) for i in range(10)], 4)), 4)
+
+    def test_short_channel_is_topped_up_from_others_and_nothing_to_give_is_fine(self) -> None:
+        a, b = self.entry("A", ["a1"]), self.entry("B", ["b1", "b2", "b3", "b4"])
+        self.assertEqual([v.id for _e, v in ch.spread([a, b], 4)], ["a1", "b1", "b2", "b3"])
+        self.assertEqual(len(ch.spread([self.entry("A", [])], 5)), 0)
+
+    def test_donor_used_least_so_far_goes_first(self) -> None:
+        a, b = self.entry("A", ["a1", "a2"], before=7), self.entry("B", ["b1", "b2"], before=1)
+        self.assertEqual([v.id for _e, v in ch.spread([a, b], 1)], ["b1"], "малый счёт — первым: доноры чередуются")
+
+
+class ShortfallEndpointTests(unittest.TestCase):
+    """Доноры кончились: ставится сколько есть и сказано, сколько не нашлось; совсем пусто — честная ошибка."""
+
+    def call(self, per_channel, count):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from fastapi.testclient import TestClient
+
+        import server.app as app_mod
+
+        def pick(url, n, *, section, keys, jobs=None, exclude=None):
+            ids = per_channel[url][:n]
+            return {"channel": url[-1], "id": url, "videos": [SimpleNamespace(id=i, url=f"https://y/{i}", title=i) for i in ids],
+                    "left": len(per_channel[url]) - len(ids), "total": len(per_channel[url]), "all": 9}
+
+        with mock.patch("engine.rewrite.channels.pick", pick), \
+                mock.patch.object(app_mod, "_enqueue", lambda items, *a, **k: list(items)), \
+                mock.patch.object(app_mod, "_reserve_links", lambda jobs: None):
+            return TestClient(app_mod.app).post("/api/rewrite/channels", json={"channels": list(per_channel), "count": count, "params": {}})
+
+    def test_fewer_found_than_asked_says_so(self) -> None:
+        r = self.call({"https://y/@A": ["a1", "a2"]}, 5)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(len(r.json()["jobs"]), 2)
+        self.assertIn("2 из 5", r.json()["notes"][0])
+
+    def test_enough_means_no_note_and_nothing_left_is_an_error(self) -> None:
+        ok = self.call({"https://y/@A": ["a1", "a2", "a3"], "https://y/@B": ["b1", "b2"]}, 4)
+        self.assertEqual((len(ok.json()["jobs"]), ok.json()["notes"]), (4, []))
+        empty = self.call({"https://y/@A": []}, 3)
+        self.assertEqual(empty.status_code, 400)
+        self.assertIn("брать больше нечего", empty.json()["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

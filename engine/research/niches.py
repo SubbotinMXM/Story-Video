@@ -35,6 +35,7 @@ from engine.core.logutil import log
 from engine.publish.store import LOCK, read_json, write_json
 
 RESULTS_FILE = "niches.json"
+FAVORITES_FILE = "niche_favorites.json"  # избранные каналы: лежат, пока человек сам не удалит
 SEARCH_PAGE = 50
 # проходы поиска на каждый запрос (по 100 единиц квоты): Shorts отсекает сам YouTube (medium — 4–20 мин,
 # long — от 20 мин); order=viewCount на многих запросах отдаёт 0 роликов — поэтому основа — релевантность
@@ -533,9 +534,11 @@ _SIMILAR = """Ты аналитик YouTube. Тебе дан канал-обра
 - topic — о чём канал, одной короткой фразой на русском (тема и формат: «судьбы советских актрис, документальные рассказы»);
 - language — язык аудитории канала, код (ru, en, es, pt, de, fr, it, pl, tr, uk);
 - queries — {n} поисковых запросов, которыми зритель такого канала ищет ролики на YouTube: короткие (2–5 слов),
-  разные по смыслу (тема, герои, формат, типичные формулировки названий), СТРОГО на языке аудитории.
+  разные по смыслу (тема, герои, формат, типичные формулировки названий), СТРОГО на языке {target}.
   Не называй сам канал и не ищи его имя — нужны другие каналы.
-Ответ — только JSON: {"topic": "…", "language": "ru", "queries": ["…", "…"]}"""
+- titles — только если язык поиска ЗАДАН и отличается от языка канала: названия роликов, помеченные [лучшие],
+  переведи на язык поиска (естественно, как их назвал бы местный автор), по порядку; иначе пустой список.
+Ответ — только JSON: {"topic": "…", "language": "ru", "queries": ["…", "…"], "titles": []}"""
 
 
 class SimilarError(ValueError):
@@ -602,41 +605,61 @@ def sample_videos(api, channel: dict) -> list[dict]:
     return out
 
 
-def similar_queries(channel: dict, videos: list[dict], language: str, llm, cancel) -> tuple[list[str], str, str]:
-    """→ (запросы, тема, язык аудитории). Нейросеть выводит тему/язык и пишет запросы; плюс названия лучших роликов
-    образца — по ним YouTube сам находит ролики на то же. Нейросети нет — только названия и ключевые слова канала."""
+class SimilarLanguageError(SimilarError):
+    """Язык поиска задан, а запросы на нём составить нечем (нет нейросети) — искать по чужим словам бессмысленно."""
+
+
+def similar_queries(channel: dict, videos: list[dict], language: str, llm, cancel,
+                    forced: str = "") -> tuple[list[str], str, str]:
+    """→ (запросы, тема, язык аудитории образца). Нейросеть выводит тему/язык и пишет запросы; плюс названия лучших
+    роликов образца — по ним YouTube сам находит ролики на то же. Нейросети нет — только названия и ключевые слова.
+    forced — язык поиска, который выбрал человек: запросы и названия-образцы только на нём (а не на языке образца)."""
     sn = channel.get("snippet") or {}
     keywords = ((channel.get("brandingSettings") or {}).get("channel") or {}).get("keywords") or ""
     top = sorted(videos, key=lambda v: -v["views"])
     fresh = sorted(videos, key=lambda v: -v["ts"])
     titles = list(dict.fromkeys(v["title"] for v in [*top[:SAMPLE_TITLES // 2], *fresh] if v["title"]))[:SAMPLE_TITLES]
-    topic, lang, queries = "", language, []
+    topic, lang, queries, translated = "", "", [], []
+    by_title = [v["title"] for v in top if v["title"]][:TITLE_QUERIES]
     if titles or sn.get("description"):
         try:
             from engine.publish.polls import ask
 
-            raw = ask(_SIMILAR.replace("{n}", "6"),
+            target = f"поиска «{forced}» (задан человеком)" if forced else "аудитории"
+            marked = [f"- {t}" + (" [лучшие]" if t in by_title else "") for t in titles]
+            raw = ask(_SIMILAR.replace("{n}", "6").replace("{target}", target),
                       f"Канал: {sn.get('title') or ''}\nОписание: {(sn.get('description') or '')[:600]}\n"
                       f"Ключевые слова канала: {keywords[:300]}\nЗаписанный язык канала: {sn.get('defaultLanguage') or '—'}\n"
-                      "Названия роликов:\n" + "\n".join(f"- {t}" for t in titles), llm, cancel, "niche_similar")
+                      + (f"Язык поиска (ЗАДАН): {forced}\n" if forced else "")
+                      + "Названия роликов:\n" + "\n".join(marked), llm, cancel, "niche_similar")
             data = json_dict(raw)
             topic = str(data.get("topic") or "").strip()[:160]
-            lang = str(data.get("language") or "").strip().lower()[:2] or lang
+            lang = str(data.get("language") or "").strip().lower()[:2]
             queries = [str(q).strip() for q in (data.get("queries") or []) if str(q).strip()]
+            translated = [str(t).strip() for t in (data.get("titles") or []) if str(t).strip()][:TITLE_QUERIES]
         except Exception as exc:
             if cancel is not None:
                 cancel.check()
             log(f"Ниши: нейросеть не описала образец ({str(exc)[:120]}) — ищу по названиям его роликов")
+    own = (sn.get("defaultLanguage") or "").lower()[:2]
+    foreign = bool(forced) and lang != forced and own != forced  # язык поиска не совпадает с языком образца
+    if foreign and not queries:
+        # чужими словами образца искать нечего: английские запросы вернут английские каналы
+        raise SimilarLanguageError(
+            f"Образец на другом языке (не «{forced}»), а перевести запросы на язык поиска нечем — "
+            "подключи нейросеть (Настройки → LLM) или выбери «Как у канала».")
     if not queries:
         import re
 
         # ключевые слова канала: «слово "несколько слов" ещё» — берём фразы в кавычках и отдельные слова от 4 букв
         words = [a or b for a, b in re.findall(r'"([^"]+)"|(\S+)', keywords)]
         queries = [w for w in words if len(w) >= 4][:3]
-    # названия лучших роликов образца: ролик с таким названием найдёт соседей по теме
-    by_title = [v["title"] for v in top if v["title"]][:TITLE_QUERIES]
+    # названия лучших роликов образца: ролик с таким названием найдёт соседей по теме;
+    # язык поиска другой — берём их перевод (оригиналы дали бы выдачу на языке образца)
+    if foreign:
+        by_title = translated
     room = max(0, MAX_QUERIES - len(by_title))
-    return list(dict.fromkeys([*queries[:room], *by_title]))[:MAX_QUERIES], topic, lang
+    return list(dict.fromkeys([*queries[:room], *by_title]))[:MAX_QUERIES], topic, lang or language
 
 
 def find_similar(url: str, f: Filters, keys: list[str], llm: tuple[str, str, str] | None, *,
@@ -660,7 +683,8 @@ def find_similar(url: str, f: Filters, keys: list[str], llm: tuple[str, str, str
         raise SimilarError("У канала нет длинных роликов (от 5 минут) — по чему искать похожие, непонятно")
     if progress:
         progress(0.04, "Определяю тему и язык образца…")
-    queries, topic, lang = similar_queries(channel, videos, f.language, llm, cancel)
+    queries, topic, lang = similar_queries(channel, videos, f.language, llm, cancel,
+                                           forced="" if auto_language else f.language)
     if auto_language and lang in LANG_REGION:
         f = Filters.of({**asdict(f), "language": lang, "region": ""})
     if not queries:
@@ -692,6 +716,44 @@ def run_id(run: dict) -> str:
 def runs() -> list[dict]:
     data = read_json(RESULTS_FILE, [])
     return [{**r, "id": run_id(r)} for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+
+
+# ---------- избранное ----------
+
+
+def favorites() -> list[dict]:
+    """Избранные каналы: новые сверху. Хранятся отдельно от истории поисков (она обрезается до 20) — не пропадают."""
+    data = read_json(FAVORITES_FILE, [])
+    items = [f for f in data if isinstance(f, dict) and f.get("id")] if isinstance(data, list) else []
+    return sorted(items, key=lambda f: -float(f.get("saved_at") or 0))
+
+
+def add_favorite(run: str, channel_id: str) -> bool:
+    """Канал из выдачи поиска → в избранное (снимок его цифр на момент сохранения). Уже там — обновляем цифры."""
+    with LOCK:
+        hit = next((r for r in runs() if r["id"] == run), None)
+        ch = next((c for c in (hit or {}).get("channels") or [] if c.get("id") == channel_id), None)
+        if hit is None or ch is None:
+            return False
+        label = (hit.get("similar") or {}).get("title") and f"похожие на «{hit['similar']['title']}»" \
+            or hit.get("niche") or (hit.get("subniches") or [""])[0]
+        lang = (hit.get("similar") or {}).get("language") or (hit.get("filters") or {}).get("language") or ""
+        items = favorites()
+        old = next((f for f in items if f["id"] == channel_id), None)
+        rec = {**ch, "saved_at": (old or {}).get("saved_at") or time.time(), "found_in": (old or {}).get("found_in") or label,
+               "language": (old or {}).get("language") or lang, "found_at": hit.get("at") or 0}
+        write_json(FAVORITES_FILE, [rec, *[f for f in items if f["id"] != channel_id]])
+    return True
+
+
+def remove_favorite(channel_id: str) -> bool:
+    with LOCK:
+        items = favorites()
+        left = [f for f in items if f["id"] != channel_id]
+        if len(left) == len(items):
+            return False
+        write_json(FAVORITES_FILE, left)
+    return True
 
 
 def remove(run: str, channel: str = "") -> bool:

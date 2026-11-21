@@ -1,4 +1,5 @@
-import type { Meta, Settings, TemplateSection } from "./api";
+import type { Meta, MusicCatalog, Settings, TemplateSection } from "./api";
+import { musicName } from "./music";
 
 /** Правка шаблона по шагам: что было в шаблоне и что стало сейчас, по каждой настройке. */
 export type DiffStep = "source" | "voice" | "texts" | "video" | "look" | "publish";
@@ -9,6 +10,7 @@ type Ctx = {
   meta: Meta;
   names: Map<string, string>; // «профиль/канал» → читаемое имя
   modeTitle: (id: string) => string;
+  music?: MusicCatalog | null;
 };
 
 type Def = {
@@ -68,7 +70,7 @@ function defs(section: TemplateSection): Def[] {
   const p = `${section}_publish`;
   const out: Def[] = [
     { key: "rewrite_channels", per: true, step: "source", label: "Каналы-конкуренты", fmt: links },
-    { key: "rewrite_channels_count", step: "source", label: "Роликов с канала за запуск", fmt: num },
+    { key: "rewrite_channels_count", step: "source", label: "Роликов за запуск (всего)", fmt: num },
     { key: "rewrite_engine", step: "source", label: "Чем переписываем", fmt: (v, c) => c.meta.rewrite_engines[String(v)] ?? String(v) },
     { key: "claude_model", step: "source", label: "Модель Claude", fmt: (v, c) => c.meta.claude_models.find((m) => m.id === v)?.label ?? (String(v || "") || "по умолчанию") },
     { key: "codex_model", step: "source", label: "Модель Codex", fmt: (v) => String(v || "") || "по умолчанию" },
@@ -119,7 +121,7 @@ function defs(section: TemplateSection): Def[] {
           return Object.entries(m).map(([k, n]) => `${k} ${n}%`).join(", ");
         },
       },
-      { key: "music_track", step: "look", label: "Музыка", fmt: (v) => (v ? String(v) : "подбирается сама") },
+      { key: "music_track", step: "look", label: "Музыка", fmt: (v, c) => musicName(String(v ?? ""), c.music ?? null) },
       { key: "transition", step: "look", label: "Переходы", fmt: (v) => (v === "flash" ? "со вспышкой" : "плавные") },
       { key: "slides_intro_dir", step: "look", label: "Заставка в начале", fmt: path },
       { key: "slides_outro_dir", step: "look", label: "Заставка в конце", fmt: path },

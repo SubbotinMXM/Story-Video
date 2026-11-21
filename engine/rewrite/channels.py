@@ -313,7 +313,29 @@ def pick(url: str, count: int, *, section: str, keys: list[str], jobs: dict | No
     log(f"Каналы: «{title}» — подходящих {len(ranked)}, уже взято {len(ranked) - len(fresh)}, беру {len(chosen)}, "
         f"останется {left}")
     return {"channel": title, "id": cid, "videos": chosen, "left": left, "total": len(ranked),
-            "all": len(videos)}
+            "all": len(videos), "taken_before": len(ranked) - len(fresh)}
+
+
+def spread(entries: list[dict], count: int) -> list[tuple[dict, Video]]:
+    """Ровно count роликов из каналов-доноров (или сколько есть): по очереди по ролику с каждого, пока не наберётся.
+    Первым идёт канал, с которого раньше брали меньше всего, — так при малом числе роликов доноры чередуются.
+    В entries — результаты pick(): у каждого «videos» (кандидаты по рейтингу). Заполняет entry["taken"], обновляет entry["left"]."""
+    order = sorted(entries, key=lambda e: int(e.get("taken_before") or 0))
+    out: list[tuple[dict, Video]] = []
+    for e in order:
+        e["taken"] = 0
+    want = max(0, int(count))
+    for rnd in range(want):
+        for e in order:
+            if len(out) < want and rnd < len(e["videos"]):
+                out.append((e, e["videos"][rnd]))
+                e["taken"] += 1
+    for e in order:
+        e["left"] = int(e.get("left") or 0) + len(e["videos"]) - e["taken"]  # кандидаты, которые не понадобились
+        if e.get("id") and e.get("url"):  # pick записал в учёт «взято» по кандидатам — исправляем на реально взятые
+            _save_channel(e["id"], title=e.get("channel") or "", url=e["url"], total=int(e.get("total") or 0),
+                          left=e["left"], taken=int(e.get("taken_before") or 0) + e["taken"], checked_at=time.time())
+    return out
 
 
 def as_dict(v: Video) -> dict:

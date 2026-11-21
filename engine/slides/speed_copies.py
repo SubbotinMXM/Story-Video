@@ -12,6 +12,7 @@ from engine.core.cancel import CancelToken, CancelledError
 from engine.core.logutil import log
 from engine.slides.ffmpeg_util import find_ffmpeg, low_priority
 from engine.slides.ffprobe_util import disk_full_hint, has_audio_stream, probe_duration, probe_video_size
+from engine.slides.look_presets import copy_look
 from engine.slides.render_defaults import AUDIO_BITRATE, VIDEO_CRF, rate_cap
 
 BASE_NAME = "ролик.mp4"
@@ -56,11 +57,13 @@ def write_speed_copies(
     base_name: str | None = None,
     cancel: CancelToken | None = None,
     on_progress: ProgressCb | None = None,
+    vary: bool = True,
 ) -> list[Path]:
     """Оригинал не трогает. Пишет копии в ту же папку.
 
     base_name — имя файла в подписи копии. По умолчанию «ролик.mp4»,
     как в папке экспорта стоков. Для готового файла передавай его имя.
+    vary — кроме скорости у каждой копии своя цветовая подача и чуть другая рамка кадра (в том же проходе).
     """
     percents = copy_percents(count)
     if not percents or not source.is_file():
@@ -71,6 +74,7 @@ def write_speed_copies(
     except Exception:
         duration = 0.0
     audio = has_audio_stream(source)
+    size = probe_video_size(source) if vary else None
     base = base_name or BASE_NAME
     written: list[Path] = []
     n = len(percents)
@@ -104,6 +108,7 @@ def write_speed_copies(
             duration=duration,
             cancel=cancel,
             on_progress=_pct,
+            look=copy_look(source.stem, i, size) if vary else "",
         )
         written.append(dest)
         log(f"Копия {phrase}: готово ({dest.stat().st_size} bytes)")
@@ -121,6 +126,7 @@ def _write_one(
     duration: float,
     cancel: CancelToken | None,
     on_progress: ProgressCb | None,
+    look: str = "",
 ) -> None:
     rate = pct / 100.0
     rate_s = f"{rate:.4f}".rstrip("0").rstrip(".")
@@ -128,7 +134,7 @@ def _write_one(
     out_dur = duration / rate if duration > 0 else 0.0
     # Без fps=: форс 30fps после setpts на слайдшоу раздувает и ломает PTS.
     # Без VideoToolbox: на длинных роликах давал битый H.264 + CBR 8M (~×3 размер).
-    video = f"[0:v]setpts=PTS/{rate_s},format=yuv420p[v]"
+    video = f"[0:v]setpts=PTS/{rate_s}{',' + look if look else ''},format=yuv420p[v]"
     if audio:
         graph = video + f";[0:a]atempo={rate_s}[a]"
         maps = ["-map", "[v]", "-map", "[a]"]

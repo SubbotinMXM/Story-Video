@@ -15,6 +15,7 @@ import { TemplateRows } from "../components/TemplateRows";
 import { api, type MusicCatalog } from "../lib/api";
 import { useLoadedSettings, useProfiles, useToasts } from "../lib/store";
 import { setEditingTemplate, useEditingBase, useEditingTemplate } from "../lib/templateEdit";
+import { musicName } from "../lib/music";
 import { templateRows, type DiffRow, type DiffStep } from "../lib/templateDiff";
 
 type Section = "broll" | "slides";
@@ -103,9 +104,8 @@ export function StepsPage() {
   }, [editId]);
 
   useEffect(() => {
-    if (step !== "summary") return;
-    if (section === "slides") void api.music().then(setMusic).catch(() => undefined);
-  }, [step, section]);
+    if (section === "slides" && !music) void api.music().then(setMusic).catch(() => undefined);
+  }, [section, music]);
 
   // ---------- что выбрано на каждом шаге (строка под шагом и сводка) ----------
   const publishOn = Boolean(settings[`${section}_publish`]);
@@ -184,8 +184,8 @@ export function StepsPage() {
 
   // ---------- правка шаблона: что было в шаблоне и что стало ----------
   const rows: DiffRow[] = useMemo(
-    () => (editing && base ? templateRows(base, settings, { section, meta, names, modeTitle: (id) => MEDIA_MODES.find((m) => m.id === id)?.title ?? id }) : []),
-    [editing, base, settings, section, meta, names],
+    () => (editing && base ? templateRows(base, settings, { section, meta, names, music, modeTitle: (id) => MEDIA_MODES.find((m) => m.id === id)?.title ?? id }) : []),
+    [editing, base, settings, section, meta, names, music],
   );
   const changedRows = rows.filter((r) => r.changed);
   const rowsOf = (id: StepId) => rows.filter((r) => r.step === (id as DiffStep));
@@ -311,7 +311,7 @@ export function StepsPage() {
               value={
                 src.count === 0
                   ? "исходник пуст"
-                  : `${src.kind === "channels" ? `до ${src.count} (по ${src.perChannel} с канала)` : src.count}` +
+                  : `${src.kind === "channels" ? `${src.count} (по очереди с каналов-доноров)` : src.count}` +
                     (extraLangs && src.kind !== "audio" ? ` + по ${extraLangs} на других языках` : "") +
                     (copies ? ` · у каждого копий скорости: ${copies}` : "")
               }
@@ -336,7 +336,7 @@ export function StepsPage() {
             {section === "slides" && (
               <Row
                 label="Музыка"
-                value={music?.tracks.find((t) => t.id === settings.music_track)?.title ?? (settings.music_track ? settings.music_track : "подбирается сама")}
+                value={musicName(settings.music_track, music)}
                 onEdit={() => go("look")}
               />
             )}

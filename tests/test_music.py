@@ -28,15 +28,21 @@ def _lufs(path: Path) -> float:
 
 
 class CatalogTests(unittest.TestCase):
-    def test_youtube_library_neutral_tracks(self) -> None:
-        """Только Фонотека YouTube (на её треки не бывает претензий Content ID), нейтральные группы."""
+    def test_youtube_library_tracks_by_niche_categories(self) -> None:
+        """Только Фонотека YouTube (на её треки не бывает претензий Content ID); категории по нишам, по 5 треков."""
         cat = music.catalog()
-        self.assertTrue(3 <= len(cat["tracks"]) <= 10, len(cat["tracks"]))
+        self.assertEqual(len(cat["tracks"]), 30, len(cat["tracks"]))
         for t in cat["tracks"]:
             self.assertIn("YouTube Audio Library", t["source"])
             self.assertTrue((music.MUSIC_DIR / t["file"]).is_file())
             self.assertIn(t["group"], cat["groups"])
-            self.assertIn(t["group"], ("ambient", "piano", "classical"))
+        for gid in cat["groups"]:
+            self.assertEqual(len(music.group_tracks(gid)), 5, f"в категории «{gid}» должно быть 5 треков")
+            self.assertTrue(cat["hints"].get(gid), f"у категории «{gid}» нет описания, для чего она")
+        self.assertEqual(set(cat["groups"]), {"ambient", "war", "mystery", "ancient", "bio", "bright"})
+
+    def test_no_generic_word_title_is_found_inside_other_words(self) -> None:
+        self.assertEqual(music.claims_in("a leveling of the playing field", video=""), [], "«Level» — только целым словом")
 
     def test_same_loudness_for_all_tracks(self) -> None:
         levels = [t["lufs"] for t in music.catalog()["tracks"]]

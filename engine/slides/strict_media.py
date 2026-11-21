@@ -70,6 +70,7 @@ from engine.slides.theme_media import (
 from engine.slides.hook import HOOK_SEC as HOOK_SEC_COMMON
 from engine.slides.hook import NO_AI_SEC, add_beauty, head_rank, hook_first
 from engine.slides.look import fingerprint, seen
+from engine.slides.story_context import AMBIGUITY_RULE
 from engine.slides.theme_plan import _main_name, ThemePlan, ensure_theme_plan
 from engine.slides.vision_ranker import score_fit
 from engine.slides.whisper_timings import WordTiming
@@ -142,6 +143,8 @@ Rules:
   never statues, busts, paintings or engravings of them
 - historical=true: no cars, smartphones, jeans, offices, modern cities
 """
+
+_QUERY_SYSTEM = _QUERY_SYSTEM.rstrip() + "\n" + AMBIGUITY_RULE + "\n"
 
 
 @dataclass(frozen=True)

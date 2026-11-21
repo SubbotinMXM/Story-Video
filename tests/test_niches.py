@@ -458,6 +458,22 @@ class SimilarTests(unittest.TestCase):
         res2, _ = self._similar(api2, answer=answer, auto_language=False, flt={"language": "de"})
         self.assertEqual(res2["similar"]["language"], "de", "язык выбрал пользователь — он главнее")
 
+    def test_chosen_language_gets_queries_and_titles_in_that_language(self) -> None:
+        """Образец на одном языке, человек выбрал другой: названия роликов образца на его языке в поиск не идут."""
+        answer = json.dumps({"topic": "t", "language": "en", "queries": ["vidas de actrices", "actrices clasicas"],
+                             "titles": ["Titulo uno", "Titulo dos", "Titulo tres"]})
+        api = SourceApi()
+        res, ask = self._similar(api, answer=answer, auto_language=False, flt={"language": "es"})
+        self.assertEqual(res["queries"], ["vidas de actrices", "actrices clasicas", "Titulo uno", "Titulo dos", "Titulo tres"])
+        self.assertFalse(any(q.startswith("Ролик ") for q in res["queries"]), "оригиналы названий — другой язык")
+        self.assertIn("Язык поиска (ЗАДАН): es", ask.call_args.args[1])
+        searches = [p for path, p in api.calls if path == "search"]
+        self.assertEqual(searches[0]["relevanceLanguage"], "es")
+
+    def test_chosen_language_without_translation_is_an_honest_error(self) -> None:
+        with self.assertRaisesRegex(niches.SimilarError, "перевести запросы"):
+            self._similar(SourceApi(), answer="не json", auto_language=False, flt={"language": "es"})
+
     def test_url_forms(self) -> None:
         for url in ("https://www.youtube.com/@obrazets", f"https://www.youtube.com/channel/{SourceApi.SRC_ID}",
                     "https://youtu.be/abcdefghijk", "https://www.youtube.com/watch?v=abcdefghijk&t=5s"):
@@ -518,6 +534,46 @@ class SimilarTests(unittest.TestCase):
             _t, run3 = runners._niches_job(cfg, {"similar_url": "u"}, {})
             with self.assertRaisesRegex(ValueError, "Канал не найден"):
                 run3(None, lambda *a: None, CancelToken())
+
+
+class FavoritesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        shutil.rmtree(publish_dir(), ignore_errors=True)
+        self.addCleanup(shutil.rmtree, publish_dir(), True)
+        niches.save({"id": "r1", "at": 1000.0, "niche": "Судьбы", "filters": {"language": "es"}, "queries": [], "stats": {},
+                     "channels": [{"id": "UC1", "title": "Один", "subs": 100}, {"id": "UC2", "title": "Два", "subs": 200}]})
+
+    def test_added_channel_survives_history_removal_until_deleted_by_hand(self) -> None:
+        self.assertTrue(niches.add_favorite("r1", "UC1"))
+        niches.remove("r1")  # поиск ушёл из истории
+        favs = niches.favorites()
+        self.assertEqual([f["id"] for f in favs], ["UC1"], "в избранном остался")
+        self.assertEqual((favs[0]["title"], favs[0]["found_in"], favs[0]["language"]), ("Один", "Судьбы", "es"))
+        self.assertTrue(niches.remove_favorite("UC1"))
+        self.assertEqual(niches.favorites(), [])
+        self.assertFalse(niches.remove_favorite("UC1"))
+
+    def test_twice_keeps_one_record_and_unknown_channel_is_refused(self) -> None:
+        self.assertTrue(niches.add_favorite("r1", "UC1"))
+        first = niches.favorites()[0]["saved_at"]
+        self.assertTrue(niches.add_favorite("r1", "UC1"))
+        self.assertEqual(len(niches.favorites()), 1)
+        self.assertEqual(niches.favorites()[0]["saved_at"], first, "дата добавления не сбивается")
+        self.assertFalse(niches.add_favorite("r1", "нет"))
+        self.assertFalse(niches.add_favorite("нет", "UC1"))
+
+    def test_newest_first_and_api(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from server.app import app
+
+        client = TestClient(app)
+        self.assertEqual(client.post("/api/niches/favorites", json={"run_id": "r1", "channel_id": "UC1"}).status_code, 200)
+        out = client.post("/api/niches/favorites", json={"run_id": "r1", "channel_id": "UC2"}).json()["favorites"]
+        self.assertEqual([f["id"] for f in out], ["UC2", "UC1"])
+        self.assertEqual(client.post("/api/niches/favorites", json={"run_id": "r1", "channel_id": "x"}).status_code, 404)
+        self.assertEqual(client.delete("/api/niches/favorites/UC2").json()["favorites"][0]["id"], "UC1")
+        self.assertEqual(client.delete("/api/niches/favorites/UC2").status_code, 404)
 
 
 if __name__ == "__main__":

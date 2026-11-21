@@ -42,6 +42,30 @@ class MusicClaimsTest(unittest.TestCase):
             music.mark_claimed(t["id"])
         self.assertEqual(music.usable("aquarium")[0], "")
 
+    def test_group_pick_goes_through_all_tracks_before_repeating(self) -> None:
+        cat = {"groups": {"war": "Военная"}, "hints": {}, "tracks": [
+            {"id": f"w{i}", "title": f"W{i}", "group": "war", "file": "a.mp3", "duration": 1} for i in range(4)]}
+        with mock.patch.object(music, "catalog", lambda: cat):
+            first = [music.usable("group:war")[0] for _ in range(4)]
+            self.assertEqual(sorted(first), ["w0", "w1", "w2", "w3"], "круг: все треки по разу")
+            nxt = music.usable("group:war")[0]
+            self.assertNotEqual(nxt, first[-1], "новый круг не начинается с последнего")
+            tid, note = music.usable("group:war")
+            self.assertIn("Военная", note)
+
+    def test_group_skips_claimed_and_empty_group_means_no_music(self) -> None:
+        cat = {"groups": {"war": "Военная"}, "hints": {}, "tracks": [
+            {"id": "a", "title": "A", "group": "war", "file": "a.mp3", "duration": 1},
+            {"id": "b", "title": "B", "group": "war", "file": "b.mp3", "duration": 1}]}
+        with mock.patch.object(music, "catalog", lambda: cat):
+            music.mark_claimed("a")
+            self.assertEqual({music.usable("group:war")[0] for _ in range(5)}, {"b"})
+            music.mark_claimed("b")
+            tid, note = music.usable("group:war")
+            self.assertEqual(tid, "")
+            self.assertIn("нет подходящих", note)
+            self.assertEqual(music.usable("group:нет-такой")[0], "")
+
     def test_publish_notes_claimed_music(self) -> None:
         from engine.publish import run as pub
         from engine.publish import youtube

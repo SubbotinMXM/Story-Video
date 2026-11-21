@@ -58,5 +58,17 @@ class MotionTests(unittest.TestCase):
             self.assertIn("eq=contrast=1.05", vf)
 
 
+class CopyLookTests(unittest.TestCase):
+    def test_every_copy_of_a_video_looks_different(self) -> None:
+        looks = [lp.copy_look("ролик", i, (1920, 1080)) for i in range(5)]
+        self.assertEqual(len(set(looks)), 5)
+        self.assertTrue(all("crop=" in x and "scale=1920:1080" in x for x in looks))
+
+    def test_no_size_means_color_only_and_other_video_other_order(self) -> None:
+        self.assertNotIn("crop=", lp.copy_look("a", 0, None))
+        firsts = {lp.copy_look(f"ролик {i}", 0, None) for i in range(30)}
+        self.assertGreater(len(firsts), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2856,3 +2856,16 @@ code {
 @media (max-width: 900px) {
   .tdiff-row { grid-template-columns: 1fr; }
 }
+
+/* ---------- музыка: случайный трек категории ---------- */
+.music-pool { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--accent-soft); display: flex; flex-direction: column; gap: 8px; }
+.music-pool-head { display: flex; align-items: center; gap: 8px; }
+.music-pool-head svg { flex: 0 0 auto; color: var(--accent); }
+.music-pool-list { display: flex; flex-direction: column; }
+.music-pool-row { display: flex; align-items: center; gap: 10px; padding: 3px 0; }
+.music-pool-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.music-pool-row.claimed .music-pool-title { text-decoration: line-through; color: var(--text-3); }
+
+/* ---------- поиск ниш: избранное ---------- */
+.niche-views { margin-bottom: 14px; }
+.fav-btn.on { color: #e5a400; }

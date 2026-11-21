@@ -337,7 +337,8 @@ export type AiModelOption = { id: string; label: string; price_cents: number; lo
 export type AiModels = { share: number; share_max: number; image: AiModelOption[]; video: AiModelOption[] };
 
 export type MusicTrack = { id: string; title: string; group: string; duration: number; claimed?: boolean };
-export type MusicCatalog = { groups: Record<string, string>; tracks: MusicTrack[] };
+/** hints — когда категория подходит (по нишам). «group:<id>» в настройке музыки = случайный трек категории. */
+export type MusicCatalog = { groups: Record<string, string>; hints?: Record<string, string>; tracks: MusicTrack[] };
 
 export type PublishChannel = {
   id: string; name: string; handle: string; account: string; playlists: string[];
@@ -393,7 +394,7 @@ export const api = {
   music: () => request<MusicCatalog>("GET", "/api/music"),
   aiModels: () => request<AiModels>("GET", "/api/ai/models"),
   rewriteChannels: (channels: string[], count: number, params: Record<string, unknown>) =>
-    request<{ jobs: Job[]; channels: ChannelPick[] }>("POST", "/api/rewrite/channels", { channels, count, params }),
+    request<{ jobs: Job[]; channels: ChannelPick[]; notes?: string[] }>("POST", "/api/rewrite/channels", { channels, count, params }),
   rewriteChannelStats: () => request<{ channels: ChannelStat[] }>("GET", "/api/rewrite/channels"),
   analytics: () => request<{ channels: AnalyticsRow[]; auto?: AnalyticsAuto }>("GET", "/api/analytics"),
   templates: () => request<Template[]>("GET", "/api/templates"),

@@ -1,5 +1,9 @@
-"""Фоновая музыка для стоковых роликов: каталог assets/music — 5 нейтральных треков из Фонотеки YouTube
+"""Фоновая музыка для стоковых роликов: каталог assets/music — треки из Фонотеки YouTube по нишам-категориям
 (YouTube Audio Library: на них не бывает претензий Content ID; раньше был FreePD — на «Cold Journey» пришла претензия).
+Все треки — без слов и без обязательного указания автора.
+
+В настройке «музыка» хранится либо id трека, либо «group:<категория>» — тогда каждый ролик берёт случайный трек
+этой категории (пока не прозвучат все — повторов нет), либо пусто — без музыки.
 
 Треки заранее подготовлены tools/prepare_music.py: одна громкость (−16 LUFS), ровная
 по всей длине, и бесшовный стык для повтора по кругу.
@@ -8,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import random
 from functools import lru_cache
 from pathlib import Path
 
@@ -24,9 +29,9 @@ def catalog() -> dict:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"groups": {}, "tracks": []}
+        return {"groups": {}, "hints": {}, "tracks": []}
     tracks = [t for t in raw.get("tracks") or [] if (MUSIC_DIR / str(t.get("file") or "")).is_file()]
-    return {"groups": raw.get("groups") or {}, "tracks": tracks}
+    return {"groups": raw.get("groups") or {}, "hints": raw.get("hints") or {}, "tracks": tracks}
 
 
 def track(track_id: str) -> dict | None:
@@ -37,6 +42,50 @@ def track(track_id: str) -> dict | None:
 def track_path(track_id: str) -> Path | None:
     t = track(track_id)
     return MUSIC_DIR / t["file"] if t else None
+
+
+# ---------- «случайный трек из категории» ----------
+GROUP_PREFIX = "group:"
+USED_FILE = "music_used.json"  # {категория: [id уже прозвучавших в этом круге]}
+
+
+def is_group(value: str) -> bool:
+    return (value or "").strip().startswith(GROUP_PREFIX)
+
+
+def group_of(value: str) -> str:
+    return (value or "").strip()[len(GROUP_PREFIX):]
+
+
+def group_label(gid: str) -> str:
+    return catalog()["groups"].get(gid, gid)
+
+
+def group_tracks(gid: str) -> list[dict]:
+    return [t for t in catalog()["tracks"] if t.get("group") == gid]
+
+
+def pick_from_group(gid: str) -> dict | None:
+    """Случайный чистый трек категории. Пока не прозвучали все — один и тот же не повторяется;
+    когда круг пройден, начинается новый (первым не берётся последний прозвучавший)."""
+    from engine.publish.store import LOCK, read_json, write_json
+
+    bad = claimed()
+    clean = [t for t in group_tracks(gid) if t["id"] not in bad]
+    if not clean:
+        return None
+    with LOCK:
+        used = read_json(USED_FILE, {})
+        played = [i for i in (used.get(gid) or []) if any(t["id"] == i for t in clean)]
+        fresh = [t for t in clean if t["id"] not in played]
+        if not fresh:  # круг пройден — начинаем заново, но подряд тот же не ставим
+            last = played[-1] if played else ""
+            fresh = [t for t in clean if t["id"] != last] or clean
+            played = []
+        pick = random.choice(fresh)
+        used[gid] = [*played, pick["id"]]
+        write_json(USED_FILE, used)
+    return pick
 
 
 def credit_line(track_id: str) -> str:
@@ -80,10 +129,13 @@ def mark_claimed(track_id: str, *, video: str = "", reason: str = "") -> None:
 
 def claims_in(text: str, *, video: str = "") -> list[str]:
     """Текст страницы претензий ролика → треки нашей библиотеки, которые там упомянуты (вносим в список)."""
+    import re
+
     low = " ".join((text or "").lower().split())
     found = []
     for t in catalog()["tracks"]:
-        if t["title"].lower() in low:
+        # целое слово/фраза: короткое название вроде «Level» не должно находиться внутри чужого слова
+        if re.search(rf"(?<!\w){re.escape(t['title'].lower())}(?!\w)", low):
             mark_claimed(t["id"], video=video, reason="претензия YouTube (Content ID)")
             found.append(t["title"])
     return found
@@ -92,6 +144,12 @@ def claims_in(text: str, *, video: str = "") -> list[str]:
 def usable(track_id: str) -> tuple[str, str]:
     """Трек для ролика: выбранный, а если на нём претензия YouTube — другой из той же группы (иначе любой
     чистый). → (id трека или «», пояснение для итогов)."""
+    if is_group(track_id):
+        gid = group_of(track_id)
+        pick = pick_from_group(gid)
+        if pick is None:
+            return "", f"в категории «{group_label(gid)}» нет подходящих треков — ролик без музыки"
+        return pick["id"], f"случайный трек из категории «{group_label(gid)}» — «{pick['title']}»"
     t = track(track_id)
     if not t:
         if not (track_id or "").strip():

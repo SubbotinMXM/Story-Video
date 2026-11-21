@@ -68,6 +68,22 @@ def grade_filter(key: str) -> str:
     return grade_of(key)[1]
 
 
+def copy_look(key: str, index: int, size: tuple[int, int] | None) -> str:
+    """Фильтр ffmpeg для копии ролика (в том же проходе, что и сдвиг скорости): своя цветовая подача и чуть
+    другой кадр (обрезка 1–2,5% по краям со сдвигом) — у каждой копии свои. Копии одного ролика между собой разные
+    (подачи идут по кругу), у разных роликов порядок разный. size — размер кадра: без него только цвет."""
+    colored = [g for _, g in GRADES if g]
+    start = _h(key, "copy") % len(colored)
+    parts = [colored[(start + index) % len(colored)]]
+    if size and size[0] > 0 and size[1] > 0:
+        w, h = size
+        k = (0.985, 0.978, 0.990, 0.972, 0.982)[(index + start) % 5]
+        px, py = ((0.5, 0.5), (0.3, 0.6), (0.7, 0.4), (0.4, 0.3), (0.6, 0.7))[(index + start) % 5]
+        ow, oh = int(w * k) // 2 * 2, int(h * k) // 2 * 2
+        parts.append(f"crop={ow}:{oh}:{int((w - ow) * px)}:{int((h - oh) * py)},scale={w}:{h}:flags=lanczos")
+    return ",".join(parts)
+
+
 def motion_mode(seed: int) -> int:
     """Вид движения фото (наезд, отъезд, пролёты, дрейф); соседние кадры всегда разные:
     чётные берут из первой тройки видов, нечётные — из второй, внутри тройки выбор случайный."""

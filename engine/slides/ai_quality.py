@@ -21,6 +21,7 @@ from engine.core.jsonish import json_dict
 from engine.core.cancel import CancelledError
 from engine.core.logutil import log
 from engine.core.threads import ThreadPoolExecutor
+from engine.slides.story_context import AMBIGUITY_RULE
 
 PROMPTS_NAME = "ai_prompts.json"
 _BATCH = 12
@@ -39,6 +40,7 @@ Never: text, captions, logos, watermarks, split screen, readable signs (only blu
 anything from "Wrong for this film", anachronisms.
 Return ONLY JSON: {"prompts": ["...", "..."]} — same count and order as the items.
 """
+_SYSTEM = _SYSTEM.replace("Return ONLY JSON:", AMBIGUITY_RULE + "\nReturn ONLY JSON:", 1)
 
 
 def _hash(*parts: str) -> str:

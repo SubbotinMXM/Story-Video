@@ -22,6 +22,7 @@ from engine.core.cancel import CancelledError
 from engine.core.logutil import log
 from engine.slides.ffprobe_util import grab_frame
 from engine.slides.llm_client import LLMClient
+from engine.slides.story_context import JUDGE_AMBIGUITY_RULE
 from engine.slides.theme_plan import ThemePlan
 
 # смысл ролика важнее всего (чужая страна/эпоха — брак), потом слова момента, потом съёмка
@@ -51,6 +52,7 @@ Rate every candidate with integers 0-10:
 Be strict: a generic village with no sign of the film's country is NOT the film's country.
 Return ONLY JSON: {"items": [{"n": 1, "context": 7, "beat": 6, "quality": 8, "reject": ""}]}
 """
+_SYSTEM = _SYSTEM.replace("Be strict:", JUDGE_AMBIGUITY_RULE + "\nBe strict:", 1)
 
 
 # первые минуты ролика: зрелищность важнее буквального смысла фразы

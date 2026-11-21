@@ -465,6 +465,37 @@ def niches_runs() -> dict[str, Any]:
     return {"runs": niches.runs(), "evergreen": niches.EVERGREEN}
 
 
+class FavoriteIn(BaseModel):
+    run_id: str
+    channel_id: str
+
+
+@app.get("/api/niches/favorites")
+def niches_favorites() -> dict[str, Any]:
+    from engine.research import niches
+
+    return {"favorites": niches.favorites()}
+
+
+@app.post("/api/niches/favorites")
+def niches_favorite_add(body: FavoriteIn) -> dict[str, Any]:
+    """Канал из результатов поиска — в избранное (остаётся там, пока человек сам не удалит)."""
+    from engine.research import niches
+
+    if not niches.add_favorite(body.run_id, body.channel_id):
+        raise HTTPException(404, "Такого канала в этом поиске уже нет")
+    return {"favorites": niches.favorites()}
+
+
+@app.delete("/api/niches/favorites/{channel_id}")
+def niches_favorite_delete(channel_id: str) -> dict[str, Any]:
+    from engine.research import niches
+
+    if not niches.remove_favorite(channel_id):
+        raise HTTPException(404, "Этого канала нет в избранном")
+    return {"favorites": niches.favorites()}
+
+
 @app.delete("/api/niches/runs/{run_id}")
 def niches_run_delete(run_id: str) -> dict[str, Any]:
     """Убрать поиск из истории (только из журнала программы)."""
@@ -558,8 +589,9 @@ def list_jobs() -> list[dict[str, Any]]:
 
 @app.post("/api/rewrite/channels")
 def rewrite_channels(body: ChannelsIn) -> dict[str, Any]:
-    """«По каналам»: с каждого канала — count следующих залетевших роликов, которых ещё не брали → рерайты в очередь."""
-    from engine.rewrite.channels import ChannelError, pick
+    """«По каналам»: ровно count следующих залетевших роликов из всех каналов-доноров (по очереди с каждого, сколько
+    каналов — неважно), которых ещё не брали → рерайты в очередь."""
+    from engine.rewrite.channels import ChannelError, pick, spread
     from engine.slides.stocks_base import parse_keys
 
     urls = [u.strip() for u in body.channels if u.strip()]
@@ -572,25 +604,35 @@ def rewrite_channels(body: ChannelsIn) -> dict[str, Any]:
     states = _job_states()
     items: list[JobIn] = []
     report: list[dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
     chosen: set[str] = set()  # один канал двумя ссылками (@имя и /channel/UC…) — ролики не повторяются
     for url in urls:
         try:
+            # с каждого канала берём кандидатов «с запасом» — сколько реально нужно, решит spread (всего ровно count)
             got = pick(url, count, section=section, keys=keys, jobs=states, exclude=chosen)
         except ChannelError as exc:
             report.append({"url": url, "error": str(exc)})
             continue
-        report.append({"url": url, "channel": got["channel"], "taken": len(got["videos"]), "left": got["left"],
-                       "titles": [v.title for v in got["videos"]]})
-        for v in got["videos"]:
-            chosen.add(v.id)
-            items.append(JobIn(kind="rewrite", params={**body.params, "url": v.url, "video_title": v.title,
-                                                       "channel_title": got["channel"], "force": True}))
+        chosen.update(v.id for v in got["videos"])  # дубли между ссылками — только по кандидатам
+        entry = {**got, "url": url}
+        entries.append(entry)
+    for ent, v in spread(entries, count):
+        items.append(JobIn(kind="rewrite", params={**body.params, "url": v.url, "video_title": v.title,
+                                                   "channel_title": ent["channel"], "force": True}))
+    for ent in entries:
+        report.append({"url": ent["url"], "channel": ent["channel"], "taken": ent["taken"], "left": ent["left"],
+                       "titles": [v.title for v in ent["videos"][:ent["taken"]]]})
     if not items:
         errors = "; ".join(r["error"] for r in report if r.get("error"))
         raise HTTPException(400, errors or "С этих каналов брать больше нечего — все подходящие ролики уже переписаны")
+    notes: list[str] = []
+    if len(items) < count:
+        notes.append(f"Подходящих роликов нашлось {len(items)} из {count} — столько и поставлено: на каналах-донорах "
+                     "больше нет ещё не переписанных подходящих (от 10 минут для рассказов, от 8 для слайдов, не Shorts и не трансляции). "
+                     "Добавь ещё канал-донор — недостающее возьмётся с него.")
     jobs = _enqueue(items)
     _reserve_links(jobs)
-    return {"jobs": jobs, "channels": report}
+    return {"jobs": jobs, "channels": report, "notes": notes}
 
 
 class TemplateIn(BaseModel):
@@ -715,7 +757,7 @@ def templates_launch(tid: str, body: TemplateLaunchIn) -> dict[str, Any]:
     """«Сделать N роликов по шаблону»: с каналов-конкурентов шаблона берутся N следующих ещё не переписанных роликов
     (каналы — по очереди), для каждого — рерайт → ролик → выкладка по настройкам шаблона."""
     from engine.publish.schedule import clamp_step
-    from engine.rewrite.channels import ChannelError, pick
+    from engine.rewrite.channels import ChannelError, pick, spread
     from engine.rewrite.prompts import DEFAULT_PROMPTS
     from engine.slides.stocks_base import parse_keys
     from server import templates as tp
@@ -767,17 +809,13 @@ def templates_launch(tid: str, body: TemplateLaunchIn) -> dict[str, Any]:
             report.append({"url": url, "error": str(exc)})
             continue
         seen.update(v.id for v in got["videos"])
-        entry = {"url": url, "channel": got["channel"], "taken": 0, "left": got["left"], "videos": got["videos"]}
+        entry = {**got, "url": url}
         lists.append(entry)
         report.append(entry)
     items: list[JobIn] = []
-    for rnd in range(count):  # по очереди: по ролику с каждого канала, пока не наберётся N
-        for ent in lists:
-            if len(items) < count and rnd < len(ent["videos"]):
-                v = ent["videos"][rnd]
-                ent["taken"] += 1
-                items.append(JobIn(kind="rewrite", params={**common, "url": v.url, "video_title": v.title,
-                                                           "channel_title": ent["channel"], "force": True}))
+    for ent, v in spread(lists, count):  # по очереди: по ролику с каждого канала, пока не наберётся N
+        items.append(JobIn(kind="rewrite", params={**common, "url": v.url, "video_title": v.title,
+                                                   "channel_title": ent["channel"], "force": True}))
     if not items:
         errors = "; ".join(r["error"] for r in report if r.get("error"))
         raise HTTPException(400, errors or "С каналов шаблона брать больше нечего — все подходящие ролики уже переписаны")
@@ -786,7 +824,7 @@ def templates_launch(tid: str, body: TemplateLaunchIn) -> dict[str, Any]:
     jobs = _enqueue(items, cfg, keep_dates=True)
     _reserve_links(jobs)
     return {"jobs": jobs, "notes": notes, "channels": [
-        {k: v for k, v in r.items() if k != "videos"} for r in report]}
+        {k: r.get(k) for k in ("url", "channel", "taken", "left", "error") if k in r} for r in report]}
 
 
 @app.get("/api/collabs")
@@ -1212,6 +1250,7 @@ def music_list() -> dict[str, Any]:
     bad = claimed()
     return {
         "groups": cat["groups"],
+        "hints": cat.get("hints") or {},
         "tracks": [{"id": t["id"], "title": t["title"], "group": t["group"], "duration": t["duration"],
                     "claimed": t["id"] in bad} for t in cat["tracks"]],
     }

@@ -41,6 +41,22 @@ Rules:
 """
 
 
+# Слово с несколькими значениями («гусеница»: гусеница танка или насекомое) читается по теме ролика, а не по самому
+# частому смыслу. Правило идёт во все промпты, которые пишут запросы или оценивают кадры, — в любом режиме подбора.
+AMBIGUITY_RULE = """\
+- READ EVERY WORD IN THE SENSE OF THIS FILM'S TOPIC, never by its most common meaning. A word with several meanings
+  (caterpillar: tank track or insect; mouse: computer device or animal; bow: weapon or ribbon; crane: machine or bird;
+  mole: animal or spy; drone: aircraft or bee) always means the one that fits the film's brief, its domain and the
+  neighbouring lines. In a film about tanks "гусеница" / "caterpillar" is the chain track of a tank, never the insect.
+  Keep the film's domain in the query ("tank caterpillar track close-up", not "caterpillar") so the search cannot
+  drift to another meaning."""
+
+JUDGE_AMBIGUITY_RULE = """\
+Words of the narration have the meaning of THIS film's topic. A candidate that shows ANOTHER meaning of an ambiguous
+word (an insect for "caterpillar" in a film about tanks, an animal for "mouse" in a film about computers, a vegetable
+for "bow" in a medieval film) does not belong to the film: context 0-3 and reject "wrong meaning of the word"."""
+
+
 _PRESENT = re.compile(r"\b(present|modern|today|contemporary|current|nowadays|now)\b", re.I)
 _YEAR = re.compile(r"(?<!\d)(1[0-9]{3}|20[0-9]{2})(?!\d)")
 

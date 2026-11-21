@@ -10,7 +10,7 @@ from pathlib import Path
 from engine.core.jsonish import json_dict
 from engine.slides.llm_client import LLMClient
 from engine.core.logutil import log
-from engine.slides.story_context import StoryContext, extract_story_context
+from engine.slides.story_context import AMBIGUITY_RULE, StoryContext, extract_story_context
 
 THEME_NAME = "theme.json"
 
@@ -59,6 +59,8 @@ Rules:
 - Bad: "Syracuse harbor aerial" as the majority of a biography
 - Bad: "modern engineer at computer"
 """
+
+QUERY_SYSTEM = QUERY_SYSTEM.rstrip() + "\n" + AMBIGUITY_RULE + "\n"
 
 
 @dataclass

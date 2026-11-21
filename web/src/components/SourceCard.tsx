@@ -75,7 +75,7 @@ export function useSource(section: Section) {
   const rewriting = kind === "links" || kind === "channels" || (kind === "text" && rewriteText);
 
   const count =
-    kind === "text" ? filledTexts.length : kind === "audio" ? filledAudios.length : kind === "links" ? linkUrls.length : channelUrls.length * perChannel;
+    kind === "text" ? filledTexts.length : kind === "audio" ? filledAudios.length : kind === "links" ? linkUrls.length : channelUrls.length ? perChannel : 0;
 
   // ---------- тексты ----------
   const addTexts = (list: { text: string; name: string | null }[]) => {
@@ -123,7 +123,7 @@ export function useSource(section: Section) {
         push({
           kind: "info",
           title: `В очереди: ${r.jobs.length}`,
-          text: r.channels.map((c) => (c.error ? `✕ ${c.url}: ${c.error}` : `${c.channel}: взято ${c.taken}, осталось ~${c.left}`)).join("\n"),
+          text: [...(r.notes ?? []), ...r.channels.map((c) => (c.error ? `✕ ${c.url}: ${c.error}` : `${c.channel}: взято ${c.taken}, осталось ~${c.left}`))].join("\n"),
         });
         void api.rewriteChannelStats().then((s) => setStats(s.channels)).catch(() => undefined);
         return;
@@ -241,7 +241,10 @@ export function useSource(section: Section) {
             placeholder={"https://www.youtube.com/@канал1\nhttps://www.youtube.com/@канал2"}
           />
         </Field>
-        <Field label="Роликов с каждого канала" hint="Следующий запуск возьмёт следующие по рейтингу — без повторов">
+        <Field
+          label="Сколько роликов взять"
+          hint="Всего за запуск — со всех каналов вместе, по очереди с каждого; сколько каналов в списке, не важно. Следующий запуск возьмёт следующие по рейтингу — без повторов."
+        >
           <NumberInput value={perChannel} onChange={(v) => update({ rewrite_channels_count: v })} min={1} max={50} />
         </Field>
         {stats.length > 0 && (
@@ -338,7 +341,7 @@ export function useSource(section: Section) {
     "ролик",
     publishOn ? `выкладка на ${publishTo} канал(а/ов)` : "без выкладки",
   ];
-  const howMany = kind === "channels" ? `до ${count} роликов (по ${perChannel} с канала)` : `роликов: ${count}`;
+  const howMany = kind === "channels" ? `${count} ${count === 1 ? "ролик" : "роликов"} (по очереди с ${channelUrls.length} ${channelUrls.length === 1 ? "канала" : "каналов"})` : `роликов: ${count}`;
   const plan = count === 0 ? empty : `${howMany} · ${steps.join(" → ")}`;
 
   const bar = (
