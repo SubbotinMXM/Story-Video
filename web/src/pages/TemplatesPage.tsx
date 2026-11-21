@@ -51,12 +51,12 @@ export function TemplatesPage({ active }: { active: boolean }) {
   }, [active, load]);
 
   const edit = async (t: Template) => {
-    if (!window.confirm(`Загрузить шаблон «${t.name}» в настройки? Настройки раздела «${SECTION[t.section]}» заменятся настройками шаблона — после правок нажми «Сохранить в шаблон» вверху.`)) return;
+    if (!window.confirm(`Открыть шаблон «${t.name}» для правки по шагам? Настройки раздела «${SECTION[t.section]}» заменятся настройками шаблона — на каждом шаге будет видно, что было и что стало. В конце нажми «Сохранить в шаблон».`)) return;
     try {
       await flush();
       replace(await api.applyTemplate(t.id));
       setEditingTemplate({ id: t.id, name: t.name, section: t.section });
-      goTo(t.section);
+      goTo("steps");
     } catch (e) {
       push({ kind: "error", title: "Не удалось загрузить шаблон", text: (e as Error).message });
     }
@@ -156,7 +156,7 @@ export function TemplatesPage({ active }: { active: boolean }) {
                   <Button variant="primary" icon={<Play size={14} />} onClick={() => setLaunching(t)} disabled={t.summary.competitors.length === 0}>
                     Запустить
                   </Button>
-                  <Button size="sm" icon={<Pencil size={14} />} onClick={() => void edit(t)} title="Загрузить шаблон в настройки и поправить">
+                  <Button size="sm" icon={<Pencil size={14} />} onClick={() => void edit(t)} title="Открыть шаблон по шагам: видно, что было, и что меняешь">
                     Изменить
                   </Button>
                   <Button size="sm" variant="ghost" onClick={() => setRenaming(t)}>

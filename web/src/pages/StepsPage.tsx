@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { AlertTriangle, ArrowLeft, ArrowRight, Check, Clapperboard, Images, Play } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, Check, Clapperboard, Images, Play, Save } from "lucide-react";
 import { Button, Card, PageHeader } from "../components/ui";
 import { SaveTemplateButton } from "../components/SaveTemplate";
 import { useSource } from "../components/SourceCard";
@@ -11,8 +11,11 @@ import { MixCard } from "../components/MixCard";
 import { MusicCard } from "../components/MusicCard";
 import { PublishCard, usePublishCount } from "../components/PublishCard";
 import { useProvider, useTtsNeedsSetup } from "../components/TtsFields";
+import { TemplateRows } from "../components/TemplateRows";
 import { api, type MusicCatalog } from "../lib/api";
-import { useLoadedSettings, useProfiles } from "../lib/store";
+import { useLoadedSettings, useProfiles, useToasts } from "../lib/store";
+import { setEditingTemplate, useEditingBase, useEditingTemplate } from "../lib/templateEdit";
+import { templateRows, type DiffRow, type DiffStep } from "../lib/templateDiff";
 
 type Section = "broll" | "slides";
 type StepId = "section" | "source" | "voice" | "texts" | "video" | "look" | "publish" | "summary";
@@ -64,7 +67,10 @@ type Status = { ok: boolean; note: string };
 /** «Генерация по шагам»: все настройки, которые влияют на ролик, — по порядку. Шаги можно проходить в любом
  *  порядке; в конце — сводка (что получится, куда уйдёт) и «Пуск». Настройки общие со страницами разделов. */
 export function StepsPage() {
-  const { settings, meta } = useLoadedSettings();
+  const { settings, meta, update, flush } = useLoadedSettings();
+  const { push } = useToasts();
+  const editing = useEditingTemplate();
+  const base = useEditingBase(editing);
   const [section, setSectionState] = useState<Section>(() => stored("steps-section", "broll", ["broll", "slides"]));
   const [step, setStepState] = useState<StepId>(() => stored("steps-step", "section", STEPS.map((s) => s.id)));
   const broll = useSource("broll");
@@ -86,6 +92,15 @@ export function StepsPage() {
     document.querySelector(".content")?.scrollTo({ top: 0 });
   };
   const index = STEPS.findIndex((s) => s.id === step);
+
+  // «Изменить» в шаблонах: открываем шаблон с первого шага и его раздела
+  const editId = editing?.id;
+  useEffect(() => {
+    if (!editing) return;
+    setSection(editing.section);
+    go("section");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editId]);
 
   useEffect(() => {
     if (step !== "summary") return;
@@ -167,6 +182,28 @@ export function StepsPage() {
     return out;
   }, [profiles]);
 
+  // ---------- правка шаблона: что было в шаблоне и что стало ----------
+  const rows: DiffRow[] = useMemo(
+    () => (editing && base ? templateRows(base, settings, { section, meta, names, modeTitle: (id) => MEDIA_MODES.find((m) => m.id === id)?.title ?? id }) : []),
+    [editing, base, settings, section, meta, names],
+  );
+  const changedRows = rows.filter((r) => r.changed);
+  const rowsOf = (id: StepId) => rows.filter((r) => r.step === (id as DiffStep));
+  const changedOf = (id: StepId) => (id === "summary" ? changedRows.length : rowsOf(id).filter((r) => r.changed).length);
+  const revert = (r: DiffRow) => update(r.revert() as never);
+  const stepOfRow = (r: DiffRow) => STEPS.find((s) => s.id === (r.step as string)) ?? STEPS[0];
+  const saveTemplate = async () => {
+    if (!editing) return;
+    try {
+      await flush();
+      await api.saveTemplate(editing.id);
+      push({ kind: "ok", title: `Шаблон «${editing.name}» обновлён`, text: "Новые запуски пойдут с этими настройками" });
+      setEditingTemplate(null);
+    } catch (e) {
+      push({ kind: "error", title: "Шаблон не сохранился", text: (e as Error).message });
+    }
+  };
+
   // ---------- шаги ----------
   const body: Record<StepId, ReactNode> = {
     section: (
@@ -179,6 +216,8 @@ export function StepsPage() {
               role="radio"
               aria-checked={section === s.id}
               className={`provider steps-choice-item ${section === s.id ? "active" : ""}`}
+              disabled={Boolean(editing) && editing?.section !== s.id}
+              title={editing && editing.section !== s.id ? "У шаблона раздел не меняется" : undefined}
               onClick={() => setSection(s.id)}
             >
               <span className="radio" />
@@ -248,6 +287,21 @@ export function StepsPage() {
               ))}
             </ul>
           </div>
+        )}
+        {editing && changedRows.length === 0 && (
+          <div className="notice small">
+            Шаблон «{editing.name}» пока без изменений — настройки такие же, как были сохранены. Поменяй нужное на шагах слева.
+          </div>
+        )}
+        {editing && changedRows.length > 0 && (
+          <TemplateRows
+            name={editing.name}
+            title={`Что изменится в шаблоне «${editing.name}»`}
+            rows={changedRows}
+            onRevert={revert}
+            onGo={(r) => go(stepOfRow(r).id)}
+            stepTitle={(r) => `шаг «${stepOfRow(r).title}»`}
+          />
         )}
         <Card title="Что получится">
           <div className="steps-summary">
@@ -333,9 +387,9 @@ export function StepsPage() {
   return (
     <div className="page">
       <PageHeader
-        title="Генерация по шагам"
-        subtitle="Все настройки ролика по порядку — ничего не пропустить. Шаги можно проходить в любом порядке."
-        actions={<SaveTemplateButton section={section} />}
+        title={editing ? `Правка шаблона «${editing.name}»` : "Генерация по шагам"}
+        subtitle={editing ? "Настройки загружены из шаблона — так он был сохранён. Меняй по шагам: у каждой правки видно «было → стало». В конце — «Сохранить в шаблон»." : "Все настройки ролика по порядку — ничего не пропустить. Шаги можно проходить в любом порядке."}
+        actions={editing ? <Button variant="primary" icon={<Save size={16} />} onClick={() => void saveTemplate()}>Сохранить в шаблон</Button> : <SaveTemplateButton section={section} />}
       />
       <ol className="steps-rail">
         {STEPS.map((s, i) => {
@@ -355,6 +409,7 @@ export function StepsPage() {
                   <span className="steps-rail-title">{s.title}</span>
                   <span className="steps-rail-hint">{s.hint}</span>
                 </span>
+                {editing && changedOf(s.id) > 0 && <span className="steps-rail-changed" title="Изменений относительно шаблона">{changedOf(s.id)}</span>}
               </button>
             </li>
           );
@@ -363,6 +418,9 @@ export function StepsPage() {
 
       <div className="steps-body">
         {body[step]}
+        {editing && step !== "summary" && step !== "section" && (
+          <TemplateRows name={editing.name} rows={rowsOf(step)} onRevert={revert} />
+        )}
         {step === "section" && (
           <Card title="Сейчас выбрано по шагам" description="Короткая сводка по всем шагам — нажми на строку, чтобы перейти к шагу.">
             <div className="steps-summary">
@@ -390,7 +448,11 @@ export function StepsPage() {
           Шаг {index + 1} из {STEPS.length} · {cur.title}
           {step === "summary" ? ` · ${src.plan}` : ""}
         </span>
-        {step === "summary" ? (
+        {step === "summary" && editing ? (
+          <Button variant="primary" size="lg" icon={<Save size={18} />} onClick={() => void saveTemplate()}>
+            Сохранить в шаблон
+          </Button>
+        ) : step === "summary" ? (
           <Button
             variant="primary"
             size="lg"

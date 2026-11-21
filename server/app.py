@@ -677,6 +677,13 @@ def templates_save(tid: str) -> dict[str, Any]:
     return _template_view(tp.recapture(tid, load_config()))
 
 
+@app.get("/api/templates/{tid}/base")
+def templates_base(tid: str) -> dict[str, Any]:
+    """Содержимое шаблона как оно сохранено — чтобы при правке показать «было → стало»."""
+    tpl = _template_or_404(tid)
+    return {"id": tpl["id"], "name": tpl["name"], "section": tpl["section"], "settings": tpl.get("settings") or {}}
+
+
 @app.post("/api/templates/{tid}/apply")
 def templates_apply(tid: str) -> dict[str, Any]:
     """«Изменить»: загрузить шаблон в настройки (поправить на привычных экранах, потом «Сохранить в шаблон»)."""

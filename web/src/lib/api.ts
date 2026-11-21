@@ -139,6 +139,8 @@ export type Template = {
   updated: number;
   summary: TemplateSummary;
 };
+/** Шаблон как сохранён: его настройки (ключи конфига) — для сравнения «было → стало» при правке. */
+export type TemplateBase = { id: string; name: string; section: TemplateSection; settings: Record<string, unknown> };
 export type TemplateLaunchIn = { count: number; start: string; step: number; channels?: string[]; save_channels?: boolean };
 export type TemplateLaunchOut = {
   jobs: Job[];
@@ -398,6 +400,7 @@ export const api = {
   createTemplate: (name: string, section: TemplateSection) => request<Template>("POST", "/api/templates", { name, section }),
   renameTemplate: (id: string, name: string) => request<Template>("PATCH", `/api/templates/${id}`, { name }),
   saveTemplate: (id: string) => request<Template>("POST", `/api/templates/${id}/save`),
+  templateBase: (id: string) => request<TemplateBase>("GET", `/api/templates/${id}/base`),
   applyTemplate: (id: string) => request<Settings>("POST", `/api/templates/${id}/apply`),
   copyTemplate: (id: string) => request<Template>("POST", `/api/templates/${id}/copy`),
   deleteTemplate: (id: string) => request<{ ok: boolean }>("DELETE", `/api/templates/${id}`),

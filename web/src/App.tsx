@@ -240,7 +240,7 @@ export default function App() {
           <div className="tpl-banner" role="status">
             <LayoutTemplate size={18} />
             <div className="tpl-banner-text">
-              <b>Правишь шаблон «{editing.name}».</b> Настройки на экранах сейчас — из шаблона. Поправь и сохрани — или закрой без сохранения.
+              <b>Правишь шаблон «{editing.name}».</b> Настройки на экранах сейчас — из шаблона; на шагах видно, что было и что стало. Сохрани — или закрой без сохранения.
             </div>
             <button className="btn btn-primary btn-sm" onClick={() => void saveEditing()}>
               Сохранить в шаблон

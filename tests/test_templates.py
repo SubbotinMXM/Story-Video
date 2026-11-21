@@ -130,6 +130,16 @@ class CrudTests(ApiTestCase):
         saved = self.client.post(f"/api/templates/{t['id']}/save").json()
         self.assertEqual((saved["summary"]["channels"], saved["summary"]["step"]), (["p1/UC1"], 3), "«Сохранить в шаблон»")
 
+    def test_base_shows_template_as_saved_even_after_settings_changed(self) -> None:
+        """Правка по шагам сравнивает с шаблоном «как был сохранён» — не с текущими настройками."""
+        t = self.make().json()
+        self.client.patch("/api/settings", json={"slides_publish_step": 5})
+        base = self.client.get(f"/api/templates/{t['id']}/base").json()
+        self.assertEqual((base["name"], base["section"]), ("Страны", "slides"))
+        self.assertEqual(base["settings"]["slides_publish_channels"], SLIDES["slides_publish_channels"])
+        self.assertNotEqual(base["settings"]["slides_publish_step"], 5)
+        self.assertEqual(self.client.get("/api/templates/нет/base").status_code, 404)
+
     def test_file_survives_restart(self) -> None:
         self.make()
         self.assertEqual([x["name"] for x in tp.listing()], ["Страны"])
