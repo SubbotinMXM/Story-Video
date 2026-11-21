@@ -23,6 +23,8 @@ import {
 } from "lucide-react";
 import { JobsPanel } from "./components/JobsPanel";
 import { WhatsNewDialog } from "./components/WhatsNew";
+import { UpdateButton } from "./components/UpdateButton";
+import { ReportHost } from "./components/ReportDialog";
 import { api, type WhatsNew } from "./lib/api";
 import { useJobs, useSettings, useToasts } from "./lib/store";
 import { BrollPage } from "./pages/BrollPage";
@@ -211,6 +213,8 @@ export default function App() {
             </div>
           ))}
           <SaveIndicator />
+          <ReportHost />
+          <UpdateButton />
           {news?.version && (
             <button className="ver-btn" onClick={() => setNewsOpen("history")} title="Что нового: история версий">
               <Sparkles size={13} />

@@ -5,11 +5,13 @@ import { api, type AnalyticsAuto, type AnalyticsGroup, type AnalyticsRow, type P
 import { useJobs, useLoadedSettings, useProfiles, useToasts } from "../lib/store";
 import { inAnyGroup, inFilter, NO_GROUP, toggleFilter } from "../lib/groups";
 
-type SortKey = "name" | "subscribers" | "watch_hours" | "views_48h" | "scheduled" | "synced_at";
+type SortKey = "name" | "subscribers" | "watch_hours" | "views_48h" | "public" | "restricted" | "scheduled" | "synced_at";
 const SORTS: { key: SortKey; label: string }[] = [
   { key: "views_48h", label: "Просмотры, 48 ч" },
   { key: "subscribers", label: "Подписчики" },
   { key: "watch_hours", label: "Часы просмотра" },
+  { key: "public", label: "Вышло в открытый доступ" },
+  { key: "restricted", label: "Ограничено" },
   { key: "scheduled", label: "Запланировано" },
   { key: "name", label: "Название" },
   { key: "synced_at", label: "Обновлено" },
@@ -18,6 +20,20 @@ const SORTS: { key: SortKey; label: string }[] = [
 const splitSel = (v: string | undefined) => (v ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 const joinSel = (v: string[]) => v.join(",");
 const newGroupId = () => `g-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+
+/** Строка «подпись — число» в столбце «Ролики». */
+function VidStat({ label, value, title, strong }: { label: string; value: number | null | undefined; title?: string; strong?: boolean }) {
+  return (
+    <div className="an-vid-line" title={title}>
+      <span className="an-vid-label">{label}</span>
+      <span className={`an-vid-num ${strong ? "strong" : ""}`}>{fmtInt(value)}</span>
+    </div>
+  );
+}
+
+/** Ролики с ограниченным просмотром: «по ссылке» и «закрытые» вместе (null — ещё не читали). */
+const restrictedOf = (r: Pick<AnalyticsRow, "unlisted" | "private">) =>
+  r.unlisted == null && r.private == null ? null : (r.unlisted ?? 0) + (r.private ?? 0);
 
 const fmtInt = (n: number | null | undefined) => (n == null ? "—" : Math.round(n).toLocaleString("ru-RU"));
 const fmtHours = (n: number | null | undefined) =>
@@ -139,8 +155,8 @@ export function AnalyticsPage({ active }: { active: boolean }) {
     const sign = view.dir === "asc" ? 1 : -1;
     return picked.slice().sort((a, b) => {
       if (key === "name") return sign * a.name.localeCompare(b.name, "ru");
-      const x = a[key] as number | null | undefined;
-      const y = b[key] as number | null | undefined;
+      const x = (key === "restricted" ? restrictedOf(a) : a[key]) as number | null | undefined;
+      const y = (key === "restricted" ? restrictedOf(b) : b[key]) as number | null | undefined;
       if (x == null && y == null) return 0;
       if (x == null) return 1; // нет цифр — всегда внизу
       if (y == null) return -1;
@@ -189,8 +205,10 @@ export function AnalyticsPage({ active }: { active: boolean }) {
       ...g,
       channels: g.channels.includes(channel) ? g.channels.filter((c) => c !== channel) : [...g.channels, channel],
     }));
-  const sum = (k: "subscribers" | "watch_hours" | "views_48h" | "scheduled") =>
+  const sum = (k: "subscribers" | "watch_hours" | "views_48h" | "scheduled" | "public") =>
     list.some((r) => r[k] != null) ? list.reduce((a, r) => a + (r[k] ?? 0), 0) : null;
+  const sumRestricted = () =>
+    list.some((r) => restrictedOf(r) != null) ? list.reduce((a, r) => a + (restrictedOf(r) ?? 0), 0) : null;
   // «Всего» вчера: у канала без вчерашних цифр берём сегодняшние — его рост не попадёт в общую динамику ложно
   const sumPrev = (k: "subscribers" | "watch_hours" | "views_48h") =>
     list.some((r) => r.prev?.[k] != null) ? list.reduce((a, r) => a + (r.prev?.[k] ?? r[k] ?? 0), 0) : null;
@@ -268,8 +286,11 @@ export function AnalyticsPage({ active }: { active: boolean }) {
                   <th className="num an-sort" onClick={() => sortBy("subscribers")}>Подписчики {arrow("subscribers")}</th>
                   <th className="num an-sort" onClick={() => sortBy("watch_hours")} title="За всё время существования канала (YouTube Analytics, задержка до 1–2 суток)">Часы просмотра {arrow("watch_hours")}</th>
                   <th className="num an-sort" onClick={() => sortBy("views_48h")} title="Просмотры за последние 48 часов (в реальном времени)">Просмотры, 48 ч {arrow("views_48h")}</th>
-                  <th className="num an-sort" onClick={() => sortBy("scheduled")} title="Сколько роликов канала запланировано, но ещё не вышло (читается из «Контента» при синхронизации)">Запланировано {arrow("scheduled")}</th>
-                  <th className="an-sort" onClick={() => sortBy("synced_at")}>Обновлено {arrow("synced_at")}</th>
+                  <th className="an-vids-head" title="Читается из «Контента» при синхронизации. Сортировка — в списке «Сортировка» выше или по клику на подпись">
+                    <span className="an-sort" onClick={() => sortBy("public")}>Вышло {arrow("public")}</span>
+                    <span className="an-sort" onClick={() => sortBy("restricted")}>Огранич. {arrow("restricted")}</span>
+                    <span className="an-sort" onClick={() => sortBy("scheduled")}>Запланир. {arrow("scheduled")}</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -279,6 +300,10 @@ export function AnalyticsPage({ active }: { active: boolean }) {
                       <div className="an-name">{r.name}</div>
                       <div className="muted small">
                         {r.handle} · {r.profile}
+                      </div>
+                      <div className="muted small an-upd" title="Когда цифры канала обновлялись в последний раз">
+                        обновлено {when(r.synced_at)}
+                        {r.error && r.synced_at ? <> <Badge tone="warn">устарело</Badge></> : null}
                       </div>
                       {r.error && <div className="an-error small">{r.error}</div>}
                     </td>
@@ -298,10 +323,14 @@ export function AnalyticsPage({ active }: { active: boolean }) {
                     <td className="num">
                       {fmtInt(r.views_48h)} {delta(r.views_48h, r.prev?.views_48h, false, since(r.prev?.t, r.synced_at))}
                     </td>
-                    <td className="num">{fmtInt(r.scheduled)}</td>
-                    <td className="small">
-                      {when(r.synced_at)}
-                      {r.error && r.synced_at ? <> <Badge tone="warn">устарело</Badge></> : null}
+                    <td className="an-vids">
+                      <VidStat label="Вышло" value={r.public} title="Роликов сейчас в открытом доступе (Public)" strong />
+                      <VidStat
+                        label="Огранич."
+                        value={restrictedOf(r)}
+                        title={r.unlisted != null || r.private != null ? `Ограничено: по ссылке ${r.unlisted ?? 0}, ограниченный доступ ${r.private ?? 0}` : "Роликов с доступом по ссылке или ограниченным"}
+                      />
+                      <VidStat label="Запланир." value={r.scheduled} title="Запланировано, но ещё не вышло" />
                     </td>
                   </tr>
                 ))}
@@ -309,7 +338,7 @@ export function AnalyticsPage({ active }: { active: boolean }) {
               {rows !== null && !list.length && (
                 <tbody>
                   <tr>
-                    <td colSpan={7} className="muted small">{filtered ? "Под выбранные фильтры каналов нет — сними часть фильтров или добавь каналы в группу кнопкой в столбце «Группы»." : "Каналов пока нет."}</td>
+                    <td colSpan={6} className="muted small">{filtered ? "Под выбранные фильтры каналов нет — сними часть фильтров или добавь каналы в группу кнопкой в столбце «Группы»." : "Каналов пока нет."}</td>
                   </tr>
                 </tbody>
               )}
@@ -321,8 +350,11 @@ export function AnalyticsPage({ active }: { active: boolean }) {
                     <td className="num">{fmtInt(sum("subscribers"))} {delta(sum("subscribers"), sumPrev("subscribers"))}</td>
                     <td className="num">{fmtHours(sum("watch_hours"))} {delta(sum("watch_hours"), sumPrev("watch_hours"), true)}</td>
                     <td className="num">{fmtInt(sum("views_48h"))} {delta(sum("views_48h"), sumPrev("views_48h"))}</td>
-                    <td className="num">{fmtInt(sum("scheduled"))}</td>
-                    <td />
+                    <td className="an-vids">
+                      <VidStat label="Вышло" value={sum("public")} strong />
+                      <VidStat label="Огранич." value={sumRestricted()} />
+                      <VidStat label="Запланир." value={sum("scheduled")} />
+                    </td>
                   </tr>
                 </tfoot>
               )}

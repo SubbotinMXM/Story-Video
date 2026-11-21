@@ -63,6 +63,9 @@ class Stats:
     watch_hours: float | None = None  # за всё время
     views_total: int | None = None  # за всё время
     scheduled: int | None = None  # запланировано, но ещё не вышло (страница «Контент»)
+    public: int | None = None  # вышло в открытый доступ (Public)
+    unlisted: int | None = None  # по ссылке (Unlisted)
+    private: int | None = None  # ограниченный доступ (Private)
     synced_at: float = 0.0
     error: str = ""
     history: list[dict] = field(default_factory=list)
@@ -202,10 +205,17 @@ def read_channel(page, channel, cancel: CancelToken | None = None) -> Stats:
     if st.subscribers is None and st.views_48h is None and st.watch_hours is None:
         raise AnalyticsError("цифры на страницах аналитики не нашлись (Studio поменяла вёрстку?)")
     pause(cancel)
-    try:  # запланированные ролики — отдельным чтением; не вышло — столбец остаётся прежним, остальное не страдает
-        st.scheduled = youtube.count_scheduled(page, channel.id)
+    try:  # ролики по доступу — отдельным чтением; не вышло — столбцы остаются прежними, остальное не страдает
+        counts = youtube.count_videos(page, channel.id)
+        if counts is not None:
+            st.scheduled, st.public = counts["scheduled"], counts["public"]
+            st.unlisted, st.private = counts["unlisted"], counts["private"]
     except Exception as exc:
-        log(f"Аналитика {channel.handle}: запланированные ролики не прочитались ({str(exc)[:100]})")
+        log(f"Аналитика {channel.handle}: ролики по доступу не прочитались ({str(exc)[:100]}) — читаю только запланированные")
+        try:
+            st.scheduled = youtube.count_scheduled(page, channel.id)
+        except Exception as exc2:
+            log(f"Аналитика {channel.handle}: запланированные ролики не прочитались ({str(exc2)[:100]})")
     return st
 
 
@@ -229,7 +239,7 @@ def collect(cdp_url: str, channels: list, *, cancel: CancelToken | None = None, 
             except (youtube.StudioError, youtube.NeedsUser, AnalyticsError) as exc:
                 st = Stats(channel_id=ch.id, name=ch.name, handle=ch.handle, error=str(exc)[:300])
             log(f"Аналитика {ch.name} ({ch.handle}): подписчиков {st.subscribers}, часов {st.watch_hours}, "
-                f"за 48 ч {st.views_48h}, запланировано {st.scheduled}" + (f" — {st.error}" if st.error else ""))
+                f"за 48 ч {st.views_48h}, запланировано {st.scheduled}, вышло {st.public}, ограничено {(st.unlisted or 0) + (st.private or 0)}" + (f" — {st.error}" if st.error else ""))
             out.append(st)
             if on_channel:
                 on_channel(st)
@@ -258,14 +268,15 @@ def save_one(st: Stats) -> Stats:
         cur = dict(old)
         cur.update({k: v for k, v in asdict(st).items() if k not in ("history", "channel_id")})
         if st.error:  # не затираем последние известные цифры
-            for k in ("subscribers", "views_48h", "watch_hours", "views_total", "scheduled"):
+            for k in ("subscribers", "views_48h", "watch_hours", "views_total", "scheduled", "public", "unlisted", "private"):
                 if getattr(st, k) is None:
                     cur[k] = old.get(k)
             cur["synced_at"] = old.get("synced_at", 0.0)
             cur["error_at"] = time.time()
         else:
-            if st.scheduled is None:  # не прочиталось в этот раз — оставляем прежнее
-                cur["scheduled"] = old.get("scheduled")
+            for k in ("scheduled", "public", "unlisted", "private"):
+                if getattr(st, k) is None:  # не прочиталось в этот раз — оставляем прежнее
+                    cur[k] = old.get(k)
             cur["synced_at"] = st.synced_at or time.time()
             hist = list(old.get("history") or [])
             hist.append({"t": cur["synced_at"], "subscribers": st.subscribers, "views_48h": st.views_48h,

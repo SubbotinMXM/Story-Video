@@ -1231,6 +1231,28 @@ class AcceptListLoadsLateTest(unittest.TestCase):
         with click, mock.patch.object(youtube, "_act", lambda c=None: None):
             self.assertIsNone(youtube._accept_one(page, "https://studio/x", None, skip=["Ролик А"]))
 
+    def test_click_blocked_by_google_verify_names_the_real_cause(self):
+        """«Verify it's you» поверх «Accept»: клик падает по таймауту, а причиной должно стать окно Google."""
+        page, state, _click = self._page(rows_after=0, names=["Ролик А"])
+        base = page.locator.side_effect
+
+        def locator(sel):
+            holder = base(sel)
+            if "dialog" in sel and "confirm-button" not in sel and sel != youtube._COLLAB_LIST:
+                holder.all_inner_texts.return_value = ["Verify it's you To continue, we need to confirm it’s really you."]
+            return holder
+
+        page.locator.side_effect = locator
+
+        def click(p, loc, **kw):
+            raise TimeoutError("intercepts pointer events")
+
+        from engine.publish import human as human_mod
+
+        with mock.patch.object(human_mod, "click", click), mock.patch.object(youtube, "_act", lambda c=None: None):
+            with self.assertRaises(youtube.NeedsUser):
+                youtube._accept_one(page, "https://studio/x", None)
+
 
 class FileUploadedCheckTest(unittest.TestCase):
     """14.11: ролик был в расписании, а файл не загрузился («Processing abandoned»), локальный файл удалён."""
@@ -1473,3 +1495,56 @@ class AuditPlaylistErrorPathTest(unittest.TestCase):
         with mock.patch.object(youtube, "_pick_playlist", side_effect=RuntimeError("что-то странное")):
             notes = youtube._audit_playlist(page, "https://youtu.be/abcdefghijk", job, None)
         self.assertTrue(notes and "поставь в Studio" in notes[0])
+
+
+class VisibilityTest(unittest.TestCase):
+    """Ролики канала по доступу: открытые, ограниченные, по ссылке, запланированные, черновики — на любом языке Studio."""
+
+    MONTHS = ["янв", "февр", "мар", "апр", "мая", "июн", "июл", "авг", "сент", "окт", "нояб", "дек"]
+    TODAY = date(2026, 11, 20)
+
+    def kind(self, cell: str, row: str = "") -> str:
+        return youtube.visibility_of(cell, row, self.MONTHS, self.TODAY)
+
+    def test_cells_in_english_and_russian(self) -> None:
+        self.assertEqual(self.kind("Public"), "public")
+        self.assertEqual(self.kind("Открытый доступ"), "public")
+        self.assertEqual(self.kind("Private"), "private")
+        self.assertEqual(self.kind("Ограниченный доступ"), "private")
+        self.assertEqual(self.kind("Unlisted"), "unlisted")
+        self.assertEqual(self.kind("Доступ по ссылке"), "unlisted")
+        self.assertEqual(self.kind("Scheduled"), "scheduled")
+        self.assertEqual(self.kind("Запланировано"), "scheduled")
+        self.assertEqual(self.kind("Draft"), "draft")
+
+    def test_fallback_to_row_text_and_future_date(self) -> None:
+        self.assertEqual(self.kind("", "Ролик Private 10 нояб. 2026 г. 12"), "private")
+        self.assertEqual(self.kind("", "Ролик Public 25 нояб. 2026 г. 12"), "scheduled")  # будущая дата
+        self.assertEqual(self.kind("", "Ролик Public 10 нояб. 2026 г. 12"), "public")
+
+    def test_count_videos_walks_all_pages(self) -> None:
+        pages = [
+            [{"cell": "Scheduled", "row": "a"}, {"cell": "Public", "row": "b"}],
+            [{"cell": "Private", "row": "c"}, {"cell": "Unlisted", "row": "d"}, {"cell": "Public", "row": "e"}],
+        ]
+
+        class Next:
+            def __init__(self, page): self.page = page
+            @property
+            def first(self): return self
+            def count(self): return 1
+            def get_attribute(self, _): return "true" if self.page.i >= len(pages) - 1 else "false"
+            def click(self): self.page.i += 1
+
+        class Page:
+            i = 0
+            def goto(self, *a, **k): pass
+            def wait_for_selector(self, *a, **k): pass
+            def wait_for_timeout(self, _): pass
+            def evaluate(self, js): return self_months
+            def eval_on_selector_all(self, sel, js): return pages[self.i]
+            def locator(self, sel): return Next(self)
+
+        self_months = self.MONTHS
+        out = youtube.count_videos(Page(), "UC1")
+        self.assertEqual(out, {"scheduled": 1, "public": 2, "unlisted": 1, "private": 1, "draft": 0})

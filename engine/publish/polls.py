@@ -98,7 +98,11 @@ def channel_titles(channel_id: str, keys: list[str]) -> tuple[str, list[str]]:
     """→ (название канала, названия последних роликов) — по ним нейросеть понимает тему канала."""
     from engine.rewrite.channels import list_channel
 
-    _cid, title, videos = list_channel(f"https://www.youtube.com/channel/{channel_id}", keys)
+    try:
+        _cid, title, videos = list_channel(f"https://www.youtube.com/channel/{channel_id}", keys)
+    except Exception as exc:  # у нового канала ещё нет вкладки «Видео» — тему возьмём по названию
+        log(f"Голосования: список роликов канала не получить ({str(exc).splitlines()[0][:120]}) — тема по названию канала")
+        return "", []
     videos = sorted(videos, key=lambda v: -v.published)
     return title, [v.title for v in videos if v.title][:TITLES_FOR_TOPIC]
 

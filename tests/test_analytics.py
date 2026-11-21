@@ -157,9 +157,30 @@ class ScheduledCountTest(unittest.TestCase):
         with mock.patch.object(youtube, "studio_channel", return_value="UC1"), mock.patch.object(an, "_wait", return_value=True), \
              mock.patch.object(an, "read_hub", return_value=(5, 7)), mock.patch.object(an, "read_totals", return_value=(1.0, 2, 3)), \
              mock.patch.object(an, "pause"), mock.patch.object(youtube, "goto"), \
+             mock.patch.object(youtube, "count_videos", side_effect=RuntimeError("Studio поменяла вёрстку")), \
              mock.patch.object(youtube, "count_scheduled", side_effect=RuntimeError("Studio поменяла вёрстку")):
             st = an.read_channel(page, ch)
         self.assertEqual((st.subscribers, st.views_48h, st.scheduled), (5, 7, None), "основные цифры не страдают")
+
+    def test_read_channel_takes_videos_by_visibility(self) -> None:
+        import types
+
+        page = mock.MagicMock()
+        page.locator.return_value.count.return_value = 0
+        ch = types.SimpleNamespace(id="UC1", name="A", handle="@a")
+        counts = {"scheduled": 3, "public": 12, "unlisted": 2, "private": 5, "draft": 1}
+        with mock.patch.object(youtube, "studio_channel", return_value="UC1"), mock.patch.object(an, "_wait", return_value=True), \
+             mock.patch.object(an, "read_hub", return_value=(5, 7)), mock.patch.object(an, "read_totals", return_value=(1.0, 2, 3)), \
+             mock.patch.object(an, "pause"), mock.patch.object(youtube, "goto"), \
+             mock.patch.object(youtube, "count_videos", return_value=counts):
+            st = an.read_channel(page, ch)
+        self.assertEqual((st.scheduled, st.public, st.unlisted, st.private), (3, 12, 2, 5))
+
+    def test_visibility_counts_kept_when_not_read(self) -> None:
+        an.save_one(an.Stats("UCv1", name="A", subscribers=1, public=10, unlisted=1, private=2, synced_at=100))
+        an.save_one(an.Stats("UCv1", name="A", subscribers=2, synced_at=200))
+        got = an.load()["UCv1"]
+        self.assertEqual((got.public, got.unlisted, got.private), (10, 1, 2))
 
 
 class SyncScopeTest(unittest.TestCase):

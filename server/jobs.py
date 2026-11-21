@@ -123,6 +123,30 @@ class Job:
                  if r.get("status") in ("failed", "limit", "active") else r.get("stage", "ждёт очереди")}
                 for r in live]
 
+    def _targets(self) -> tuple[list[str], bool]:
+        """На какие каналы идёт работа: (подписи каналов, после ли сборки). Выкладка, голосования, комментарии — прямо
+        сейчас; ролик в сборке с включённой выкладкой раздела — «после сборки» (по снимку настроек задачи)."""
+        try:
+            p = self.params
+            if self.kind in ("publish", "comments", "polls", "collabs"):
+                keys = p.get("channels") or ([p["channel"]] if p.get("channel") else [])
+                return _channel_names(keys), False
+            section = {"broll": "broll", "slides_full": "slides", "slides": "slides"}.get(self.kind)
+            if self.kind == "rewrite":
+                section = str(p.get("section") or "broll")
+            if not section:
+                return [], False
+            snap = p.get("_settings")
+            if not isinstance(snap, dict):
+                from engine.core.config import load_config
+
+                snap = load_config()
+            if snap.get(f"{section}_publish") and self.status in (QUEUED, RUNNING, FAILED, CANCELLED):
+                return _channel_names(snap.get(f"{section}_publish_channels") or []), True
+        except Exception:  # noqa: BLE001 — подпись каналов не должна ломать список задач
+            pass
+        return [], False
+
     def public(self) -> dict[str, Any]:
         # текст и снимок настроек задачи — не для интерфейса (большие)
         safe = {k: v for k, v in self.params.items() if k not in ("text", "_settings")}
@@ -132,6 +156,7 @@ class Job:
             safe["model"] = model_label(str((self.params.get("_settings") or {}).get("cover_model") or ""))
         if self.params.get("text"):
             safe["chars"] = len(str(self.params["text"]))
+        targets, after = self._targets()
         return {
             "id": self.id,
             "kind": self.kind,
@@ -156,6 +181,8 @@ class Job:
             "switches": self.state.get("switches") or [],
             # расход токенов встроенной нейросети по этапам (Claude Code и Codex — по подписке, не считаются)
             "tokens": usage.summary(self.state.get("tokens")),
+            "targets": targets,
+            "targets_after": after,
             "notice": "",  # предупреждение при постановке (заполняет /api/jobs, например «мало денег RoyalTechno»)
         }
 
@@ -190,7 +217,7 @@ class JobManager:
         self._work = threading.Condition(self._lock)
         self._last_emit: dict[str, float] = {}
         # итоги пачки задач с прошлого простоя очереди — для уведомления «всё готово»
-        self._batch = {"done": 0, "failed": 0, "sec": 0.0, "last": ""}
+        self._batch = self._new_batch()
         self._uncounted: set[str] = set()  # идут или только что закончились, ещё не учтены в пачке
         self.awake = KeepAwake()
         self._load()
@@ -352,6 +379,21 @@ class JobManager:
         for jid in gone:
             hub.publish("job_removed", {"id": jid})
 
+    def purge_old(self, days: float) -> int:
+        """Убрать карточки завершённых задач (готово, ошибка, остановлено), к которым не прикасались дольше days дней.
+        Идущие и ждущие в очереди не трогаем. → сколько убрано."""
+        cutoff = time.time() - days * 86400
+        with self._lock:
+            gone = [j.id for j in self._jobs if j.status not in (QUEUED, RUNNING)
+                    and (j.finished or j.started or j.created) < cutoff]
+            if gone:
+                self._jobs = [j for j in self._jobs if j.id not in gone]
+        if gone:
+            self._save()
+            for jid in gone:
+                hub.publish("job_removed", {"id": jid})
+        return len(gone)
+
     def busy(self) -> bool:
         with self._lock:
             return any(j.status in (QUEUED, RUNNING) for j in self._jobs)
@@ -497,10 +539,15 @@ class JobManager:
             self._count_for_notice(job)
             self._notify()  # исполнитель свободен — проверить сон и очередь
 
+    WAIT_BLOCK_SEC = 20 * 60.0  # ждущая автоповтора задача дольше — очередь «закончила», итог не ждёт
     NOTICE_MIN_SEC = 45.0  # быстрые задачи (секунды) не стоят уведомления — пользователь ещё у окна
 
+    @staticmethod
+    def _new_batch() -> dict[str, Any]:
+        return {"done": 0, "failed": 0, "sec": 0.0, "last": "", "snaps": {}, "started": 0.0}
+
     def _count_for_notice(self, job: Job) -> None:
-        """Пачка задач закончилась (очередь опустела) — одно уведомление macOS с итогом.
+        """Пачка задач закончилась (очередь опустела) — итоговый отчёт (окно в приложении + уведомление macOS).
         Остановленные самим пользователем не считаем; задача, ждущая автоповтор, очередь не опустошает."""
         with self._lock:
             self._uncounted.discard(job.id)
@@ -508,14 +555,57 @@ class JobManager:
                 self._batch["done" if job.status == DONE else "failed"] += 1
                 self._batch["sec"] += max(0.0, (job.finished or 0) - (job.started or job.finished or 0))
                 self._batch["last"] = job.title
+                self._batch["snaps"][job.id] = job.stored()  # итог задачи (повторный проход затирает прежний)
+                begun = job.started or job.finished or 0.0
+                if begun and (not self._batch["started"] or begun < self._batch["started"]):
+                    self._batch["started"] = begun
             # соседняя задача уже поставила статус «готово», но ещё не учтена — уведомит она, одним на всех
-            if self._uncounted or any(j.status in (QUEUED, RUNNING) for j in self._jobs):
-                return
-            batch, self._batch = self._batch, {"done": 0, "failed": 0, "sec": 0.0, "last": ""}
-        if (batch["done"] or batch["failed"]) and batch["sec"] >= self.NOTICE_MIN_SEC:
+            soon = time.time() + self.WAIT_BLOCK_SEC
+            if self._uncounted or any(
+                    j.status == RUNNING or (j.status == QUEUED and float(j.state.get("retry_at") or 0) <= soon)
+                    for j in self._jobs):
+                return  # идёт работа или вот-вот повтор; задача, ждущая до завтра (лимит YouTube), отчёт не задерживает
+            batch, self._batch = self._batch, self._new_batch()
+            batch["waiting"] = [{"title": j.title, "message": j.message, "retry_at": float(j.state.get("retry_at") or 0)}
+                                for j in self._jobs if j.status == QUEUED and float(j.state.get("retry_at") or 0) > soon]
+        # итог — по последнему состоянию каждой задачи (упала, потом продолжена и дошла — это «готово»)
+        batch["done"] = sum(1 for sn in batch["snaps"].values() if sn["status"] == DONE)
+        batch["failed"] = sum(1 for sn in batch["snaps"].values() if sn["status"] == FAILED)
+        if not (batch["done"] or batch["failed"]):
+            return
+        if self._report(batch):
+            return
+        if batch["sec"] >= self.NOTICE_MIN_SEC:
             from server.notify import notify, queue_message
 
             notify(*queue_message(batch["done"], batch["failed"], batch["last"]))
+
+    def _report(self, batch: dict[str, Any]) -> bool:
+        """Итоговый отчёт по пачке: что сделано, что нет, почему и как исправить. → показан ли (иначе — обычное
+        уведомление). Тихие задачи (аналитика раз в сутки) без ошибок отчёта не стоят."""
+        from server import report as rep
+
+        snaps = list(batch["snaps"].values())
+        failed = batch["failed"] > 0
+        if all(sn.get("kind") in rep.QUIET_KINDS for sn in snaps) and not failed:
+            return False
+        if not (failed or batch["sec"] >= self.NOTICE_MIN_SEC):  # секундные задачи — пользователь ещё у окна
+            return False
+        try:
+            from engine.publish import collabs
+
+            report = rep.build(snaps, names=_channel_names, pending_pairs=collabs.pending(),
+                               started=batch["started"], finished=time.time(), waiting=batch.get("waiting") or [])
+            rep.add(report)
+        except Exception as exc:  # noqa: BLE001 — отчёт не важнее самой работы
+            log(f"Итоговый отчёт не собрался: {exc}")
+            return False
+        hub.publish("report", {"report": report})
+        from server.notify import notify
+
+        notify(f"Story Video: {report['title']}", report["text"])
+        log(f"Итог: {report['title']} — {report['text']}")
+        return True
 
     def _maybe_retry(self, job: Job, exc: BaseException) -> None:
         """Краткий сбой сети/сервиса — поставить задачу обратно в очередь с паузой (с места падения)."""
@@ -596,6 +686,28 @@ class JobManager:
             hub.publish("switch", {"job_id": job_id, "title": job.title if job else "", **item})
 
 
+_NAMES: dict[str, Any] = {"mtime": None, "map": {}}
+
+
+def _channel_names(keys: list[str]) -> list[str]:
+    """«профиль/канал» → «@адрес» (или название) по учёту каналов; учёт перечитывается, только когда файл изменился."""
+    from engine.publish import registry
+    from engine.publish.store import publish_dir
+
+    path = publish_dir() / registry.FILE
+    try:
+        stamp = path.stat().st_mtime
+    except OSError:
+        stamp = None
+    if _NAMES["mtime"] != stamp or stamp is None:
+        names: dict[str, str] = {}
+        for entry in registry.load().values():
+            for c in entry.channels:
+                names[registry.key(entry.id, c.id)] = c.handle or c.name
+        _NAMES.update(mtime=stamp, map=names)
+    return [str(_NAMES["map"].get(str(k)) or str(k).rpartition("/")[2]) for k in keys if str(k).strip()]
+
+
 def _remove_owned_dir(job: Job) -> None:
     """Удаляем только папку, которую задача создала сама (не чужой старый запуск)."""
     raw = job.state.get("owned_dir")
@@ -645,4 +757,10 @@ def get_manager() -> JobManager:
         except Exception:  # noqa: BLE001 — список не собрался: новые приглашения всё равно записываются
             pass
         threading.Thread(target=collabs.loop, args=(manager,), name="collabs-auto", daemon=True).start()
+        from engine import updater
+
+        threading.Thread(target=updater.loop, args=(manager, load_config), name="updater", daemon=True).start()
+        from engine.core import retention
+
+        threading.Thread(target=retention.loop, args=(manager, DATA_DIR), name="retention", daemon=True).start()
     return manager

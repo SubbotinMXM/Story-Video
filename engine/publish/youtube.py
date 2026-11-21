@@ -381,6 +381,63 @@ def count_scheduled(page, channel_id_: str) -> int | None:
     return total
 
 
+VIDEO_PAGES = 40  # страниц «Контента» (по 30 роликов): до 1200 роликов на канал
+
+
+def visibility_of(cell: str, row: str, months: list[str], today: date) -> str:
+    """Статус ролика в строке «Контента»: scheduled | public | unlisted | private | draft.
+    cell — текст ячейки «Доступ» (если нашлась), row — вся строка (запасной путь), язык Studio любой."""
+    text = (cell.strip() or row).lower()
+    if re.search(r"private|закрыт|огранич|privad|privat|privé", text):
+        return "private"
+    if re.search(r"unlisted|по ссылке|no listado|nicht gelistet|non répertorié|non repertori", text):
+        return "unlisted"
+    if re.search(r"draft|черновик|borrador|entwurf|brouillon|bozza", text):
+        return "draft"
+    if _SCHEDULED_WORDS.search(text) or (counts_for_schedule(row) and any(d > today for d in find_dates(row, months))):
+        return "scheduled"
+    return "public"
+
+
+_ROW_CELLS_JS = """els => els.map(e => {
+    const v = e.querySelector('.tablecell-visibility, [class*="visibility"]');
+    return {cell: v ? v.innerText.replace(/\\s+/g, ' ').trim() : '', row: e.innerText.replace(/\\s+/g, ' ').slice(-220)};
+})"""
+
+
+def count_videos(page, channel_id_: str) -> dict[str, int] | None:
+    """Сколько на канале роликов по доступу: scheduled (ещё не вышли), public (открытый доступ), unlisted (по ссылке),
+    private (ограниченный/закрытый), draft. Только чтение: страница «Контент», листаем все страницы.
+    None — страница не прочиталась."""
+    from engine.publish.schedule import MSK
+
+    page.goto(f"{STUDIO}/channel/{channel_id_}/videos/upload", wait_until="domcontentloaded")
+    try:
+        page.wait_for_selector("ytcp-video-row, .empty-state", timeout=25000)
+    except Exception:
+        return None
+    page.wait_for_timeout(2000)
+    months = page.evaluate("""() => [...Array(12).keys()].map(m =>
+        new Intl.DateTimeFormat(document.documentElement.lang || 'en', {month: 'short'}).format(new Date(2026, m, 15)))""")
+    today = datetime.now(MSK).date()
+    out = {"scheduled": 0, "public": 0, "unlisted": 0, "private": 0, "draft": 0}
+    prev: tuple = ()
+    for _ in range(VIDEO_PAGES):
+        rows = page.eval_on_selector_all("ytcp-video-row", _ROW_CELLS_JS)
+        key = tuple(r["row"] for r in rows)
+        if not rows or key == prev:
+            break  # страница не сменилась — листать нечего
+        prev = key
+        for r in rows:
+            out[visibility_of(r["cell"], r["row"], months, today)] += 1
+        nxt = page.locator("#navigate-after:not([disabled])").first
+        if not nxt.count() or nxt.get_attribute("aria-disabled") == "true":
+            break
+        nxt.click()
+        page.wait_for_timeout(2000)
+    return out
+
+
 # ролики с ограниченным доступом, по ссылке и черновики расписание канала не задают — только вышедшие и запланированные
 _NOT_SCHEDULE = ("private", "unlisted", "draft", "ограниченный доступ", "доступ по ссылке", "черновик")
 
@@ -1891,7 +1948,13 @@ def _accept_one(page, invite_link: str, cancel, skip: list[str] = ()) -> str | N
         except Exception:
             name = ""
     _act(cancel)
-    human.click(page, confirm)
+    try:
+        human.click(page, confirm)
+    except Exception:
+        # Google поверх окна приглашения: «Verify it's you» перекрывает «Accept», клик упирается в затемнение и падает
+        # по таймауту. Причина — окно Google (его нужно назвать), а не «не дождался элемента» (20.11: 17 неудач подряд)
+        _verify_gate(page)
+        raise
     for _ in range(20):
         page.wait_for_timeout(1000)
         _verify_gate(page)

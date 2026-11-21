@@ -188,6 +188,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
           next[i] = job;
           return next;
         });
+      } else if (data.type === "report") {
+        // очередь опустела: итоговое окно «что сделано, что нет и как исправить» (слушает ReportHost)
+        window.dispatchEvent(new CustomEvent("sv-report", { detail: data.report }));
       } else if (data.type === "switch") {
         // автосмена инструмента/модели — сразу на виду: что, на что, почему, в какой задаче
         push({

@@ -158,6 +158,11 @@ function JobCard({ job, now, onShowLog, queuePos, queueLen }: {
             {job.attempts > 1 && <span className="muted small">попытка {job.attempts}</span>}
             {job.started && <span className="muted small">{elapsed(job, now)}</span>}
           </div>
+          {job.targets && job.targets.length > 0 && (
+            <div className="job-targets small" title={job.targets.join(", ")}>
+              <b>{job.targets_after ? "Выложится на:" : "Канал:"}</b> {job.targets.join(", ")}
+            </div>
+          )}
           <div className="muted small job-when">
             добавлено {stamp(job.created)}
             {job.status === "done" && job.finished && (

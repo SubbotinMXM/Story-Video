@@ -281,6 +281,8 @@ def analytics_get() -> dict[str, Any]:
                 "subscribers": st.subscribers if st else None, "views_48h": st.views_48h if st else None,
                 "watch_hours": st.watch_hours if st else None, "views_total": st.views_total if st else None,
                 "scheduled": st.scheduled if st else None,
+                "public": st.public if st else None, "unlisted": st.unlisted if st else None,
+                "private": st.private if st else None,
                 "synced_at": st.synced_at if st else 0, "error": st.error if st else "",
                 "prev": prev,
             })
@@ -291,6 +293,63 @@ def analytics_get() -> dict[str, Any]:
     auto = {"next_at": analytics_auto.next_run(_cfg().get("analytics_auto")),
             "last_at": float(st.get("last_at") or 0), "last_job": str(st.get("last_job") or "")}
     return {"channels": rows, "auto": auto}
+
+
+# ---------- обновление программы ----------
+
+
+class UpdateIn(BaseModel):
+    when: str = "now"  # now — сразу (идущая работа прервётся), idle — когда очередь освободится
+
+
+def _update_out(st: dict[str, Any]) -> dict[str, Any]:
+    from engine import updater
+    from engine.core.config import load_config as _cfg
+
+    s = updater.state()
+    return {**st, "busy": get_manager().busy(), "pending": updater.pending(),
+            "next_at": updater.next_run(_cfg().get("update_auto")), "last_applied": float(s.get("last_applied") or 0),
+            "last_error": str(s.get("last_error") or ""), "last_error_at": float(s.get("last_error_at") or 0)}
+
+
+@app.get("/api/update")
+def update_status() -> dict[str, Any]:
+    """Что известно об обновлениях (без обращения к серверу)."""
+    from engine import updater
+
+    return _update_out(updater.status())
+
+
+@app.post("/api/update/check")
+def update_check() -> dict[str, Any]:
+    from engine import updater
+
+    st = updater.status(fetch=True)
+    updater._update_state(checked_at=st.get("checked_at") or 0)
+    return _update_out(st)
+
+
+@app.post("/api/update/apply")
+def update_apply(body: UpdateIn) -> dict[str, Any]:
+    """Подтянуть обновление и перезапустить программу. when=idle — отложить, пока очередь не освободится."""
+    from engine import updater
+
+    if body.when == "idle":
+        updater.set_pending("update", "user")
+        return {**_update_out(updater.status()), "started": False}
+    try:
+        st = updater.apply_and_restart(get_manager())
+    except updater.UpdateError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return {**_update_out(st), "started": bool(st.get("behind"))}
+
+
+@app.post("/api/update/cancel")
+def update_cancel() -> dict[str, Any]:
+    from engine import updater
+
+    updater.clear_pending()
+    return _update_out(updater.status())
 
 
 # ---------- проверки ключей ----------
@@ -424,6 +483,72 @@ def niches_channel_delete(run_id: str, channel_id: str) -> dict[str, Any]:
     if not niches.remove(run_id, channel_id):
         raise HTTPException(404, "Такого канала в поиске уже нет")
     return {"runs": niches.runs()}
+
+
+# ---------- итоговые отчёты по пачкам задач ----------
+
+
+class FixIn(BaseModel):
+    jobs: list[str] = []  # упавшие задачи, которые продолжить с места падения
+    collabs: bool = False  # принять ждущие соавторства сейчас
+
+
+@app.get("/api/reports")
+def reports_list() -> list[dict[str, Any]]:
+    from server import report
+
+    return report.listing()
+
+
+@app.get("/api/reports/unseen")
+def reports_unseen() -> dict[str, Any] | None:
+    """Последний отчёт, который пользователь ещё не открывал (приложение было закрыто, когда очередь закончила)."""
+    from server import report
+
+    return report.unseen()
+
+
+@app.get("/api/reports/{report_id}")
+def reports_get(report_id: str) -> dict[str, Any]:
+    from server import report
+
+    found = report.get(report_id)
+    if found is None:
+        raise HTTPException(404, "Отчёт не найден (старше 5 дней удаляются)")
+    return found
+
+
+@app.post("/api/reports/{report_id}/seen")
+def reports_seen(report_id: str) -> dict[str, bool]:
+    from server import report
+
+    report.mark_seen(None if report_id == "all" else report_id)
+    return {"ok": True}
+
+
+@app.post("/api/reports/fix")
+def reports_fix(body: FixIn) -> dict[str, Any]:
+    """«Исправить автоматически»: продолжить упавшие задачи с места падения и/или принять соавторства сейчас."""
+    manager = get_manager()
+    resumed: list[str] = []
+    errors: list[str] = []
+    for job_id in dict.fromkeys(body.jobs):
+        try:
+            manager.resume(job_id)
+            resumed.append(job_id)
+        except ValueError as exc:
+            errors.append(str(exc))
+    queued_collabs = False
+    if body.collabs:
+        if any(j.get("kind") == "collabs" and j.get("status") in ("queued", "running") for j in manager.list()):
+            queued_collabs = True  # уже идёт
+        else:
+            try:
+                manager.add(manager.create("collabs", {"auto": False}))
+                queued_collabs = True
+            except Exception as exc:  # noqa: BLE001 — например, не задан ключ AdsPower
+                errors.append(f"Принять соавторства не получилось: {exc}")
+    return {"resumed": resumed, "collabs": queued_collabs, "errors": errors}
 
 
 @app.get("/api/jobs")

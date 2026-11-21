@@ -120,7 +120,7 @@ export function TemplatesPage({ active }: { active: boolean }) {
                 <ul className="tpl-lines">
                   <li>
                     <Tv size={14} />
-                    <span>
+                    <span title={t.summary.competitors.map(handleOf).join(", ")}>
                       {t.summary.competitors.length
                         ? `Конкуренты: ${t.summary.competitors.map(handleOf).join(", ")}`
                         : "Каналы-конкуренты не заданы"}

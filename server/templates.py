@@ -27,7 +27,7 @@ SECTIONS = ("broll", "slides")
 _LOCK = threading.Lock()
 
 # настройки приложения, а не запуска: в шаблон не входят (библиотеки промптов, аналитика, версия окна «Что нового»)
-APP_KEYS = frozenset({"analytics_groups", "analytics_view", "analytics_auto", "last_seen_version", "rewrite_prompts",
+APP_KEYS = frozenset({"analytics_groups", "analytics_view", "analytics_auto", "update_auto", "last_seen_version", "rewrite_prompts",
                       "cover_prompts", "adspower_url", "adspower_api_key"})
 # у каждого раздела свой набор: в шаблон «Рассказов» не попадают настройки слайдов и наоборот
 BROLL_ONLY = frozenset({"broll_dir", "head_dir", "intro_dir", "outro_dir", "overlay_text"})

@@ -71,7 +71,7 @@ def mark_accepted(owner_key: str, co_key: str) -> None:
         data = _data()
         rec = _pairs(data).get(pair_key(owner_key, co_key))
         if rec is not None:
-            rec.update(pending=False, error="", tries=0, accepted_at=time.time(), videos=[])
+            rec.update(pending=False, error="", tries=0, accepted_at=time.time(), videos=[], alerted=False)
             write_json(FILE, data)
 
 
@@ -90,6 +90,18 @@ def mark_failed(owner_key: str, co_key: str, reason: str, *, link: str = "", own
         rec.update(pending=True, error=" ".join(str(reason).split())[:300], tries=n + 1,
                    next_try=time.time() + RETRY_MIN[min(n, len(RETRY_MIN) - 1)] * 60)
         write_json(FILE, data)
+
+
+def alert_once(owner_key: str, co_key: str) -> bool:
+    """Пользователя о паре ещё не предупреждали? → True и запоминаем (до принятия пары — повторно не будим)."""
+    with LOCK:
+        data = _data()
+        rec = _pairs(data).get(pair_key(owner_key, co_key))
+        if rec is None or rec.get("alerted"):
+            return False
+        rec["alerted"] = True
+        write_json(FILE, data)
+        return True
 
 
 def pending(now: float | None = None, *, only_due: bool = False) -> list[dict]:
@@ -129,6 +141,19 @@ def backfill(states: list[dict]) -> int:
 # ---------- подтверждение ----------
 
 
+def _tell_user(co_name: str, owner_label: str) -> None:
+    """Дальше только человек: Google просит подтвердить вход в профиле соавтора — пароль программа не вводит."""
+    log(f"Соавторство: в профиле «{co_name}» нужно один раз подтвердить вход Google — жду тебя")
+    try:
+        from server.notify import notify
+
+        notify("Нужно подтвердить вход Google",
+               f"Профиль «{co_name}»: откройте его в AdsPower и подтвердите вход — соавторства ждут. "
+               "Дальше программа примет их сама.")
+    except Exception:  # noqa: BLE001 — уведомление не важнее самой работы
+        pass
+
+
 def reconcile(api_key: str, url: str, *, cancel: CancelToken | None = None, progress=None,
               headless: bool = True) -> dict[str, Any]:
     """Принять всё, что ждёт, во всех профилях соавторов. → {"ok": [...], "failed": [...], "total": n}."""
@@ -143,11 +168,13 @@ def reconcile(api_key: str, url: str, *, cancel: CancelToken | None = None, prog
     for r in todo:
         by_co.setdefault(r["co"], []).append(r)
 
-    def fail(rec: dict, reason: str) -> None:
+    def fail(rec: dict, reason: str, *, needs_user: bool = False, who: str = "") -> None:
         mark_failed(rec["owner"], rec["co"], reason)
         label = rec.get("owner_label") or rec["owner"]
         out["failed"].append(f"{label} → {rec['co']}: {reason}")
         log(f"Соавторство НЕ подтверждено: {label} → {rec['co']} — {reason}. Попробую позже.")
+        if needs_user and alert_once(rec["owner"], rec["co"]):
+            _tell_user(who or rec["co"], label)
 
     with AdsPower(api_key, url) as ap:
         if not ap.alive():
@@ -166,9 +193,11 @@ def reconcile(api_key: str, url: str, *, cancel: CancelToken | None = None, prog
             links = list(dict.fromkeys(r["link"] for r in recs))
             got: dict | None = None
             err = ""
+            needs_user = False
+            show = not headless  # Google просит «Verify it's you» у скрытого браузера чаще, чем у обычного окна
             for attempt in range(1, PROFILE_TRIES + 1):
                 try:
-                    session = ap.start(co.profile_id, headless=headless)
+                    session = ap.start(co.profile_id, headless=not show)
                 except AdsPowerDown:
                     raise
                 except Exception as exc:
@@ -181,6 +210,14 @@ def reconcile(api_key: str, url: str, *, cancel: CancelToken | None = None, prog
                     if cancel is not None and cancel.is_cancelled():
                         raise
                     err = str(exc).splitlines()[0][:200] if str(exc) else exc.__class__.__name__
+                    if isinstance(exc, youtube.NeedsUser):
+                        if not show and attempt < PROFILE_TRIES:
+                            # 20.11: в скрытом окне Google просил подтвердить вход, в обычном «Принять» прошло сразу
+                            log(f"Соавторства: {co.channel.name} — {err}. Пробую в обычном окне браузера")
+                            show = True
+                            continue
+                        needs_user = True
+                        break
                     lost = youtube.browser_lost(exc)
                     if lost and attempt < PROFILE_TRIES:
                         log(f"Соавторства: браузер профиля закрылся ({err}) — открою заново (попытка {attempt + 1})")
@@ -193,7 +230,7 @@ def reconcile(api_key: str, url: str, *, cancel: CancelToken | None = None, prog
                         pass
             if got is None:
                 for r in recs:
-                    fail(r, err or "не удалось")
+                    fail(r, err or "не удалось", needs_user=needs_user, who=co.channel.name)
                 continue
             for r in recs:
                 res = got.get(r["link"])

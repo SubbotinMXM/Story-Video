@@ -144,6 +144,43 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(len(out["failed"]), 2)
         self.assertEqual(len(collabs.pending()), 2, "ничего не потеряно")
 
+
+    def test_verify_in_hidden_browser_retries_in_visible_window(self) -> None:
+        """20.11: скрытый браузер — «Verify it's you», обычное окно — «Принять» проходит. Пробуем второе сами."""
+        modes = []
+
+        def accept(cdp, ch, links, cancel=None):
+            if len(modes) == 1:
+                raise youtube.NeedsUser("Google просит подтвердить вход («Verify it's you»)")
+            return {"L1": ["Ролик А"], "L2": ["Ролик А"]}
+
+        ap = mock.MagicMock()
+        ap.__enter__.return_value = ap
+        ap.alive.return_value = True
+        ap.start.side_effect = lambda pid, headless=False: modes.append(headless) or mock.MagicMock()
+        with mock.patch("engine.publish.adspower.AdsPower", return_value=ap), \
+             mock.patch.object(registry, "resolve", lambda keys, what="": [self.co]), \
+             mock.patch.object(youtube, "accept_coauthor_links", accept):
+            out = collabs.reconcile("k", "u")
+        self.assertEqual(modes, [True, False], "сначала скрыто, после Verify — в обычном окне")
+        self.assertEqual((len(out["ok"]), out["failed"]), (2, []))
+        self.assertEqual(collabs.pending(), [])
+
+    def test_verify_everywhere_alerts_user_once(self) -> None:
+        def accept(*a, **k):
+            raise youtube.NeedsUser("Google просит подтвердить вход («Verify it's you»)")
+
+        with mock.patch("server.notify.notify") as notify:
+            out, _ap = self.run_reconcile(accept)
+            self.assertEqual(len(out["failed"]), 2)
+            self.assertEqual(len(collabs.pending()), 2, "пары не потеряны")
+            self.assertEqual(notify.call_count, 2, "по разу на пару, не больше")
+            self.run_reconcile(accept)
+            self.assertEqual(notify.call_count, 2, "повторные попытки человека не будят")
+        collabs.mark_accepted("p1/UC1", self.co.key)
+        left = {r["owner"]: r.get("alerted") for r in collabs.pending()}
+        self.assertEqual(left, {"p1/UC2": True}, "принятая пара вышла из списка, у оставшейся метка «предупредили» осталась")
+
     def test_browser_closed_midway_profile_is_reopened(self) -> None:
         calls = []
 

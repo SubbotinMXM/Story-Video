@@ -140,6 +140,8 @@ DEFAULTS: dict[str, Any] = {
     "analytics_view": {"group": "", "profile": "", "sort": "views_48h", "dir": "desc"},
     # автообновление аналитики: каждый день в time (МСК) — синхронизация каналов группы (engine/publish/analytics_auto)
     "analytics_auto": {"enabled": False, "group": "", "time": "07:00"},
+    # автообновление программы: каждый день в time (МСК) — git pull и перезапуск, когда очередь свободна (engine/updater)
+    "update_auto": {"enabled": False, "time": "04:00"},
 }
 
 # модели, которые сервис убрал: сохранённый выбор сбрасывается на модель по умолчанию
@@ -254,6 +256,9 @@ def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
     from engine.publish.analytics_auto import normalize as _auto
 
     cfg["analytics_auto"] = _auto(cfg.get("analytics_auto"))
+    from engine.updater import normalize as _upd
+
+    cfg["update_auto"] = _upd(cfg.get("update_auto"))
     if str(cfg.get("llm_model") or "").strip() in _DEAD_MODELS:
         cfg["llm_model"] = ""
     from engine.tts import PROVIDERS  # здесь, а не наверху: engine.tts тянет клиенты сервисов

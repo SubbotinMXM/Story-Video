@@ -699,7 +699,12 @@ def generate(cs: CoverSettings, prompt: str, refs: list[str], work: Path, tag: s
                     if not cap:
                         raise
                     # у модели лимит меньше, чем мы знали, — сжимаем под него и отправляем ещё раз
-                    _PROMPT_CAPS_SEEN[cs.model] = int(cap.group(1))
+                    seen = int(cap.group(1))
+                    sent = re.search(r"Prompt is (\d+) characters", str(exc))
+                    if sent and int(sent.group(1)) > len(prompt) > 0:
+                        # сервис считает длиннее, чем мы (другие единицы счёта): урезаем в той же пропорции
+                        seen = int(seen * len(prompt) / int(sent.group(1)))
+                    _PROMPT_CAPS_SEEN[cs.model] = min(seen, _PROMPT_CAPS_SEEN.get(cs.model, seen))
                     inp["prompt"] = prompt = fit_prompt(cs, prompt, work)
                     idem = str(uuid.uuid4())
                     state[key] = {"idempotency": idem}

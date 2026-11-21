@@ -128,8 +128,8 @@ class JobManagerEdgeTests(_ManagerCase):
     def test_notice_once_when_queue_drains(self) -> None:
         seen = self._drain(["a", "b", "bad"], min_sec=0.0)
         self.assertEqual(len(seen), 1, "одно уведомление на всю пачку")
-        self.assertEqual(seen[0][0], "Story Video: есть ошибки")
-        self.assertIn("Готово: 2, с ошибкой: 1", seen[0][1])
+        self.assertEqual(seen[0][0], "Story Video: Готово 2 из 3", "итог — по отчёту: сколько из скольких")
+        self.assertIn("исправить автоматически", seen[0][1])
 
     def test_quick_jobs_do_not_notify(self) -> None:
         self.assertEqual(self._drain(["a", "b"], min_sec=None), [], "секундные задачи — без уведомления")

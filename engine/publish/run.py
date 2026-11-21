@@ -881,7 +881,7 @@ def run_polls(channel: str, polls: list[dict], step_days: float, count: int, ads
             progress(0.02, f"Голосования {t.label()}: нейросеть пишет опросы")
         name, titles = pl.channel_titles(t.channel.id, keys)
         asked = [h.get("question", "") for h in pl.history(t.channel.id)] + [p.question for p in items]
-        items += pl.generate(name or t.channel.name, titles, count - len(items), language=t.channel.language,
+        items += pl.generate(name or t.channel.name, titles or [f"(на канале пока нет роликов; тема — по названию «{name or t.channel.name}»)"], count - len(items), language=t.channel.language,
                              asked=asked, llm=llm, cancel=cancel)
     memo["polls"] = [p.as_dict() for p in items]
     if not memo.get("start"):

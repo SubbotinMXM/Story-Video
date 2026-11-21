@@ -105,6 +105,7 @@ export type Settings = {
   last_seen_version?: string; // какую версию «Что нового» человек уже видел
   analytics_view?: { group: string; profile?: string; sort: string; dir: "asc" | "desc" | string };
   analytics_auto?: { enabled: boolean; group: string; time: string };
+  update_auto?: { enabled: boolean; time: string };
   rewrite_llm_model: string;
   rewrite_fallback: boolean;
   source_mix: Partial<Record<MixKey, number>>;
@@ -161,6 +162,9 @@ export type AnalyticsRow = {
   watch_hours: number | null;
   views_total: number | null;
   scheduled: number | null;
+  public: number | null; // вышло в открытый доступ
+  unlisted: number | null; // по ссылке
+  private: number | null; // ограниченный доступ
   synced_at: number;
   error: string;
   prev: AnalyticsPoint | null;
@@ -201,6 +205,79 @@ export type TokenUsage = { calls: number; in: number; cached: number; out: numbe
 
 export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
 
+/** Обновление программы (git pull + перезапуск). */
+export type UpdateStatus = {
+  ok: boolean;
+  error: string;
+  current: string; // короткий номер текущей сборки
+  behind: number; // сколько новых изменений на сервере
+  commits: string[];
+  version: string; // версия, до которой обновимся
+  title: string;
+  dirty: string[]; // правки в папке программы, которые могут помешать
+  checked_at: number;
+  busy: boolean; // идёт или ждёт работа в очереди
+  pending: { mode?: string; since?: number; source?: string };
+  next_at: number;
+  last_applied: number;
+  last_error: string;
+  last_error_at: number;
+};
+
+/** Итоговый отчёт по пачке задач: что сделано, что нет, почему и как исправить. */
+export type ReportRow = {
+  ok: boolean;
+  info?: boolean;
+  text?: string;
+  channel?: string;
+  title?: string;
+  url?: string;
+  when?: string;
+  coauthors_ok?: number;
+  coauthors_total?: number;
+  note?: string;
+};
+export type ReportItem = {
+  job_id: string;
+  kind: string;
+  kind_label: string;
+  title: string;
+  status: "ok" | "failed";
+  summary: string;
+  rows: ReportRow[];
+  details: string[];
+};
+export type ReportProblem = {
+  id: string;
+  scope: "publish" | "job" | "collabs" | "warn" | "wait";
+  title: string;
+  text: string;
+  job_id: string;
+  severity: "bad" | "warn";
+  tag: string;
+  cause: string;
+  mode: "auto" | "wait" | "manual";
+  steps: string[];
+  action: { type: "resume"; job_id: string } | { type: "collabs" } | null;
+};
+export type Report = {
+  id: string;
+  created: number;
+  started: number;
+  finished: number;
+  tone: "ok" | "warn" | "bad";
+  title: string;
+  text: string;
+  counts: { jobs: number; ok: number; failed: number; videos: number; polls: number; comments: number; covers: number; texts: number };
+  items: ReportItem[];
+  problems: ReportProblem[];
+  fix: { jobs: string[]; collabs: boolean; count: number };
+  manual: number;
+  seen: boolean;
+};
+export type ReportBrief = Pick<Report, "id" | "created" | "finished" | "tone" | "title" | "text" | "seen" | "manual">;
+export type FixOut = { resumed: string[]; collabs: boolean; errors: string[] };
+
 export type Job = {
   id: string;
   notice?: string; // предупреждение при постановке (например, мало денег на RoyalTechno)
@@ -208,6 +285,8 @@ export type Job = {
   stop_at?: number | null; // когда нажали «Стоп»
   stopping?: boolean; // «Стоп» нажат, текущий шаг ещё доделывается
   tokens?: TokenUsage | null; // расход токенов встроенной нейросети по этапам
+  targets?: string[]; // каналы, на которые идёт работа (выкладка, голосования, комментарии, выкладка после сборки)
+  targets_after?: boolean; // true — ролик ещё собирается, выложится на эти каналы после сборки
   kind: string;
   title: string;
   params: { run?: string; [k: string]: unknown };
@@ -323,6 +402,15 @@ export const api = {
   copyTemplate: (id: string) => request<Template>("POST", `/api/templates/${id}/copy`),
   deleteTemplate: (id: string) => request<{ ok: boolean }>("DELETE", `/api/templates/${id}`),
   launchTemplate: (id: string, body: TemplateLaunchIn) => request<TemplateLaunchOut>("POST", `/api/templates/${id}/launch`, body),
+  updateStatus: () => request<UpdateStatus>("GET", "/api/update"),
+  updateCheck: () => request<UpdateStatus>("POST", "/api/update/check"),
+  updateApply: (when: "now" | "idle") => request<UpdateStatus & { started: boolean }>("POST", "/api/update/apply", { when }),
+  updateCancel: () => request<UpdateStatus>("POST", "/api/update/cancel"),
+  reports: () => request<ReportBrief[]>("GET", "/api/reports"),
+  reportUnseen: () => request<Report | null>("GET", "/api/reports/unseen"),
+  report: (id: string) => request<Report>("GET", `/api/reports/${id}`),
+  reportSeen: (id: string) => request<{ ok: boolean }>("POST", `/api/reports/${id}/seen`),
+  reportFix: (jobs: string[], collabs: boolean) => request<FixOut>("POST", "/api/reports/fix", { jobs, collabs }),
   whatsNew: () => request<WhatsNew>("GET", "/api/whats-new"),
   whatsNewSeen: () => request<{ version: string }>("POST", "/api/whats-new/seen"),
   coverUpload: (data: string, name = "") => request<{ path: string }>("POST", "/api/covers/upload", { data, name }),
