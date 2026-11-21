@@ -10,6 +10,7 @@ from pathlib import Path
 from engine.slides.ffmpeg_util import find_ffmpeg, has_filter
 from engine.slides.ffprobe_util import has_audio_stream, probe_duration, probe_video_size, run_ffmpeg
 from engine.core.logutil import log
+from engine.slides.look_presets import subs_force_style
 from engine.slides.render_defaults import AUDIO_BITRATE, MUSIC_VOLUME, VIDEO_CRF, VIDEO_PRESET, rate_cap
 
 
@@ -94,21 +95,17 @@ def mux_av(
             tmp_srt.unlink(missing_ok=True)
 
 
-# стиль субтитров футажных роликов (жёлтые, с обводкой, внизу)
-_FOOTAGE_SUBS_STYLE = (
-    "FontName=Arial\\,FontSize=26\\,PrimaryColour=&H0000FFFF\\,"
-    "OutlineColour=&H00000000\\,BorderStyle=1\\,Outline=3\\,"
-    "Shadow=0\\,Alignment=2\\,MarginV=16"
-)
-
-
 def footage_subs_filter(srt: Path) -> tuple[str, Path]:
-    """Фильтр вшивки SRT для футажей + временная копия SRT (удалить после ffmpeg)."""
+    """Фильтр вшивки SRT для футажей + временная копия SRT (удалить после ffmpeg).
+
+    Стиль зависит от ролика (имя его папки): у разных роликов разные шрифты и цвета, у одного — всегда один.
+    """
+    style = subs_force_style(srt.parent.name)
     fd, tmp_name = tempfile.mkstemp(prefix="broll_subs_", suffix=".srt")
     os.close(fd)
     tmp_srt = Path(tmp_name)
     shutil.copy2(srt, tmp_srt)
-    return f"subtitles={_escape_subtitles_path(tmp_srt)}:force_style='{_FOOTAGE_SUBS_STYLE}'", tmp_srt
+    return f"subtitles={_escape_subtitles_path(tmp_srt)}:force_style='{style}'", tmp_srt
 
 
 def burn_subtitles(video: Path, srt: Path) -> Path:
@@ -178,11 +175,7 @@ def subtitles_filter(srt: Path) -> tuple[str, Path]:
     tmp_srt = Path(tmp_name)
     shutil.copy2(srt, tmp_srt)
     esc = _escape_subtitles_path(tmp_srt)
-    style = (
-        "FontName=Arial\\,FontSize=26\\,PrimaryColour=&H0000FFFF\\,"
-        "OutlineColour=&H00000000\\,BorderStyle=1\\,Outline=3\\,"
-        "Shadow=0\\,Alignment=2\\,MarginV=16"
-    )
+    style = subs_force_style(srt.parent.name)  # свой стиль у каждого ролика
     return f"subtitles={esc}:force_style='{style}'", tmp_srt
 
 

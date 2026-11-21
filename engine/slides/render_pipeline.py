@@ -15,6 +15,7 @@ from engine.core.spread import spread
 from engine.slides.music import MUSIC_VOLUME
 from engine.slides.hook import HOOK_SEC, head_rank, hook_first
 from engine.slides.look import look_groups
+from engine.slides.look_presets import grade_filter, rhythm_durations
 from engine.core.throttle import heavy_stage
 from engine.core.threads import ThreadPoolExecutor
 from engine.slides import checkpoint as cp
@@ -289,6 +290,7 @@ def build_silent(
             hold_sec,
             random.Random(req.seed),
             video_hold=float(raw_tl.get("video_hold_sec") or hold_sec),
+            rhythm=random.Random(f"rhythm:{run_dir.name}"),  # длины планов разные, как в кино
         )
         n_video = sum(1 for kind, _, _ in segments if kind == "video")
         n_image = sum(1 for kind, _, _ in segments if kind == "image")
@@ -326,6 +328,7 @@ def build_silent(
             f"({reel_dur:.0f}с), повтор ×{copies}, аудио {voice_dur:.1f}с",
         )
 
+    grade = grade_filter(run_dir.name)  # цветовая подача ролика (у разных роликов разная)
     seg_dir = run_dir / "segments"
     if seg_dir.exists():
         shutil.rmtree(seg_dir, ignore_errors=True)
@@ -343,7 +346,7 @@ def build_silent(
                 (
                     dest,
                     lambda m=media, d=dur, dest=dest: render_video_cover(
-                        media=m, duration=d, dest=dest
+                        media=m, duration=d, dest=dest, grade=grade
                     ),
                     label,
                 )
@@ -361,6 +364,7 @@ def build_silent(
                         seed=seed,
                         fade_sec=fade_sec,
                         transition=req.transition,
+                        grade=grade,
                     ),
                     label,
                 )
@@ -568,10 +572,12 @@ def reel_segments(
     rng: random.Random,
     *,
     video_hold: float | None = None,
+    rhythm: random.Random | None = None,
 ) -> list[tuple[str, Path, float]]:
     """Один проход: каждая картинка один раз, видео между ними. Дольше озвучки не кодируем.
 
     hold — сколько стоит фото; video_hold — потолок длины видеокуска (по умолчанию как фото).
+    rhythm — если задан, фото стоят не одинаково, а сериями коротких и длинных планов (в среднем hold).
     """
     if not images or hold <= 0 or voice_dur <= 0.2:
         return []
@@ -585,8 +591,9 @@ def reel_segments(
     points = _insert_after(len(pics), len(clips), rng)
     segments: list[tuple[str, Path, float]] = []
     video_i = 0
+    holds = rhythm_durations(len(pics), hold, rhythm) if rhythm is not None else [hold] * len(pics)
     for i, pic in enumerate(pics):
-        segments.append(("image", pic, hold))
+        segments.append(("image", pic, holds[i]))
         while video_i < len(clips) and video_i < len(points) and points[video_i] == i:
             path, dur = clips[video_i]
             segments.append(("video", path, dur))

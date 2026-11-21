@@ -44,6 +44,12 @@ Rules:
   Only the remaining queries are the city, places, objects, era.
 - If there is NO main person (nature, a city, a general topic), do not invent one.
   Show the place and the subject.
+- VARY THE SHOT TYPE across the queries, like a film with several cameras, not one kind of shot repeated.
+  For the video queries (and the non-person image queries) mix: wide establishing shot, medium shot,
+  close-up of a detail or hands, macro texture, aerial drone, a mood/atmosphere shot (weather, light,
+  water flowing, fog, wind in grass, passing clouds), and a moving-camera shot (tracking, walking,
+  following a current). Put the shot word into the query ("close-up", "macro", "aerial", "tracking shot").
+  This never overrides the rules above: the country, era and the main person still come first.
 - If historical=true, NEVER write modern scenes (no smartphones, cars, offices, yogurt, jeans)
 - Good: "Archimedes marble statue" (ancient)
 - Good: "Silviu Stanculescu actor photo" (20th century)

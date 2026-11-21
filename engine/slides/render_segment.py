@@ -6,6 +6,7 @@ from pathlib import Path
 
 from engine.slides.ffmpeg_util import find_ffmpeg
 from engine.slides.ffprobe_util import probe_duration, probe_video_size, run_ffmpeg
+from engine.slides.look_presets import motion_mode
 from engine.slides.render_defaults import (
     OUT_FPS,
     OUT_HEIGHT,
@@ -28,6 +29,7 @@ def render_video_cover(
     media: Path,
     duration: float,
     dest: Path,
+    grade: str = "",
 ) -> Path:
     """Любой аспект → 1920x1080: ролик вписан, пустые края закрыты блюром."""
     if duration <= 0.05:
@@ -42,7 +44,7 @@ def render_video_cover(
         else ["-i", str(media)]
     )
     # out_range=tv: все сегменты в одном цветовом диапазоне — иначе склейка «меняет формат на ходу»
-    tail = f"fps={fps},scale=out_range=tv,format=yuv420p,trim=duration={duration:.3f},setpts=PTS-STARTPTS"
+    tail = f"{grade + ',' if grade else ''}fps={fps},scale=out_range=tv,format=yuv420p,trim=duration={duration:.3f},setpts=PTS-STARTPTS"
     size = probe_video_size(media) if media.is_file() else None
     if size is not None and size[0] * h == size[1] * w:
         # Ровно 16:9: ролик закрывает кадр целиком, размытый фон под ним
@@ -106,6 +108,7 @@ def image_motion_filter(
     h: int,
     fps: int,
     transition: str = "calm",
+    grade: str = "",
 ) -> tuple[str, int]:
     """Один кадр → плавный зум или панорама. Вход в zoompan крупный, иначе он дёргается."""
     frames = max(2, int(round(duration * fps)))
@@ -113,19 +116,20 @@ def image_motion_filter(
     fade_in, fade_out, color_in, color_out = transition_fades(transition, seed, duration, fade_sec)
     fade_out_st = max(0.0, duration - fade_out)
     super_w, super_h = w * _MOTION_SUPER, h * _MOTION_SUPER
-    mode = seed % 3
-    if mode == 0:
-        z = f"1+on*0.08/{den}"
-        x = "iw/2-(iw/zoom/2)"
-        y = "ih/2-(ih/zoom/2)"
-    elif mode == 1:
-        z = "1.10"
-        x = f"(iw-iw/zoom)*on/{den}"
-        y = "ih/2-(ih/zoom/2)"
-    else:
-        z = "1.10"
-        x = f"(iw-iw/zoom)*(1-on/{den})"
-        y = "ih/2-(ih/zoom/2)"
+    mode = motion_mode(seed)
+    cy = "ih/2-(ih/zoom/2)"
+    if mode == 0:  # медленный наезд
+        z, x, y = f"1+on*0.08/{den}", "iw/2-(iw/zoom/2)", cy
+    elif mode == 1:  # пролёт вправо
+        z, x, y = "1.10", f"(iw-iw/zoom)*on/{den}", cy
+    elif mode == 2:  # пролёт влево
+        z, x, y = "1.10", f"(iw-iw/zoom)*(1-on/{den})", cy
+    elif mode == 3:  # отъезд
+        z, x, y = f"1.10-on*0.08/{den}", "iw/2-(iw/zoom/2)", cy
+    elif mode == 4:  # наезд с подъёмом кадра вверх
+        z, x, y = f"1+on*0.10/{den}", "iw/2-(iw/zoom/2)", f"(ih-ih/zoom)*(1-on/{den})"
+    else:  # крупный пролёт вправо-вверх
+        z, x, y = "1.16", f"(iw-iw/zoom)*on/{den}", f"(ih-ih/zoom)*(1-on/{den})"
     vf = (
         f"split[bg][fg];"
         f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,"
@@ -137,7 +141,7 @@ def image_motion_filter(
         f"fade=t=in:st=0:d={fade_in:.3f}:color={color_in},"
         f"fade=t=out:st={fade_out_st:.3f}:d={fade_out:.3f}:color={color_out},"
         # JPEG — полный диапазон (yuvj420p); приводим к обычному, как у видео
-        f"scale=out_range=tv,format=yuv420p"
+        f"{grade + ',' if grade else ''}scale=out_range=tv,format=yuv420p"
     )
     return vf, frames
 
@@ -150,6 +154,7 @@ def render_image_canvas(
     seed: int = 0,
     fade_sec: float = 0.5,
     transition: str = "calm",
+    grade: str = "",
 ) -> Path:
     """Картинка на 16:9: блюр по краям, плавный зум или панорама, без рывков."""
     if duration <= 0.05:
@@ -158,7 +163,7 @@ def render_image_canvas(
     ffmpeg = find_ffmpeg()
     w, h, fps = OUT_WIDTH, OUT_HEIGHT, OUT_FPS
     vf, frames = image_motion_filter(
-        duration=duration, seed=seed, fade_sec=fade_sec, w=w, h=h, fps=fps, transition=transition
+        duration=duration, seed=seed, fade_sec=fade_sec, w=w, h=h, fps=fps, transition=transition, grade=grade
     )
     cmd = [
         ffmpeg,
