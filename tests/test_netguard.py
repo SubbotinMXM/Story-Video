@@ -109,6 +109,27 @@ class QueueTests(_NetCase, _ManagerCase):
         self.assertEqual(len(runs), 2)
         self.assertNotIn("wait_net", job.state)
 
+    def test_video_assembly_continues_without_youtube(self) -> None:
+        ran: list[str] = []
+
+        def builder(kind, params, state):
+            def run(job, progress, cancel):
+                ran.append(kind)
+                return {}
+
+            return kind, run
+
+        m = jobs_mod.JobManager(builder)
+        netguard._set(False, "x")
+        pub = m.add(m.create("publish", {}))
+        video = m.add(m.create("broll", {}))
+        _wait(lambda: video.status == jobs_mod.DONE)
+        time.sleep(0.2)
+        self.assertEqual(ran, ["broll"], "ролик из текста собирается, выкладка ждёт YouTube")
+        self.assertEqual(pub.status, jobs_mod.QUEUED)
+        netguard._set(True, "")
+        _wait(lambda: pub.status == jobs_mod.DONE)
+
     def test_retry_at_dropped_when_network_returns(self) -> None:
         started = threading.Event()
 

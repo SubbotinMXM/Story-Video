@@ -71,6 +71,10 @@ def cover_for(cs: cv.CoverSettings | None, llm, thumbnail: str, text: list[str] 
     try:
         out = cv.translate_cover(cs, src, text, code, work)
     except Exception as exc:
+        from engine.publish.slides_materials import _wait_net_or
+
+        _wait_net_or(exc, f"надписи обложки на {code.upper()} не перевелись")  # обрыв связи — подождать, а не
+        # выкладывать обложку с надписями на чужом языке
         notes.append(f"перевод надписей обложки на {code.upper()} не получился ({str(exc)[:150]}) — обложка та же")
         return thumbnail
     notes.append(f"обложка: надписи переведены на {code.upper()}")

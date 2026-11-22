@@ -287,6 +287,20 @@ class SlidesMaterialsTest(unittest.TestCase):
         self.assertEqual(mat["title"], "Из текста")
         self.assertIsNone(self.reference)
 
+    def test_cover_failure_offline_waits_instead_of_publishing_without_cover(self) -> None:
+        from engine.core import netguard
+
+        boom = mock.patch.object(cv, "make_cover", side_effect=RuntimeError("готовая картинка не скачалась"))
+        with boom, mock.patch.object(netguard, "check_now", return_value=False):
+            with self.assertRaises(RuntimeError) as err:
+                sm.prepare(folder=self.folder, files=self.files[:1], source_url="", language="ru", story="s",
+                           cover=self.cs, desc_cta="CTA")
+        self.assertIn("нет связи", str(err.exception), "очередь распознает обрыв и подождёт связь")
+        with boom, mock.patch.object(netguard, "check_now", return_value=True):
+            mat = sm.prepare(folder=self.folder, files=self.files[:1], source_url="", language="ru", story="s",
+                             cover=self.cs, desc_cta="CTA")
+        self.assertEqual(mat["thumbnail"], "", "связь есть, а генератор упал — как раньше: без обложки, с пометкой")
+
     def test_original_unavailable_falls_back(self) -> None:
         with mock.patch.object(cv, "youtube_original", side_effect=RuntimeError("bot check")):
             mat = sm.prepare(folder=self.folder, files=self.files[:1], source_url="https://youtu.be/x", language="ru",

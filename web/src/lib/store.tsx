@@ -111,6 +111,9 @@ export function useProfiles() {
 
 /** Задачи, которые меняют учёт каналов: синхронизация «Аналитики» (в т. ч. по расписанию) и поиск каналов профиля. */
 const REGISTRY_KINDS = new Set(["analytics", "scan"]);
+/** После этих задач тоже перечитать учёт: переключаясь на канал, программа находит переименованный канал по ID
+ *  и обновляет его название и @-адрес. */
+const REGISTRY_TOUCH_KINDS = new Set([...REGISTRY_KINDS, "publish", "comments", "polls", "collabs"]);
 
 const LOG_LIMIT = 2000;
 const SAVE_DELAY = 500;
@@ -292,7 +295,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [setProfiles]);
   // синхронизация началась или закончилась — перечитать
   const registryKey = jobs
-    .filter((j) => REGISTRY_KINDS.has(j.kind))
+    .filter((j) => REGISTRY_TOUCH_KINDS.has(j.kind))
     .map((j) => `${j.id}:${j.status}`)
     .join(",");
   useEffect(() => {

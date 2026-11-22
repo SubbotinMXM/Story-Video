@@ -150,7 +150,7 @@ def _check_signed_in(page) -> None:
 
 
 def _switcher_items(page, authuser: int) -> list[dict]:
-    page.goto(f"{SWITCHER}?authuser={authuser}", wait_until="domcontentloaded")
+    goto(page, f"{SWITCHER}?authuser={authuser}")
     _check_signed_in(page)
     try:
         page.wait_for_selector("ytd-account-item-renderer", timeout=20000)
@@ -167,7 +167,7 @@ def _switcher_items(page, authuser: int) -> list[dict]:
 
 
 def channel_id(page, handle: str) -> str:
-    page.goto(f"https://www.youtube.com/{handle}", wait_until="domcontentloaded")
+    goto(page, f"https://www.youtube.com/{handle}")
     m = _UC.search(page.content())
     if not m:
         raise StudioError(f"не нашёл ID канала {handle}")
@@ -187,22 +187,25 @@ def switch_to(page, channel, *, cancel: CancelToken | None = None) -> None:
     а у только что выбранного — «нет доступа», пока Studio не открыть с главной."""
     if _is_active(page, channel.id):
         return  # уже активен — лишних кликов не делаем
-    for item_i, item in enumerate(_switcher_items(page, channel.authuser)):
-        if item["handle"] == channel.handle:
-            for attempt in range(2):
-                pause(cancel)
-                try:
-                    # клик переключает канал перезагрузкой страницы — дождаться её, иначе переключение оборвётся
-                    with page.expect_navigation(wait_until="commit", timeout=30000):
-                        human.click(page, page.locator("ytd-account-item-renderer").nth(item_i), timeout=20000)
-                    break
-                except Exception:
-                    if attempt:
-                        raise StudioError(f"не нажался канал {channel.handle} в списке каналов") from None
-                    _switcher_items(page, channel.authuser)  # страница не успела — открыть список заново
+    items = _switcher_items(page, channel.authuser)
+    item_i = next((i for i, it in enumerate(items) if channel.handle and it["handle"] == channel.handle), None)
+    if item_i is None:
+        # @-адрес или название канала поменяли в YouTube, а каналы профиля ещё не пересканированы — находим
+        # канал по его ID (он не меняется), обновляем учёт и переключаемся; выкладка не встаёт до ручной синхронизации
+        item_i = _relocate(page, channel, cancel)
+        if item_i is None:
+            raise StudioError(f"канала {channel.handle or channel.name} нет в списке каналов аккаунта — обнови каналы профиля")
+    for attempt in range(2):
+        pause(cancel)
+        try:
+            # клик переключает канал перезагрузкой страницы — дождаться её, иначе переключение оборвётся
+            with page.expect_navigation(wait_until="commit", timeout=30000):
+                human.click(page, page.locator("ytd-account-item-renderer").nth(item_i), timeout=20000)
             break
-    else:
-        raise StudioError(f"канала {channel.handle or channel.name} нет в списке каналов аккаунта — обнови каналы профиля")
+        except Exception:
+            if attempt:
+                raise StudioError(f"не нажался канал {channel.handle} в списке каналов") from None
+            _switcher_items(page, channel.authuser)  # страница не успела — открыть список заново
     deadline = time.monotonic() + SWITCH_WAIT_SEC
     seen = ""
     while time.monotonic() < deadline:  # YouTube и Studio подхватывают новый активный канал не сразу
@@ -214,6 +217,43 @@ def switch_to(page, channel, *, cancel: CancelToken | None = None) -> None:
         page.wait_for_timeout(3000)
     raise StudioError(f"не переключился на канал {channel.handle or channel.name} ({channel.id}) — "
                       f"активен другой канал{f' ({seen})' if seen else ''}")
+
+
+def _relocate(page, channel, cancel: CancelToken | None) -> int | None:
+    """Канала нет в списке под своим @-адресом: ищем его по ID среди каналов всех аккаунтов профиля.
+    Нашли — обновляем название, адрес и аккаунт (в учёте и у объекта канала) и возвращаем номер строки
+    в открытом списке; нет — None."""
+    from engine.publish import registry
+
+    log(f"Studio: канала {channel.handle or channel.name} нет в списке под этим адресом — ищу его по ID "
+        "(возможно, переименован)")
+    seen_accounts: set[str] = set()
+    for authuser in range(MAX_ACCOUNTS):
+        if cancel:
+            cancel.check()
+        items = _switcher_items(page, authuser)
+        gaia = next((i["gaia"] for i in items if i["gaia"]), "") or f"#{authuser}"
+        if not items or gaia in seen_accounts:
+            break
+        seen_accounts.add(gaia)
+        for it in items:
+            if not it["handle"]:
+                continue
+            try:
+                cid = channel_id(page, it["handle"])
+            except Exception as exc:  # noqa: BLE001 — один адрес не открылся: проверяем остальные
+                if browser_lost(exc):
+                    raise
+                continue
+            if cid != channel.id:
+                continue
+            old = f"{channel.name} {channel.handle}"
+            registry.update_identity(channel.id, name=it["name"], handle=it["handle"], authuser=authuser)
+            channel.name, channel.handle, channel.authuser = it["name"] or channel.name, it["handle"], authuser
+            log(f"Studio: канал найден по ID — теперь «{channel.name}» {channel.handle} (было: {old}); учёт обновлён")
+            fresh = _switcher_items(page, authuser)  # страница ушла на адрес канала — открыть список заново
+            return next((i for i, x in enumerate(fresh) if x["handle"] == channel.handle), None)
+    return None
 
 
 def active_channel(page) -> str:
@@ -264,7 +304,8 @@ def goto(page, url: str, *, wait_until: str = "domcontentloaded", timeout: int =
                 broken = first
             else:
                 log(f"Studio: страница открывается долго ({first}) — проверяю, что успело загрузиться")
-        if not broken and page.url.startswith("chrome-error://"):
+        url_now = getattr(page, "url", "")
+        if not broken and isinstance(url_now, str) and url_now.startswith("chrome-error://"):
             broken = "страница ошибки браузера"
         if not broken:
             return
@@ -300,7 +341,7 @@ def _navigating(exc: BaseException) -> bool:
 
 
 def _playlists(page, channel_id_: str) -> list[str]:
-    page.goto(f"{STUDIO}/channel/{channel_id_}/content/playlists", wait_until="domcontentloaded")
+    goto(page, f"{STUDIO}/channel/{channel_id_}/content/playlists")
     try:
         page.wait_for_selector("#playlist-title, ytcp-video-list-cell-playlist, .empty-state", timeout=20000)
     except Exception:
@@ -320,17 +361,21 @@ def _titles_language(page) -> str:
     return detect_language(" ".join(t for t in titles[:15] if t)) or ""
 
 
+# короткие названия месяцев на языке страницы Studio (для разбора дат в строках «Контента»)
+_MONTHS_JS = """() => [...Array(12).keys()].map(m =>
+    new Intl.DateTimeFormat(document.documentElement.lang || 'en', {month: 'short'}).format(new Date(2026, m, 15)))"""
+
+
 def _last_date(page, channel_id_: str) -> str:
     """Самая поздняя дата среди роликов канала (запланированные — будущие даты) → YYYY-MM-DD или «»."""
-    page.goto(f"{STUDIO}/channel/{channel_id_}/videos/upload", wait_until="domcontentloaded")
+    goto(page, f"{STUDIO}/channel/{channel_id_}/videos/upload")
     try:
         page.wait_for_selector("ytcp-video-row, .empty-state", timeout=20000)
     except Exception:
         return ""
     page.wait_for_timeout(2000)
     rows = page.eval_on_selector_all("ytcp-video-row", "els => els.map(e => e.innerText.replace(/\\s+/g, ' ').slice(-120))")
-    months = page.evaluate("""() => [...Array(12).keys()].map(m =>
-        new Intl.DateTimeFormat(document.documentElement.lang || 'en', {month: 'short'}).format(new Date(2026, m, 15)))""")
+    months = page.evaluate(_MONTHS_JS)
     days = [d for r in rows if counts_for_schedule(r) for d in find_dates(r, months)]
     return max(days).isoformat() if days else ""
 
@@ -357,7 +402,7 @@ def count_scheduled(page, channel_id_: str) -> int | None:
     (запланированные — сверху), считаем строки; пока вся страница запланированная — листаем дальше. None — не прочиталось."""
     from engine.publish.schedule import MSK
 
-    page.goto(f"{STUDIO}/channel/{channel_id_}/videos/upload", wait_until="domcontentloaded")
+    goto(page, f"{STUDIO}/channel/{channel_id_}/videos/upload")
     try:
         page.wait_for_selector("ytcp-video-row, .empty-state", timeout=25000)
     except Exception:
@@ -411,7 +456,7 @@ def count_videos(page, channel_id_: str) -> dict[str, int] | None:
     None — страница не прочиталась."""
     from engine.publish.schedule import MSK
 
-    page.goto(f"{STUDIO}/channel/{channel_id_}/videos/upload", wait_until="domcontentloaded")
+    goto(page, f"{STUDIO}/channel/{channel_id_}/videos/upload")
     try:
         page.wait_for_selector("ytcp-video-row, .empty-state", timeout=25000)
     except Exception:
@@ -806,7 +851,8 @@ def upload(cdp_url: str, channel, job: UploadJob, *, cancel: CancelToken | None 
                     _confirm_saved(page, draft_url)
                 if not job.private_only and not job.publish_now:
                     notes += _check_scheduled(page, page.evaluate(_DATE_JS, job.publish_at.date().isoformat()),
-                                              draft_url)
+                                              draft_url, channel_id=channel.id, title=job.title,
+                                              want=job.publish_at.date())
                 notes.append("видео уже было сохранено прошлой попыткой — повторно не загружал")
                 notes += _audit_playlist(page, draft_url, job, cancel)
                 file_ok = _check_file_uploaded(page, channel.id, draft_url, job.title)
@@ -849,8 +895,15 @@ def upload(cdp_url: str, channel, job: UploadJob, *, cancel: CancelToken | None 
                 notes += _set_thumbnail(page, channel, job.thumbnail, cancel)
             else:
                 notes.append("без обложки — поставишь сам в Studio")
-            with step(page, "плейлист"):
-                notes += _pick_playlist(page, cancel)
+            try:
+                with step(page, "плейлист"):
+                    notes += _pick_playlist(page, cancel, want=list(job.playlist_hint or []))
+            except StudioError as exc:
+                # плейлист ещё раз проверяется и ставится после сохранения (_audit_playlist) — из-за него
+                # выкладку не роняем; обрыв связи — роняем (очередь подождёт VPN)
+                if "нет связи" in str(exc):
+                    raise
+                notes.append("плейлист в окне загрузки не выбрался — проверю и поставлю после сохранения")
             with step(page, "«не для детей»"):
                 _act(cancel)
                 human.click(page, el(page, "not_for_kids"))
@@ -956,7 +1009,8 @@ def upload(cdp_url: str, channel, job: UploadJob, *, cancel: CancelToken | None 
         with step(page, "проверка плейлиста на ролике"):
             notes += _audit_playlist(page, url, job, cancel)
         if not job.private_only and not job.publish_now:
-            notes += _check_scheduled(page, expected_date, url)
+            notes += _check_scheduled(page, expected_date, url, channel_id=channel.id, title=job.title,
+                                      want=job.publish_at.date())
         with step(page, "проверка, что видеофайл загружен"):
             file_ok = _check_file_uploaded(page, channel.id, url, job.title)
         if not file_ok:
@@ -1061,7 +1115,7 @@ def _open_previous(page, url: str, job: UploadJob, cancel, channel_id: str = "")
             return "interrupted"
         if row and re.search(r"resume upload|upload interrupted", row, re.I) and _resume_from_list(page, url, job, cancel, channel_id):
             return "draft"
-    page.goto(f"{STUDIO}/video/{_video_id(url)}/edit", wait_until="domcontentloaded")
+    goto(page, f"{STUDIO}/video/{_video_id(url)}/edit")
     state = ""
     for _ in range(20):
         page.wait_for_timeout(1500)
@@ -1102,7 +1156,7 @@ def _resume_from_list(page, url: str, job: UploadJob, cancel, channel_id: str) -
     try:
         human.press(page, "Escape")  # окно черновика без файла — закрыть, список роликов под ним
         page.wait_for_timeout(1500)
-        page.goto(f"{STUDIO}/channel/{channel_id}/videos/upload", wait_until="domcontentloaded")
+        goto(page, f"{STUDIO}/channel/{channel_id}/videos/upload")
         button = f'ytcp-video-row:has(a[href*="{vid}"]) ytcp-button:has-text("Resume upload")'
         page.locator(button).first.wait_for(state="visible", timeout=30000)
     except Exception:
@@ -1297,7 +1351,7 @@ def _set_date(page, when, cancel: CancelToken | None) -> None:
 def _open_upload_dialog(page, channel, cancel: CancelToken | None) -> None:
     """Окно загрузки: прямой адрес, а если Studio его не открыла (на канале висят незаконченные загрузки) —
     как человек: «Create» → «Upload videos» (по служебным меткам, на любом языке)."""
-    page.goto(f"{STUDIO}/channel/{channel.id}/videos/upload?d=ud", wait_until="domcontentloaded")
+    goto(page, f"{STUDIO}/channel/{channel.id}/videos/upload?d=ud")
     file_input = page.locator("ytcp-uploads-dialog input[type=file]")
     try:
         file_input.first.wait_for(state="attached", timeout=20000)
@@ -1348,15 +1402,18 @@ def _shown_has_date(page, shown: str, expected_text: str) -> bool:
     return any(studio_date(page, chunk) == want for chunk in re.split(r"[;|•]|\s{2,}", shown) + [shown])
 
 
-def _check_scheduled(page, expected_date: str, url: str) -> list[str]:
+def _check_scheduled(page, expected_date: str, url: str, *, channel_id: str = "", title: str = "",
+                     want: date | None = None) -> list[str]:
     """На странице видео (после _confirm_saved): в блоке доступа должна стоять дата выхода. Не видно —
-    не ошибка (видео сохранено, повтор создал бы дубль), а пометка «проверь в Studio»."""
+    не ошибка (видео сохранено, повтор создал бы дубль), а пометка «проверь в Studio».
+    Studio на части каналов пишет в блоке только «Visibility Scheduled» без даты (22.11: 36 ложных пометок) —
+    тогда дату сверяем по строке ролика в «Контенте» (channel_id, title, want — дата выхода)."""
     shown = ""
     for visit in range(PENDING_VISITS):
         if visit:  # Studio ещё обрабатывает видео («Visibility Pending») — дата появится чуть позже
             page.wait_for_timeout(20000)
             try:
-                page.goto(f"{STUDIO}/video/{_video_id(url)}/edit", wait_until="domcontentloaded")
+                goto(page, f"{STUDIO}/video/{_video_id(url)}/edit")
                 page.locator("ytcp-video-metadata-visibility").first.wait_for(timeout=30000)
                 page.wait_for_timeout(2000)
             except Exception:
@@ -1377,8 +1434,35 @@ def _check_scheduled(page, expected_date: str, url: str) -> list[str]:
         log(f"Studio: доступ видео пока «{shown}» — Studio ещё обрабатывает, дату не показывает")
         return [f"Studio ещё обрабатывала видео («{shown[:60]}») — дату расписания не показала; ставили "
                 f"{expected_date}, при желании глянь позже ({url})"]
+    if channel_id and _SCHEDULED_WORDS.search(shown):
+        verdict = _scheduled_in_list(page, channel_id, url, title, want)
+        if verdict is not None:
+            return verdict
     log(f"Studio: в доступе видео не вижу даты {expected_date}: «{shown}»")
     return [f"проверь в Studio: не вижу запланированной даты {expected_date} (в Studio: «{shown[:80]}») — {url}"]
+
+
+def _scheduled_in_list(page, channel_id: str, url: str, title: str, want: date | None) -> list[str] | None:
+    """Блок доступа пишет «Scheduled» без даты — дата есть в строке ролика в «Контенте».
+    → [] (дата та), [пометка] (дата другая), None (строку не нашли — решает вызывающий)."""
+    row = _list_row(page, channel_id, _video_id(url), title)
+    if not row:
+        return None
+    try:
+        days = find_dates(row, page.evaluate(_MONTHS_JS))
+    except Exception:  # noqa: BLE001
+        days = []
+    if want is not None and want in days:
+        log(f"Studio: видео запланировано на {want.isoformat()} — дата видна в «Контенте»")
+        return []
+    if days and want is not None:
+        shown = ", ".join(d.isoformat() for d in days)
+        log(f"Studio: в «Контенте» у ролика дата {shown}, ставили {want.isoformat()}")
+        return [f"в Studio у ролика дата {shown}, а ставили {want.isoformat()} — проверь расписание ({url})"]
+    if _SCHEDULED_WORDS.search(row):
+        log(f"Studio: ролик запланирован («Scheduled»), дату Studio не показывает — считаю, что дата наша")
+        return []
+    return None
 
 
 DEAD_ROW = re.compile(r"processing abandoned|failed to upload|upload interrupted|upload aborted|upload failed", re.I)
@@ -1388,7 +1472,7 @@ def _list_row(page, channel_id: str, vid: str, title: str) -> str:
     """Строка ролика в списке «Content» канала: статус загрузки виден только там («Processing abandoned»,
     «Upload interrupted»); на странице самого видео его нет. Нет строки / список не открылся — пусто."""
     try:
-        page.goto(f"{STUDIO}/channel/{channel_id}/videos/upload", wait_until="domcontentloaded")
+        goto(page, f"{STUDIO}/channel/{channel_id}/videos/upload")
         page.locator("ytcp-video-row").first.wait_for(state="visible", timeout=30000)
     except Exception:
         return ""
@@ -1441,18 +1525,18 @@ def _audit_playlist(page, url: str, job: UploadJob, cancel) -> list[str]:
     def has(text: str) -> bool:
         return bool(text) and names[0].casefold() in text.casefold()
 
-    page.goto(f"{STUDIO}/video/{_video_id(url)}/edit", wait_until="domcontentloaded")
+    goto(page, f"{STUDIO}/video/{_video_id(url)}/edit")
     page.wait_for_timeout(6000)
     if has(shown()):
         return []
     log(f"Studio: плейлист «{names[0]}» на ролике не стоит (поле: «{shown()[:40]}») — ставлю")
     trigger = page.locator("ytcp-video-metadata-playlists").first
     try:
-        notes = _pick_playlist(page, cancel, trigger=trigger)
+        notes = _pick_playlist(page, cancel, trigger=trigger, want=names)
         _act(cancel)
         human.click(page, page.locator("ytcp-button#save").first)
         page.wait_for_timeout(5000)
-        page.goto(f"{STUDIO}/video/{_video_id(url)}/edit", wait_until="domcontentloaded")
+        goto(page, f"{STUDIO}/video/{_video_id(url)}/edit")
         page.wait_for_timeout(6000)
     except (StudioError, LayoutError):
         raise
@@ -1465,6 +1549,99 @@ def _audit_playlist(page, url: str, job: UploadJob, cancel) -> list[str]:
     return [f"плейлист «{names[0]}» не стоит — поставь в Studio сам ({url})", *notes]
 
 
+# кнопки и поле выбора обложки на странице уже выложенного ролика (не в окне загрузки)
+_EDIT_THUMB_BUTTONS = ["ytcp-thumbnail-uploader #select-button",
+                       "ytcp-thumbnails-compact-editor-uploader #select-button",
+                       "ytcp-thumbnails-compact-editor-uploader-old #select-button",
+                       "ytcp-thumbnails-compact-editor-uploader",
+                       "ytcp-thumbnails-compact-editor-uploader-old"]
+_EDIT_THUMB_INPUT = "ytcp-thumbnail-uploader input[type=file], ytcp-thumbnails-compact-editor-uploader input[type=file], #file-loader"
+_THUMB_IMGS_JS = """() => [...document.querySelectorAll(
+    'ytcp-thumbnails-compact-editor img, ytcp-thumbnails-compact-editor-uploader img, ytcp-thumbnail-uploader img, ytcp-video-thumbnail-editor img')]
+    .map(e => e.currentSrc || e.src || '').filter(Boolean)"""
+
+
+def _thumb_srcs(page) -> set[str]:
+    try:
+        return set(page.evaluate(_THUMB_IMGS_JS) or [])
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def fix_video(cdp_url: str, channel, url: str, *, thumbnail: Path | None = None, playlists: list[str] | None = None,
+              cancel: CancelToken | None = None) -> list[str]:
+    """Доделать уже выложенный ролик: поставить обложку и/или плейлист на странице ролика в Studio, сохранить и
+    проверить, что встало (перечитать страницу). → строки для итогов. Ролик не удаляется и не перезаливается."""
+    from engine.publish.studio_kit import el, set_channel, step
+
+    vid = _video_id(url)
+    if not vid:
+        raise StudioError(f"не понял ссылку на ролик: {url}")
+    set_channel(channel.handle or channel.id)
+    names = [str(x).strip() for x in (playlists or []) if str(x).strip()]
+    notes: list[str] = []
+    edit = f"{STUDIO}/video/{vid}/edit"
+
+    def open_edit() -> None:
+        goto(page, edit)
+        page.locator("ytcp-video-metadata-playlists").first.wait_for(timeout=40000)
+        page.wait_for_timeout(4000)
+
+    def shown_playlist() -> str:
+        try:
+            return " ".join(page.locator("ytcp-video-metadata-playlists").first.inner_text(timeout=8000).split())
+        except Exception:  # noqa: BLE001
+            return ""
+
+    with studio_page(cdp_url) as page:
+        with step(page, "доделка: переключение на канал"):
+            switch_to(page, channel, cancel=cancel)
+        with step(page, "доделка: страница ролика"):
+            open_edit()
+        changed = False
+        before = _thumb_srcs(page)
+        if thumbnail is not None:
+            if not thumbnail.is_file():
+                raise StudioError(f"файла обложки нет: {thumbnail}")
+            with step(page, f"доделка: обложка {thumbnail.name}"):
+                _act(cancel)
+                how = human.choose_file(page, _EDIT_THUMB_BUTTONS, thumbnail, what="обложка",
+                                        fallback_input=page.locator(_EDIT_THUMB_INPUT).first)
+                log(f"Studio {channel.handle}: обложка для {vid} выбрана {how}")
+                page.wait_for_timeout(6000)
+                changed = True
+        want_pl = len(names) == 1 and names[0].casefold() not in shown_playlist().casefold()
+        if want_pl:
+            with step(page, "доделка: плейлист"):
+                notes += _pick_playlist(page, cancel, trigger=page.locator("ytcp-video-metadata-playlists").first,
+                                        want=names)
+                changed = True
+        if not changed:
+            return [f"ролик {url}: доделывать нечего — плейлист уже стоит"]
+        with step(page, "доделка: сохранить"):
+            save = el(page, "video_save")
+            if save.get_attribute("aria-disabled") == "true":
+                raise StudioError("Studio не даёт сохранить изменения ролика (кнопка «Save» недоступна)")
+            _act(cancel)
+            human.click(page, save)
+            page.wait_for_timeout(6000)
+        with step(page, "доделка: проверка после сохранения"):
+            open_edit()
+            if thumbnail is not None:
+                after = _thumb_srcs(page)
+                if after and after != before:
+                    notes.append(f"обложка поставлена ({url})")
+                else:
+                    notes.append(f"обложку выбрал и сохранил, но по странице не видно, что она сменилась — глянь "
+                                 f"ролик в Studio ({url})")
+            if want_pl:
+                if names[0].casefold() in shown_playlist().casefold():
+                    notes.append(f"плейлист «{names[0]}» поставлен ({url})")
+                else:
+                    raise StudioError(f"плейлист «{names[0]}» после сохранения не стоит")
+    return notes
+
+
 def _confirm_saved(page, url: str) -> None:
     """Studio могла оставить ролик черновиком (клик не засчитался) — проверяем на странице видео."""
     vid = url.rstrip("/").rsplit("/", 1)[-1].split("=")[-1] if url else ""
@@ -1474,7 +1651,7 @@ def _confirm_saved(page, url: str) -> None:
     # Studio сохраняет не мгновенно — смотрим несколько раз; без подтверждения файл с компьютера не удаляем
     draft = False
     for _visit in range(4):
-        page.goto(f"{STUDIO}/video/{vid}/edit", wait_until="domcontentloaded")
+        goto(page, f"{STUDIO}/video/{vid}/edit")
         for _ in range(12):
             page.wait_for_timeout(1500)
             if page.locator("ytcp-video-metadata-visibility").count():
@@ -1486,6 +1663,16 @@ def _confirm_saved(page, url: str) -> None:
     if draft:
         raise StudioError(f"видео осталось черновиком в Studio ({url}) — «Продолжить» попробует снова")
     raise StudioError(f"Studio не подтвердила, что видео сохранено ({url})")
+
+
+def _box_label(box) -> str:
+    """Название плейлиста у галочки в окне выбора (текст ближайшего предка с текстом)."""
+    try:
+        return " ".join(str(box.evaluate("""e => { let n = e;
+            for (let k = 0; k < 5 && n; k++) { const t = (n.innerText || '').trim(); if (t) return t; n = n.parentElement; }
+            return ''; }""", timeout=3000) or "").split())
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _playlist_checked(box) -> bool:
@@ -1500,8 +1687,10 @@ def _playlist_checked(box) -> bool:
         return False
 
 
-def _pick_playlist(page, cancel: CancelToken | None, trigger=None) -> list[str]:
-    """Ровно один плейлист на канале — выбираем его (уже выбран — не трогаем); иначе ни одного и пометка.
+def _pick_playlist(page, cancel: CancelToken | None, trigger=None, want: list[str] | None = None) -> list[str]:
+    """Плейлист ролика: want — плейлисты канала для выкладки (registry.Channel.upload_playlists). Один плейлист
+    в want (выбранный человеком или единственный на канале) — отмечаем его по названию; на канале ровно один
+    плейлист — его; иначе ни одного и пометка. Уже отмеченный не трогаем (клик по нему снимет галочку).
     trigger — поле «Playlists» (на странице видео); по умолчанию — поле в окне загрузки."""
     from engine.publish.studio_kit import el
 
@@ -1512,20 +1701,40 @@ def _pick_playlist(page, cancel: CancelToken | None, trigger=None) -> list[str]:
     boxes = page.locator("#playlists-list ytcp-checkbox-lit")
     n = boxes.count()
     notes: list[str] = []
-    if n == 1:
+    names = [str(x).strip() for x in (want or []) if str(x).strip()]
+    target = None
+    if len(names) == 1 and n > 1:
+        labels = [_box_label(boxes.nth(i)) for i in range(n)]
+        target = next((i for i, t in enumerate(labels) if t.casefold() == names[0].casefold()), None)
+        if target is None:
+            target = next((i for i, t in enumerate(labels) if t.casefold().startswith(names[0].casefold())), None)
+        if target is None:
+            notes.append(f"плейлиста «{names[0]}» нет в списке канала ({', '.join(labels)[:120]}) — не выбран")
+    elif n == 1:
+        target = 0
+    if target is not None:
+        box = boxes.nth(target)
         for _try in range(2):
-            if _playlist_checked(boxes.first):
+            if _playlist_checked(box):
                 break
             _act(cancel)
-            human.click(page, boxes.first)
+            human.click(page, box)
             page.wait_for_timeout(800)
-        if not _playlist_checked(boxes.first):
+        if not _playlist_checked(box):
             notes.append("плейлист не удалось отметить — поставь его в Studio сам")
-    else:
-        notes.append(f"плейлистов на канале {n} — не выбран ни один, оставь один плейлист" if n else
+    elif not notes:
+        notes.append(f"плейлистов на канале {n} — не выбран ни один: выбери плейлист канала в выкладке" if n else
                      "на канале нет плейлиста — ролик без плейлиста")
+    # «Done» / «Готово» — последняя кнопка окна. Окно бывает уже закрыто само (22.11: 15 с ждали кнопку и роняли всю
+    # выкладку) — тогда закрывать нечего; Escape не жмём: он закрывает и окно загрузки
+    done = page.locator("ytcp-playlist-dialog ytcp-button").last
+    try:
+        done.wait_for(state="visible", timeout=5000)
+    except Exception:  # noqa: BLE001
+        log("Studio: окно плейлистов уже закрыто — «Готово» не нужно")
+        return notes
     _act(cancel)
-    human.click(page, page.locator("ytcp-playlist-dialog ytcp-button").last)  # «Done» / «Готово» — последняя кнопка
+    human.click(page, done)
     page.wait_for_timeout(1000)
     return notes
 
@@ -1544,7 +1753,7 @@ def music_claims(cdp_url: str, url: str) -> list[str]:
     if not vid:
         return []
     with studio_page(cdp_url) as page:
-        page.goto(f"{STUDIO}/video/{vid}/claims", wait_until="domcontentloaded")
+        goto(page, f"{STUDIO}/video/{vid}/claims")
         text = ""
         for _ in range(10):
             page.wait_for_timeout(1500)
@@ -1743,7 +1952,7 @@ def invite_coauthors(page, video_url: str, coauthors: list, *, cancel: CancelTok
     """На странице видео: «Invite a collaborator» → каждый соавтор по @адресу → «Create link» (ссылка-приглашение)
     → «Save» в окне и на странице. → {ключ соавтора: ссылка}. Ссылка становится рабочей после сохранения."""
     vid = _video_id(video_url)
-    page.goto(f"{STUDIO}/video/{vid}/edit", wait_until="domcontentloaded")
+    goto(page, f"{STUDIO}/video/{vid}/edit")
     page.wait_for_selector("#toggle-button", timeout=60000)
     page.wait_for_timeout(3000)
     from engine.publish.studio_kit import LayoutError, el
@@ -1900,7 +2109,7 @@ def accept_coauthor_links(cdp_url: str, channel, links: list[str], *,
 def _accept_one(page, invite_link: str, cancel, skip: list[str] = ()) -> str | None:
     """Открыть ссылку и принять одно ждущее приглашение. → название ролика; None — ждущих больше нет.
     skip — уже принятые за этот заход: если Studio ещё показывает их в списке, не кликаем по кругу."""
-    page.goto(invite_link, wait_until="domcontentloaded")
+    goto(page, invite_link)
     dialog = page.locator("ytcp-collaboration-acceptance-dialog tp-yt-paper-dialog:visible, "
                           "ytcp-collaboration-acceptance-dialog:visible").first
     confirm = page.locator("ytcp-collaboration-acceptance-dialog #confirm-button:visible").first
@@ -2030,7 +2239,7 @@ def backfill_comments(cdp_url: str, channel, text: str, *, cancel: CancelToken |
 
 def _public_videos(page, channel_id_: str) -> list[str]:
     """Вышедшие ролики канала, новые первыми (вкладка «Видео» на youtube.com — только опубликованные)."""
-    page.goto(f"https://www.youtube.com/channel/{channel_id_}/videos", wait_until="domcontentloaded")
+    goto(page, f"https://www.youtube.com/channel/{channel_id_}/videos")
     page.wait_for_timeout(4000)
     links = page.eval_on_selector_all("ytd-rich-grid-renderer a[href*='watch?v='], ytd-browse a[href*='watch?v=']",
                                       "els => els.map(e => e.getAttribute('href'))")
@@ -2042,7 +2251,7 @@ def _comment_on(page, vid: str, text: str, cancel: CancelToken | None, handle: s
     """Ролик: есть наш комментарий → «exists»; комментарии выключены → «off»; иначе пишем, закрепляем → «posted»."""
     from engine.publish.studio_kit import LayoutError, el
 
-    page.goto(f"https://www.youtube.com/watch?v={vid}", wait_until="domcontentloaded")
+    goto(page, f"https://www.youtube.com/watch?v={vid}")
     page.wait_for_timeout(3000)
     for _ in range(6):  # комментарии подгружаются при прокрутке
         page.mouse.wheel(0, random.randint(500, 900))  # колесом мыши, неровно
@@ -2069,7 +2278,12 @@ def _comment_on(page, vid: str, text: str, cancel: CancelToken | None, handle: s
     try:
         thread.wait_for(timeout=20000)
     except Exception:
-        raise StudioError("комментарий не появился после отправки") from None
+        # не показался сразу (22.11): YouTube мог задержать или скрыть его фильтром — проверяем после перезагрузки,
+        # как и пропавший; нет его — «hidden»: на этот раз комментарии прекращаем, повторим со следующей выкладкой
+        if not _still_there(page, text, handle, cancel):
+            log(f"Studio: комментарий под роликом {vid} не появился и после перезагрузки")
+            return "hidden"
+        thread = page.locator("ytd-comment-thread-renderer").filter(has_text=_comment_key(text)[:30]).first
     pinned = _pin(page, thread, vid, cancel)
     if not _still_there(page, text, handle, cancel):
         return "hidden"

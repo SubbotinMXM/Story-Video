@@ -270,12 +270,12 @@ def run_publish(req: PublishRequest, state: dict[str, Any], save: Callable[..., 
                             description=(vm.get("descriptions") or {}).get(str(file)) or vm["description"],
                             thumbnail=Path(vm["thumbnail"]) if vm.get("thumbnail") else None,
                             publish_at=datetime.fromisoformat(rec["publish_at"]),
-                            playlist_hint=t.channel.playlists,
+                            playlist_hint=t.channel.upload_playlists(),
                             # соавторы — только того же языка, что ролик (язык не указан — как раньше)
                             coauthors=[c for c in coauthors if not language_mismatch(version.language, c.channel)],
                             publish_now=req.publish_now,
                         )
-                        for attempt in range(1, PROFILE_RESTARTS + 2):
+                        for attempt in range(1, PROFILE_RESTARTS + 3):
                             if session is None:
                                 session = ap.start(pid, headless=not req.visible)
                             try:
@@ -579,8 +579,9 @@ def _accept_coauthors(req: PublishRequest, targets: list, coauthors: list, resul
                        and co.key not in (results[t.key].get("coauthors_ok") or [])]
             if not pending:
                 continue
+            shown = req.visible  # окно профиля видно (в скрытом Google чаще просит «Verify it's you»)
             try:
-                session = ap.start(co.profile_id, headless=not req.visible)
+                session = ap.start(co.profile_id, headless=not shown)
             except AdsPowerDown:
                 raise PublishLimit(ADSPOWER_DOWN, time.time() + ADSPOWER_POLL_SEC) from None
             except Exception as exc:
@@ -613,10 +614,21 @@ def _accept_coauthors(req: PublishRequest, targets: list, coauthors: list, resul
                             except Exception as exc:
                                 if cancel is not None and cancel.is_cancelled():
                                     raise
+                                if isinstance(exc, youtube.NeedsUser) and not shown:
+                                    # 21.11: ночью в скрытом окне Google просил «Verify it's you» (24 соавторства
+                                    # ждали утра), в обычном окне «Принять» проходит сразу — пробуем так же
+                                    log(f"Соавтор {co.channel.name}: {str(exc)[:120]} — пробую в обычном окне браузера")
+                                    try:
+                                        ap.stop(co.profile_id)
+                                    except Exception:  # noqa: BLE001
+                                        pass
+                                    shown = True
+                                    session = ap.start(co.profile_id, headless=False)
+                                    continue
                                 if not _profile_lost(ap, co.profile_id, exc) or attempt > PROFILE_RESTARTS:
                                     raise
                                 _restart_profile(ap, co.profile_id, f"соавтор {co.channel.name}", attempt)
-                                session = ap.start(co.profile_id, headless=not req.visible)
+                                session = ap.start(co.profile_id, headless=not shown)
                         rec.setdefault("coauthors_ok", []).append(co.key)
                         rec["coauthors_failed"] = [f for f in rec.get("coauthors_failed") or []
                                                    if f.get("key") != co.key]
@@ -855,6 +867,43 @@ def run_comments(channels: list[str], adspower: tuple[str, str], llm: tuple[str,
         raise RuntimeError("Комментарии: не получилось ни на одном канале — " + "; ".join(lines))
     return {"summary": f"Комментарии: {len(targets) - len(failed)} из {len(targets)} каналов", "lines": lines}
 
+
+
+def run_fix_video(key: str, url: str, adspower: tuple[str, str], *, thumbnail: Path | None = None,
+                  playlists: list[str] | None = None, cancel: CancelToken | None = None,
+                  progress: ProgressCb | None = None) -> list[str]:
+    """«Доделать ролик»: на уже выложенный ролик поставить обложку и/или плейлист (профиль AdsPower канала)."""
+    targets = registry.resolve([key])
+    if not targets:
+        raise ValueError("Канал ролика не найден — найди каналы профиля заново")
+    t = targets[0]
+    ak, au = adspower
+    with AdsPower(ak, au) as ap:
+        if not ap.alive():
+            raise PublishLimit(ADSPOWER_DOWN, time.time() + ADSPOWER_POLL_SEC)
+        was_open = ap.is_open(t.profile_id)
+        session = ap.start(t.profile_id)
+        try:
+            for attempt in range(1, PROFILE_RESTARTS + 2):
+                try:
+                    if progress:
+                        progress(0.5, f"Studio: {t.label()} — ролик {url}")
+                    return youtube.fix_video(session.cdp_url, t.channel, url, thumbnail=thumbnail,
+                                             playlists=playlists, cancel=cancel)
+                except Exception as exc:
+                    if cancel is not None and cancel.is_cancelled():
+                        raise
+                    if not _profile_lost(ap, t.profile_id, exc) or attempt > PROFILE_RESTARTS:
+                        raise
+                    _restart_profile(ap, t.profile_id, t.label(), attempt)
+                    session = ap.start(t.profile_id)
+        finally:
+            if not was_open:
+                try:
+                    ap.stop(t.profile_id)
+                except Exception:  # noqa: BLE001
+                    pass
+    return []
 
 
 def run_polls(channel: str, polls: list[dict], step_days: float, count: int, adspower: tuple[str, str],

@@ -34,6 +34,7 @@ const KIND_LABEL: Record<string, string> = {
   polls: "Голосования",
   niches: "Поиск ниш",
   competition: "Конкуренция по языкам",
+  fixvideo: "Доделать ролик",
   scan: "Поиск каналов",
   analytics: "Аналитика",
   cover: "Обложка",

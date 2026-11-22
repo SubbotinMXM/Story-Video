@@ -1477,6 +1477,7 @@ code {
 .pub-row .subs-count { text-align: right; white-space: nowrap; color: var(--text-2); font-size: 12px; font-variant-numeric: tabular-nums; }
 .pub-row .lang-select { width: 100%; }
 .pub-warns { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 4px; }
+.pub-row .pl-select { grid-column: 2 / -1; justify-self: start; width: auto; min-width: 220px; }
 .pub-section { display: flex; flex-direction: column; gap: 8px; padding-top: 14px; border-top: 1px solid var(--border); }
 .pub-co {
   border: 1px solid var(--border);

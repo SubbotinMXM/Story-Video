@@ -394,9 +394,11 @@ export function PublishCard({
                             c.language && c.language_auto
                               ? "язык определён по названиям роликов — проверь"
                               : "",
-                            c.playlists.length !== 1
-                              ? `плейлистов: ${c.playlists.length} — нужен ровно один`
-                              : "",
+                            c.playlists.length === 0
+                              ? "на канале нет плейлиста"
+                              : c.playlists.length > 1 && !c.playlist
+                                ? `плейлистов: ${c.playlists.length} — выбери, в какой класть ролики`
+                                : "",
                           ].filter(Boolean);
                           return (
                             <div key={c.id} className="pub-row">
@@ -446,6 +448,32 @@ export function PublishCard({
                                   </option>
                                 ))}
                               </select>
+                              {c.playlists.length > 1 && (
+                                <select
+                                  className="input select lang-select pl-select"
+                                  value={c.playlist || ""}
+                                  title="Плейлист, в который класть ролики этого канала (на канале их несколько)"
+                                  onChange={(e) =>
+                                    void api
+                                      .publishPlaylist(c.id, e.target.value)
+                                      .then((r) => setProfiles(r.profiles))
+                                      .catch((err) =>
+                                        push({
+                                          kind: "error",
+                                          title: "Плейлист не сохранился",
+                                          text: (err as Error).message,
+                                        }),
+                                      )
+                                  }
+                                >
+                                  <option value="">плейлист?</option>
+                                  {c.playlists.map((pl) => (
+                                    <option key={pl} value={pl}>
+                                      {pl}
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
                               {warns.length > 0 && (
                                 <div className="pub-warns">
                                   {warns.map((w) => (

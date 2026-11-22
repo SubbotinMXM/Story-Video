@@ -229,6 +229,23 @@ def publish_language(body: ChannelLanguageIn) -> dict[str, Any]:
     return _registry_out()
 
 
+class ChannelPlaylistIn(BaseModel):
+    channel_id: str
+    playlist: str = ""
+
+
+@app.post("/api/publish/playlist")
+def publish_playlist(body: ChannelPlaylistIn) -> dict[str, Any]:
+    """Плейлист для выкладки, когда плейлистов на канале несколько (пусто — не выбирать)."""
+    from engine.publish import registry
+
+    try:
+        registry.set_playlist(body.channel_id, body.playlist)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return _registry_out()
+
+
 @app.post("/api/publish/sync")
 def publish_sync() -> dict[str, Any]:
     """«Синхронизировать с AdsPower»: актуальный список из AdsPower (имена, новые, удалённые)."""

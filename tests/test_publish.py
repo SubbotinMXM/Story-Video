@@ -834,8 +834,20 @@ class AcceptEdgeCasesTest(unittest.TestCase):
         def fake(*a, **k):
             raise youtube.NeedsUser("Google просит подтвердить вход («Verify it's you»)")
         ts, results, acc = self._run(fake)
-        self.assertEqual(acc.call_count, 1, "пароль просят — второй ролик не мучаем")
+        self.assertEqual(acc.call_count, 2, "скрытое окно, потом обычное; пароль просят и там — второй ролик не мучаем")
         self.assertEqual(len(pub.coauthor_warnings(ts, results)), 2)
+
+    def test_verify_in_hidden_window_retried_in_visible(self):
+        calls = []
+
+        def fake(*a, **k):
+            calls.append(1)
+            if len(calls) == 1:
+                raise youtube.NeedsUser("Google просит подтвердить вход («Verify it's you»)")
+            return ["Длинное название ролика номер 1", "Длинное название ролика номер 2"]
+
+        ts, results, acc = self._run(fake)
+        self.assertEqual(pub.coauthor_warnings(ts, results), [], "в обычном окне приняли — без пометок")
 
     def test_other_video_accepted_is_not_success(self):
         ts, results, acc = self._run(lambda *a, **k: ["Совсем другой ролик с длинным названием"])
@@ -1344,7 +1356,7 @@ class SafeguardsTest(unittest.TestCase):
         job = mock.MagicMock(playlist_hint=["Истории на ночь"])
         with mock.patch.object(youtube, "_act", lambda c=None: None), \
                 mock.patch.object(human_mod, "click", lambda *a, **k: None), \
-                mock.patch.object(youtube, "_pick_playlist", lambda p, c, trigger=None: []):
+                mock.patch.object(youtube, "_pick_playlist", lambda p, c, trigger=None, want=None: []):
             notes = youtube._audit_playlist(page, "https://youtu.be/abcdefghijk", job, None)
         self.assertTrue(any("поставил" in n for n in notes), notes)
 
@@ -1548,3 +1560,213 @@ class VisibilityTest(unittest.TestCase):
         self_months = self.MONTHS
         out = youtube.count_videos(Page(), "UC1")
         self.assertEqual(out, {"scheduled": 1, "public": 2, "unlisted": 1, "private": 1, "draft": 0})
+
+
+class PlaylistDialogClosedTest(unittest.TestCase):
+    """22.11: окно плейлистов закрылось само — 15 с ждали «Готово» и роняли выкладку канала."""
+
+    def test_closed_dialog_is_not_an_error(self) -> None:
+        page = mock.MagicMock()
+        boxes = mock.MagicMock()
+        boxes.count.return_value = 1
+        done = mock.MagicMock()
+        done.wait_for.side_effect = TimeoutError("Locator.wait_for: Timeout 5000ms exceeded")
+
+        def locator(sel):
+            return boxes if "checkbox" in sel else mock.MagicMock(last=done)
+
+        page.locator.side_effect = locator
+        clicks = []
+        with mock.patch("engine.publish.studio_kit.el", return_value=mock.MagicMock()), \
+             mock.patch.object(youtube, "_playlist_checked", return_value=True), \
+             mock.patch.object(youtube.human, "click", lambda p, target, **kw: clicks.append(target)), \
+             mock.patch.object(youtube, "_act", lambda cancel: None):
+            notes = youtube._pick_playlist(page, None)
+        self.assertEqual(notes, [])
+        self.assertNotIn(done, clicks, "закрытое окно не закрываем повторно")
+
+
+class RenamedChannelTest(unittest.TestCase):
+    """Канал переименовали (название и @-адрес) в YouTube, а каналы профиля ещё не пересканированы."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        p = mock.patch.dict(os.environ, {"STORY_VIDEO_PUBLISH_DIR": str(self.tmp)})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_registry_updates_name_and_handle_everywhere(self) -> None:
+        registry.sync([Profile(id="p1", number="1", name="Первый", group_name="")])
+        registry.set_channels("p1", [registry.Channel(id="UCx", name="Старое", handle="@old", language="ru")])
+        self.assertTrue(registry.update_identity("UCx", name="Новое", handle="@new", authuser=1))
+        ch = registry.load()["p1"].channels[0]
+        self.assertEqual((ch.name, ch.handle, ch.authuser, ch.language), ("Новое", "@new", 1, "ru"))
+        self.assertFalse(registry.update_identity("UCx", name="Новое", handle="@new", authuser=1), "без изменений")
+
+    def test_profile_rename_comes_from_adspower_sync(self) -> None:
+        registry.sync([Profile(id="p1", number="1", name="Старое имя", group_name="А")])
+        registry.set_channels("p1", [registry.Channel(id="UCx", name="Канал", handle="@x")])
+        registry.sync([Profile(id="p1", number="5", name="Новое имя", group_name="Б")])
+        p = registry.load()["p1"]
+        self.assertEqual((p.number, p.name, p.group), ("5", "Новое имя", "Б"))
+        self.assertEqual([c.id for c in p.channels], ["UCx"], "каналы профиля при этом не теряются")
+
+    def test_switch_finds_renamed_channel_by_id(self) -> None:
+        registry.sync([Profile(id="p1", number="1", name="Первый", group_name="")])
+        ch = registry.Channel(id="UCx", name="Старое", handle="@old", authuser=0)
+        registry.set_channels("p1", [ch])
+        lists = {0: [{"name": "Другой", "handle": "@other", "gaia": "g0", "selected": False},
+                     {"name": "Новое", "handle": "@new", "gaia": "g0", "selected": False}]}
+        ids = {"@other": "UCother", "@new": "UCx"}
+        page = mock.MagicMock()
+        active = iter([False, True])
+        with mock.patch.object(youtube, "_switcher_items", lambda page, a: lists.get(a, [])), \
+             mock.patch.object(youtube, "channel_id", lambda page, h: ids[h]), \
+             mock.patch.object(youtube, "_is_active", lambda page, cid: next(active)), \
+             mock.patch.object(youtube, "pause", lambda cancel: None), \
+             mock.patch.object(youtube.human, "click", lambda *a, **k: None):
+            youtube.switch_to(page, ch)
+        self.assertEqual((ch.name, ch.handle), ("Новое", "@new"))
+        page.locator.assert_any_call("ytd-account-item-renderer")
+        self.assertEqual(page.locator.return_value.nth.call_args[0][0], 1, "клик — по найденному по ID каналу")
+        saved = registry.load()["p1"].channels[0]
+        self.assertEqual((saved.name, saved.handle), ("Новое", "@new"), "учёт обновлён — в интерфейсе новое имя")
+
+
+class ChosenPlaylistTest(unittest.TestCase):
+    """22.11: на канале два плейлиста («Звезды», «истории») — ролики кладём в выбранный человеком «истории»."""
+
+    def _run(self, labels, want, checked=()):
+        page = mock.MagicMock()
+        boxes = mock.MagicMock()
+        boxes.count.return_value = len(labels)
+        items = []
+        for i, t in enumerate(labels):
+            b = mock.MagicMock(name=t)
+            b.evaluate.return_value = t
+            b.get_attribute.return_value = "" if i in checked else None
+            b.locator.return_value.first.get_attribute.return_value = "false"
+            items.append(b)
+        boxes.nth.side_effect = lambda i: items[i]
+        done = mock.MagicMock()
+        page.locator.side_effect = lambda sel: boxes if "playlists-list" in sel else mock.MagicMock(last=done)
+        clicks = []
+
+        def click(p, loc, **k):
+            clicks.append(loc)
+            if loc in items:
+                loc.get_attribute.return_value = ""  # после клика галочка стоит
+
+        with mock.patch.object(youtube, "_act", lambda c=None: None), \
+                mock.patch("engine.publish.studio_kit.el", lambda p, key, **kw: mock.MagicMock()), \
+                mock.patch.object(youtube.human, "click", click):
+            notes = youtube._pick_playlist(page, None, want=want)
+        return notes, [c for c in clicks if c in items], items
+
+    def test_chosen_playlist_among_several(self):
+        notes, clicked, items = self._run(["Звезды", "истории"], ["истории"])
+        self.assertEqual((notes, clicked), ([], [items[1]]))
+
+    def test_several_without_choice_selects_nothing(self):
+        notes, clicked, _ = self._run(["истории", "historia"], ["истории", "historia"])
+        self.assertEqual(clicked, [])
+        self.assertIn("выбери плейлист канала", notes[0])
+
+    def test_registry_keeps_choice_across_rescan(self):
+        tmp = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"STORY_VIDEO_PUBLISH_DIR": tmp}):
+            registry.sync([Profile(id="p", number="37", name="Душой нараспашку", group_name="")])
+            registry.set_channels("p", [registry.Channel(id="UCz", name="Реальные Звезды", playlists=["Звезды", "истории"])])
+            registry.set_playlist("UCz", "истории")
+            registry.set_channels("p", [registry.Channel(id="UCz", name="Реальные Звезды", playlists=["Звезды", "истории"])])
+            ch = registry.load()["p"].channels[0]
+            self.assertEqual(ch.upload_playlists(), ["истории"])
+            with self.assertRaises(ValueError):
+                registry.set_playlist("UCz", "нет такого")
+
+
+class FixAfterPublishTest(unittest.TestCase):
+    """После выкладки без обложки / без плейлиста программа сама ставит «Доделать ролик»."""
+
+    def test_fixes_planned_from_result_notes(self) -> None:
+        from server.runners import fixes_for
+
+        params = {"section": "slides", "make_cover": True, "source_url": "https://youtu.be/orig",
+                  "folder": "/tmp/Камбоджа", "language": "ru", "run_dir": "/tmp/run"}
+        results = {
+            "p/UC1": {"status": "done", "url": "https://youtu.be/a",
+                      "notes": [youtube.COVER_NOT_SET + " (нет связи) — ролик выложен без неё"]},
+            "p/UC2": {"status": "done", "url": "https://youtu.be/b", "notes": ["всё хорошо"]},
+            "p/UC3": {"status": "failed", "url": "", "notes": [youtube.COVER_NOT_SET]},
+        }
+        fixes = fixes_for(params, results, done=[], assign={"p/UC1": {"lang": "ru"}})
+        self.assertEqual([f["channel"] for f in fixes], ["p/UC1"])
+        self.assertEqual(fixes[0]["cover"]["source_url"], "https://youtu.be/orig")
+        self.assertFalse(fixes[0]["playlist"])
+        self.assertEqual(fixes_for(params, results, done=["p/UC1"]), [], "уже поставлена — второй раз не ставим")
+        broll = fixes_for({**params, "section": "broll"}, results, done=[])
+        self.assertEqual(broll, [], "обложки «Рассказов» берутся из твоих папок — сгенерировать нечем")
+
+    def test_playlist_fix_only_when_one_playlist_is_known(self) -> None:
+        from server.runners import fixes_for
+
+        results = {"p/UC1": {"status": "done", "url": "https://youtu.be/a",
+                             "notes": ["плейлист «истории» не стоит — поставь в Studio сам (https://youtu.be/a)"]}}
+        one = registry.Target(profile_id="p", profile="№1", channel=registry.Channel(id="UC1", name="К", playlists=["истории"]))
+        two = registry.Target(profile_id="p", profile="№1",
+                              channel=registry.Channel(id="UC1", name="К", playlists=["истории", "Звезды"]))
+        with mock.patch("engine.publish.registry.resolve", return_value=[one]):
+            self.assertTrue(fixes_for({"section": "broll"}, results, done=[])[0]["playlist"])
+        with mock.patch("engine.publish.registry.resolve", return_value=[two]):
+            self.assertEqual(fixes_for({"section": "broll"}, results, done=[]), [], "плейлист не выбран — ставить нечего")
+
+
+class FixVideoTest(unittest.TestCase):
+    def _run(self, shown_before, shown_after, thumb=None, srcs=(set(), set())):
+        page = mock.MagicMock()
+        field = mock.MagicMock()
+        state = {"saved": False}
+        field.inner_text.side_effect = lambda timeout=0: shown_after if state["saved"] else shown_before
+        page.locator.return_value.first = field
+        save = mock.MagicMock()
+        save.get_attribute.return_value = None
+        src_iter = iter(srcs)
+
+        def click(p, loc, **k):
+            if loc is save:
+                state["saved"] = True
+
+        cm = mock.MagicMock()
+        cm.__enter__.return_value = page
+        with mock.patch.object(youtube, "studio_page", return_value=cm), \
+             mock.patch.object(youtube, "switch_to", lambda *a, **k: None), \
+             mock.patch.object(youtube, "goto", lambda *a, **k: None), \
+             mock.patch.object(youtube, "_act", lambda c=None: None), \
+             mock.patch.object(youtube, "_pick_playlist", return_value=[]) as pick, \
+             mock.patch.object(youtube, "_thumb_srcs", lambda p: next(src_iter)), \
+             mock.patch.object(youtube.human, "click", click), \
+             mock.patch.object(youtube.human, "choose_file", return_value="кнопкой"), \
+             mock.patch("engine.publish.studio_kit.el", lambda p, key, **kw: save):
+            notes = youtube.fix_video("ws://x", registry.Channel(id="UC1", name="К", handle="@k"),
+                                      "https://youtu.be/abcdefghijk", thumbnail=thumb, playlists=["истории"])
+        return notes, pick
+
+    def test_playlist_set_and_verified(self) -> None:
+        notes, pick = self._run("Выберите плейлист", "истории")
+        pick.assert_called_once()
+        self.assertIn("плейлист «истории» поставлен", notes[0])
+
+    def test_playlist_not_sticking_is_an_error(self) -> None:
+        with self.assertRaises(youtube.StudioError):
+            self._run("Выберите плейлист", "Выберите плейлист")
+
+    def test_cover_set_and_checked_by_new_image(self) -> None:
+        f = Path(tempfile.mkdtemp()) / "обложка.jpg"
+        f.write_bytes(b"x")
+        notes, pick = self._run("истории", "истории", thumb=f, srcs=({"old.jpg"}, {"new.jpg"}))
+        pick.assert_not_called()  # плейлист уже стоит — не трогаем
+        self.assertIn("обложка поставлена", notes[0])
+
+    def test_nothing_to_do(self) -> None:
+        notes, pick = self._run("истории", "истории")
+        self.assertIn("доделывать нечего", notes[0])

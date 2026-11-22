@@ -140,7 +140,7 @@ class ClassifyTests(unittest.TestCase):
 
         with mock.patch("engine.publish.polls.ask", ask):
             keep, failed = comp.classify(videos, SUB, "en", None, None)
-        self.assertEqual((len(prompts), failed), (3, 0), "150 названий — тремя пачками по 60")
+        self.assertEqual((len(prompts), failed), (2, 0), "150 названий — двумя пачками по 100")
         self.assertIn("философы и их учения", prompts[0])
         self.assertIn("исторические личности", prompts[0], "общую нишу называем, чтобы её не путать с поднишей")
         self.assertIn("на языке «английский»", prompts[0])
@@ -256,6 +256,19 @@ class AnalyzeTests(unittest.TestCase):
         head, lines = comp.summary(res)
         self.assertIn("выгоднее всего — немецкий", head)
         self.assertTrue(lines[0].startswith("1. Немецкий: выгодно"))
+        # повтор: подниша из памяти, ролики уже разобраны — нейросеть не спрашиваем ни разу
+        calls = []
+        with mock.patch.dict(os.environ, {"STORY_VIDEO_PUBLISH_DIR": tmp}), \
+             mock.patch("engine.rewrite.channels._Api", return_value=mock.Mock()), \
+             mock.patch.object(niches, "resolve_channel", return_value=channel), \
+             mock.patch.object(niches, "sample_videos", return_value=sample), \
+             mock.patch.object(niches, "search", side_effect=search), \
+             mock.patch("engine.publish.polls.ask", lambda *a, **k: calls.append(a) or ask(*a, **k)), \
+             mock.patch.object(comp.time, "time", return_value=NOW):
+            again = comp.analyze("https://youtube.com/@x", ["en", "de"], ["k"], None)
+        self.assertEqual(calls, [], "повторная проверка — без единого вопроса нейросети")
+        self.assertEqual([(r["language"], r["on_topic"], r["verdict"]) for r in again["results"]],
+                         [(r["language"], r["on_topic"], r["verdict"]) for r in res["results"]])
 
     def test_needs_languages_and_keys(self) -> None:
         with self.assertRaises(comp.CompetitionError):

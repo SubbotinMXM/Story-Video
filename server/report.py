@@ -29,7 +29,7 @@ KIND_LABEL = {
     "slides_voice": "Озвучка слайдов", "slides_media": "Подбор кадров", "slides_render": "Рендер слайдов",
     "copies": "Копии с ускорением", "rewrite": "Рерайт текста", "cover": "Обложка", "publish": "Выкладка",
     "comments": "Комментарии", "polls": "Голосования", "niches": "Поиск ниш", "competition": "Конкуренция по языкам", "analytics": "Аналитика",
-    "collabs": "Соавторства", "scan": "Поиск каналов",
+    "collabs": "Соавторства", "fixvideo": "Доделать ролик", "scan": "Поиск каналов",
 }
 # тихие задачи: без ошибок отдельного окна не стоят (раз в сутки обновилась аналитика — не событие)
 QUIET_KINDS = frozenset({"analytics", "scan", "niches", "competition", "collabs"})

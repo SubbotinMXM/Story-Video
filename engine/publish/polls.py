@@ -252,7 +252,7 @@ def _open_composer(page, channel, cancel) -> None:
     from engine.publish import youtube
     from engine.publish.studio_kit import el
 
-    page.goto(posts_url(channel), wait_until="domcontentloaded")
+    youtube.goto(page, posts_url(channel))
     page.wait_for_timeout(5000)
     youtube._check_signed_in(page)
     try:

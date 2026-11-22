@@ -50,7 +50,7 @@ def add_video_elements(page, video_url: str, playlists: list[str], *, cancel: Ca
     if not vid:
         raise youtube.StudioError("нет ссылки на ролик — заставку и подсказку добавить некуда")
     notes: list[str] = []
-    page.goto(f"{youtube.STUDIO}/video/{vid}/edit", wait_until="domcontentloaded")
+    youtube.goto(page, f"{youtube.STUDIO}/video/{vid}/edit")
     _wait_ready(page, cancel)
     notes.append(_end_screen(page, playlists, cancel, act))
     notes.append(_card(page, playlists, cancel, act))

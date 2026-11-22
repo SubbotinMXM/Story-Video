@@ -28,6 +28,13 @@ class Channel:
     language: str = ""
     language_auto: bool = False  # язык подставлен программой по названиям роликов — стоит проверить
     titles_language: str = ""  # язык названий последних роликов (по данным поиска каналов)
+    # плейлист, в который класть ролики, когда плейлистов на канале несколько (выбирает человек; пусто — если
+    # плейлист один, берём его, если несколько — не выбираем никакой)
+    playlist: str = ""
+
+    def upload_playlists(self) -> list[str]:
+        """Плейлисты для выкладки: выбранный (если он ещё есть на канале) или все плейлисты канала."""
+        return [self.playlist] if self.playlist and self.playlist in self.playlists else list(self.playlists)
 
 
 @dataclass
@@ -105,6 +112,8 @@ def set_channels(profile_id: str, channels: list[Channel], studio: dict | None =
             old = known.get(ch.id)
             if old is not None and old.language:
                 ch.language, ch.language_auto = old.language, old.language_auto
+            if old is not None and old.playlist and old.playlist in ch.playlists:
+                ch.playlist = old.playlist  # выбранный плейлист переживает пересканирование
             if not ch.language and ch.titles_language:
                 ch.language, ch.language_auto = ch.titles_language, True
         entry.channels, entry.scanned_at = channels, time.time()
@@ -112,6 +121,39 @@ def set_channels(profile_id: str, channels: list[Channel], studio: dict | None =
             entry.studio = studio
         save(profiles)
         return entry
+
+
+def set_playlist(channel_id: str, playlist: str) -> None:
+    """Плейлист для выкладки (во всех профилях, где есть канал). Пусто — не выбран."""
+    name = (playlist or "").strip()
+    with LOCK:
+        profiles = load()
+        found = False
+        for p in profiles.values():
+            for c in p.channels:
+                if c.id == channel_id:
+                    if name and name not in c.playlists:
+                        raise ValueError(f"на канале нет плейлиста «{name}» — найди каналы профиля заново")
+                    c.playlist, found = name, True
+        if not found:
+            raise ValueError("канал не найден")
+        save(profiles)
+
+
+def update_identity(channel_id: str, *, name: str, handle: str, authuser: int) -> bool:
+    """Канал переименовали или сменили @-адрес в YouTube: обновить название, адрес и аккаунт во всех профилях,
+    где он есть (ID канала не меняется). → было ли что менять."""
+    with LOCK:
+        profiles = load()
+        changed = False
+        for p in profiles.values():
+            for c in p.channels:
+                if c.id == channel_id and (c.name, c.handle, c.authuser) != (name or c.name, handle, authuser):
+                    c.name, c.handle, c.authuser = name or c.name, handle, authuser
+                    changed = True
+        if changed:
+            save(profiles)
+        return changed
 
 
 def set_language(channel_id: str, language: str) -> None:

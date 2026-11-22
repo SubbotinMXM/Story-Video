@@ -79,11 +79,12 @@ def pressure() -> int:
 
 
 def tight(need: int = 0) -> bool:
-    """Начать работу, которой нужно ещё `need` байт, — значит залезть в запас Mac (или macOS уже просит память)."""
+    """Начать работу, которой нужно ещё `need` байт, — значит залезть в запас Mac (или macOS на грани).
+    Давление «warn» само по себе не в счёт: при забитой подкачке macOS держит его часами, даже когда свободной
+    памяти хватает, — тогда очередь стояла бы зря. Решает свободная память и «critical»."""
     if not enabled():
         return False
-    p = pressure()
-    if p >= PRESSURE_WARN:
+    if pressure() >= PRESSURE_CRITICAL:
         return True
     free = available()
     if free < 0:
@@ -103,7 +104,7 @@ def workers(max_n: int, per_worker: int) -> int:
     """Сколько одинаковых процессов (по per_worker байт) можно запустить, не трогая запас: от 1 до max_n."""
     if not enabled() or max_n <= 1:
         return max(1, max_n)
-    if pressure() >= PRESSURE_WARN:
+    if pressure() >= PRESSURE_CRITICAL:
         return 1
     free = available()
     if free < 0:

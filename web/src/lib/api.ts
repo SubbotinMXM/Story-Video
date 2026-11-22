@@ -341,7 +341,7 @@ export type MusicTrack = { id: string; title: string; group: string; duration: n
 export type MusicCatalog = { groups: Record<string, string>; hints?: Record<string, string>; tracks: MusicTrack[] };
 
 export type PublishChannel = {
-  id: string; name: string; handle: string; account: string; playlists: string[];
+  id: string; name: string; handle: string; account: string; playlists: string[]; playlist?: string;
   language: string; language_auto: boolean; titles_language: string;
   subscribers?: number | null; stats_at?: number;
 };
@@ -437,6 +437,8 @@ export const api = {
   addJobs: (items: JobIn[]) => request<Job[]>("POST", "/api/jobs", items),
   cancelJob: (id: string) => request<{ ok: boolean }>("POST", `/api/jobs/${id}/cancel`),
   resumeJob: (id: string) => request<Job>("POST", `/api/jobs/${id}/resume`),
+  publishPlaylist: (channel_id: string, playlist: string) =>
+    request<{ profiles: PublishProfile[] }>("POST", "/api/publish/playlist", { channel_id, playlist }),
   publishLanguage: (channel_id: string, language: string) =>
     request<{ profiles: PublishProfile[] }>("POST", "/api/publish/language", { channel_id, language }),
   publishProfiles: () => request<{ profiles: PublishProfile[] }>("GET", "/api/publish/profiles"),

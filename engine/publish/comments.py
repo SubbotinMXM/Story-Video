@@ -114,7 +114,7 @@ def answer_comments(cdp_url: str, channel, *, llm: tuple[str, str, str] | None,
         while hearts + replies + skipped < MAX_PER_RUN and rounds < 30:
             rounds += 1
             with step(page, "комментарии: раздел «Без ответа»"):
-                page.goto(f"{youtube.STUDIO}/channel/{channel.id}/comments/inbox", wait_until="domcontentloaded")
+                youtube.goto(page, f"{youtube.STUDIO}/channel/{channel.id}/comments/inbox")
                 page.wait_for_timeout(6000)
                 done = answered(channel.id)
                 todo = [c for c in _read_inbox(page) if c.id not in done]

@@ -473,9 +473,84 @@ def _publish_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
         req.prepare = _broll_materials(cfg, params, req)
 
     def run(job: Job, progress, cancel: CancelToken) -> dict[str, Any]:
-        return run_publish(req, job.state, job.save_state, cancel=cancel, progress=progress)
+        try:
+            return run_publish(req, job.state, job.save_state, cancel=cancel, progress=progress)
+        finally:
+            # выложенные каналы, где не встала обложка или плейлист, — доделать сразу следом (а не руками в Studio)
+            _queue_fixes(job, params)
 
     return f"Выкладка: {params.get('video_name') or folder.name}", run
+
+
+def fixes_for(params: dict, results: dict, done: list[str], assign: dict | None = None) -> list[dict]:
+    """Что доделать после выкладки: [{channel, url, cover, playlist}] по выложенным каналам, где в итогах
+    «обложка не поставилась / не сгенерировалась» (слайды с генерацией обложки по оригиналу) или «плейлист не стоит».
+    done — каналы, для которых доделка уже поставлена; assign — какая версия (язык) ушла на какой канал."""
+    from engine.publish.registry import resolve
+    from engine.publish.slides_materials import COVER_FAILED
+    from engine.publish.youtube import COVER_NOT_SET
+
+    out = []
+    for key, r in (results or {}).items():
+        if not isinstance(r, dict) or r.get("status") != "done" or not r.get("url") or key in done:
+            continue
+        notes = [str(n) for n in r.get("notes") or []]
+        # обложка не встала / не сгенерировалась, или к загрузке её не было вовсе («без обложки — поставишь сам»)
+        no_cover = any(n.startswith((COVER_NOT_SET, COVER_FAILED, "без обложки")) for n in notes)
+        no_playlist = any("плейлист" in n and ("не стоит" in n or "не выбрался" in n) for n in notes) \
+            and not any("плейлист" in n and "поставил после сохранения" in n for n in notes)
+        cover = None
+        if no_cover and params.get("section") == "slides" and params.get("make_cover", True):
+            lang = str(((assign or {}).get(key) or {}).get("lang") or params.get("language") or "")
+            folder = next((v.get("folder") for v in params.get("versions") or []
+                           if str(v.get("language") or "") == lang), None) or params.get("folder")
+            cover = {"source_url": params.get("source_url") or "", "folder": folder, "language": lang or "ru",
+                     "run_dir": params.get("run_dir") or ""}
+        if no_playlist:
+            targets = resolve([key])
+            no_playlist = bool(targets) and len(targets[0].channel.upload_playlists()) == 1
+        if cover or no_playlist:
+            out.append({"channel": key, "url": r["url"], "cover": cover, "playlist": bool(no_playlist)})
+    return out
+
+
+FIX_BACKFILL_DAYS = 3
+
+
+def backfill_fixes(manager) -> int:
+    """При запуске: выкладки последних дней, где не встали обложка или плейлист, а доделка не поставлена
+    (выложены до появления доделки или программа закрылась) — поставить «Доделать ролик». → сколько поставлено."""
+    import time as _time
+
+    n = 0
+    cutoff = _time.time() - FIX_BACKFILL_DAYS * 86400
+    with manager._lock:
+        jobs = [j for j in manager._jobs if j.kind == "publish" and float(j.created or 0) >= cutoff]
+    for j in jobs:
+        before = len(j.state.get("fixes_queued") or [])
+        _queue_fixes(j, j.params)
+        n += len(j.state.get("fixes_queued") or []) - before
+    return n
+
+
+def _queue_fixes(job: Job, params: dict) -> None:
+    try:
+        done = list(job.state.get("fixes_queued") or [])
+        todo = fixes_for(params, job.state.get("channels") or {}, done, job.state.get("assign"))
+        if not todo:
+            return
+        from server.jobs import get_manager
+
+        mgr = get_manager()
+        for fix in todo:
+            mgr.add(mgr.create("fixvideo", fix), after=job.id)
+            done.append(fix["channel"])
+            log(f"Выкладка: {fix['url']} — поставил «Доделать ролик» ("
+                + " и ".join(x for x in ("обложка" if fix["cover"] else "", "плейлист" if fix["playlist"] else "") if x)
+                + ")")
+        job.save_state(fixes_queued=done)
+    except Exception as exc:  # noqa: BLE001 — доделка не должна ронять саму выкладку
+        log(f"Выкладка: доделку поставить не вышло ({exc})")
 
 
 def _slides_materials(cfg: dict, params: dict):
@@ -569,6 +644,66 @@ def _broll_competitor(cfg: dict, params: dict, req):
                 "descriptions": {}, "lines": lines, "warnings": warnings_of(lines)}
 
     return run
+
+
+def _fixvideo_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
+    """«Доделать ролик»: уже выложенному ролику — обложка (сгенерировать по ролику конкурента, как при выкладке)
+    и/или плейлист канала. Ставится сама, если выкладка закончилась без обложки или без плейлиста."""
+    from engine.publish.registry import resolve
+    from engine.publish.run import run_fix_video
+
+    key, url = str(params.get("channel") or ""), str(params.get("url") or "")
+    targets = resolve([key]) if key else []
+    if not targets or not url:
+        raise ValueError("Нужны канал и ссылка на ролик")
+    if not _s(cfg, "adspower_api_key"):
+        raise ValueError("Нет ключа AdsPower (Настройки → AdsPower)")
+    cover = params.get("cover") if isinstance(params.get("cover"), dict) else None
+    want_playlist = bool(params.get("playlist"))
+    settings = _cover_settings(cfg) if cover else None
+    adspower = (_s(cfg, "adspower_api_key"), _s(cfg, "adspower_url"))
+    t = targets[0]
+
+    def run(job: Job, progress, cancel: CancelToken) -> dict[str, Any]:
+        thumb = None
+        lines: list[str] = []
+        if cover:
+            thumb = Path(str(job.state.get("thumbnail") or ""))
+            if not thumb.is_file():  # обложку генерируем один раз: повтор задачи не тратит генератор заново
+                thumb = _fix_cover(settings, cover, cancel, lambda p, m: progress(0.4 * p, f"Обложка: {m}"))
+                job.save_state(thumbnail=str(thumb))
+            lines.append(f"обложка: {thumb.name} (папка «{thumb.parent.name}»)")
+        playlists = t.channel.upload_playlists() if want_playlist else None
+        lines += run_fix_video(key, url, adspower, thumbnail=thumb, playlists=playlists, cancel=cancel,
+                               progress=lambda p, m: progress(0.4 + 0.6 * p, m))
+        return {"summary": f"Ролик доделан: {t.label()} — {url}", "lines": lines}
+
+    what = " и ".join(x for x in ("обложка" if cover else "", "плейлист" if want_playlist else "") if x)
+    return f"Доделать ролик ({what}): {t.channel.name} — {url}", run
+
+
+def _fix_cover(settings, cover: dict, cancel, progress) -> Path:
+    """Обложка по ролику конкурента (как при выкладке): та же генерация, лучший вариант. Не вышло — ошибка
+    (задача повторится; обрыв связи — подождёт её), а не «без обложки»."""
+    from engine.publish import cover as cv
+    from engine.publish.slides_materials import COVER_DIR
+
+    folder = Path(str(cover.get("folder") or ""))
+    if not folder.is_dir():
+        raise ValueError(f"нет папки ролика: {folder}")
+    story = ""
+    for path in [*folder.glob("*сценарий.txt"), Path(str(cover.get("run_dir") or "")) / "script.txt"]:
+        if path.is_file():
+            story = path.read_text(encoding="utf-8")
+            break
+    source = str(cover.get("source_url") or "")
+    title, image = "", None
+    if source:
+        title, image, _ = cv.youtube_original(source)
+    lang = str(cover.get("language") or "ru")
+    res = cv.make_cover(settings, folder / COVER_DIR, reference=image, language=lang, story=story, title=title,
+                        cancel=cancel, progress=progress)
+    return Path(res.path)
 
 
 def _comments_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
@@ -1499,6 +1634,7 @@ _BUILDERS = {
     "polls": _polls_job,
     "niches": _niches_job,
     "competition": _competition_job,
+    "fixvideo": _fixvideo_job,
     "analytics": _analytics_job,
     "collabs": _collabs_job,
     "scan": _scan_job,

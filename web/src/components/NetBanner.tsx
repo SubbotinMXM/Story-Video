@@ -3,7 +3,7 @@ import { WifiOff } from "lucide-react";
 import { api } from "../lib/api";
 import { useJobs } from "../lib/store";
 
-/** Плашка «нет доступа к YouTube»: отключился VPN — очередь на паузе, программа переподключает VPN сама. */
+/** Плашка «нет доступа к YouTube»: отключился VPN — задачи с YouTube на паузе, программа переподключает VPN сама. */
 export function NetBanner() {
   const { net } = useJobs();
   const [checking, setChecking] = useState(false);
@@ -32,9 +32,9 @@ export function NetBanner() {
           Нет доступа к YouTube{at ? ` с ${at}` : ""}
           {mins ? ` (${mins} мин)` : ""}
         </b>{" "}
-        — похоже, отключился VPN. Очередь на паузе, попытки не тратятся:{" "}
-        {net.action || "переподключаю VPN"}. Продолжит сама, как только связь
-        вернётся.
+        — похоже, отключился VPN. Выкладка и задачи с YouTube ждут (попытки не
+        тратятся), ролики собираются дальше: {net.action || "переподключаю VPN"}
+        . Продолжит сама, как только связь вернётся.
       </div>
       <button
         className="btn btn-ghost btn-sm"

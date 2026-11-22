@@ -93,6 +93,17 @@ def warnings_of(lines: list[str]) -> list[str]:
     return [x for x in lines if x.startswith(COVER_FAILED)]
 
 
+def _wait_net_or(exc: BaseException, what: str) -> None:
+    """Сбой при подготовке материалов — из-за обрыва связи (VPN)? Тогда не делаем хуже (без обложки, название не по
+    оригиналу): ролик ещё не загружен, выкладка подождёт связь (сторож переподключит VPN) и подготовит всё заново.
+    21.11 ночью так ушли без обложки и с названием «по тексту» 3 ролика. Связь есть — решает вызывающий (запасной путь)."""
+    from engine.core import netguard
+
+    if not netguard.check_now():
+        raise RuntimeError(f"нет связи — {what} ({str(exc)[:120]}); выкладка подождёт связь и подготовит "
+                           "материалы заново") from exc
+
+
 def title_and_cover(*, folder: Path, source_url: str, language: str, story: str, cover: cv.CoverSettings,
                     make_cover: bool = True, base: dict | None = None, cancel: CancelToken | None = None,
                     progress: ProgressCb | None = None) -> tuple[str, str, list[str], list[str]]:
@@ -110,12 +121,14 @@ def title_and_cover(*, folder: Path, source_url: str, language: str, story: str,
         try:  # без обложки нужно только название оригинала
             orig_title = cv.youtube_original(source_url, with_image=False)[0]
         except Exception as exc:
+            _wait_net_or(exc, "оригинал не открылся")
             log(f"Выкладка: оригинал не открылся ({exc}) — название придумаю по тексту")
             lines.append(f"оригинал не открылся ({str(exc)[:120]}) — название по тексту ролика")
     elif source_url:
         try:
             orig_title, image, _ = cv.youtube_original(source_url)
         except Exception as exc:
+            _wait_net_or(exc, "оригинал не открылся")
             log(f"Выкладка: оригинал не открылся ({exc}) — обложку и название придумаю по тексту")
             lines.append(f"оригинал не открылся ({str(exc)[:120]}) — обложка и название по тексту ролика")
         if source_url and image is None and orig_title:
@@ -141,7 +154,8 @@ def title_and_cover(*, folder: Path, source_url: str, language: str, story: str,
                                 progress=progress)
         except CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001 — нет денег, нет связи, генератор упал: ролик выходит без обложки
+        except Exception as exc:  # noqa: BLE001 — нет денег, генератор упал: ролик выходит без обложки
+            _wait_net_or(exc, "обложка не сделалась")
             log(f"Выкладка: обложка не сгенерировалась ({exc}) — выкладываю без обложки")
             lines.append(cover_failed_warning(exc, source_url))
         else:

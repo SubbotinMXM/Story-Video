@@ -47,7 +47,9 @@ PASSES = (("relevance", "medium"), ("relevance", "long"))  # за полгода
 FRESH_PASSES = (("viewCount", "any"),)  # «за последний месяц, по популярности» — что выстрелило недавно
 FRESH_DAYS = 30
 QUOTA_PER_LANG = QUERIES_PER_LANG * (len(PASSES) + len(FRESH_PASSES)) * 100
-CLASSIFY_BATCH = 60  # столько названий за один вопрос нейросети
+CLASSIFY_BATCH = 100  # столько названий за один вопрос нейросети (меньше вызовов — меньше повторов инструкции)
+LABELS_FILE = "competition_labels.json"  # какие ролики уже отнесены к поднише канала (повтор не спрашивает их снова)
+LABELS_MAX = 6000  # роликов на одну поднишу в памяти
 
 # 1. залёт маленького канала
 SMALL_SUBS = int(niches.MAX_SUBS * (1 + niches.SUBS_SLACK))  # до ~11,5 тыс. подписчиков — «маленький»
@@ -246,6 +248,32 @@ def subniche_for(channel: dict, videos: list[dict], languages: list[str], llm, c
 # ---------- 3. отбор роликов подниши ----------
 
 
+def _labels_key(channel_id: str, subniche: str) -> str:
+    return f"{channel_id}|{subniche}"
+
+
+def known_labels(channel_id: str, subniche: str) -> dict[str, bool]:
+    """Ролики, которые нейросеть уже разбирала для этой подниши: {id: подниша ли}. Подниша другая — пусто."""
+    data = read_json(LABELS_FILE, {})
+    rec = data.get(_labels_key(channel_id, subniche)) if isinstance(data, dict) else None
+    if not isinstance(rec, dict) or time.time() - float(rec.get("at") or 0) > SUBNICHE_DAYS * 86400:
+        return {}
+    return {**{i: False for i in rec.get("no") or []}, **{i: True for i in rec.get("yes") or []}}
+
+
+def save_labels(channel_id: str, subniche: str, labels: dict[str, bool]) -> None:
+    with LOCK:
+        data = read_json(LABELS_FILE, {})
+        data = data if isinstance(data, dict) else {}
+        now = time.time()
+        # старые записи (подниша менялась или давно не проверяли) — убираем, файл не растёт
+        data = {k: v for k, v in data.items() if isinstance(v, dict) and now - float(v.get("at") or 0) <= SUBNICHE_DAYS * 86400}
+        items = list(labels.items())[-LABELS_MAX:]
+        data[_labels_key(channel_id, subniche)] = {"at": now, "yes": [i for i, ok in items if ok],
+                                                   "no": [i for i, ok in items if not ok]}
+        write_json(LABELS_FILE, data)
+
+
 def same_language(audio: str, code: str) -> bool:
     """Язык ролика (как указал автор) подходит: не указан — решит нейросеть по названию."""
     return not audio or audio.split("-")[0] == code
@@ -440,6 +468,7 @@ def analyze(url: str, languages: list[str], keys: list[str], llm, *, subniche: s
         sub = subniche_for(channel, sample, langs, llm, cancel, given, fresh)
         log(f"Конкуренция: подниша «{sub['subniche']}» (общая ниша «{sub.get('broader')}»)"
             + (" — из прошлой проверки" if sub.get("reused_at") else "") + f", языки {', '.join(langs)}")
+        labels = known_labels(channel["id"], sub["subniche"])
         results: list[LangResult] = []
         for n, code in enumerate(langs):
             if cancel:
@@ -470,7 +499,15 @@ def analyze(url: str, languages: list[str], keys: list[str], llm, *, subniche: s
                          and same_language(v.get("audio") or "", code)]
                 res.found = len(long_)
                 step(lo + (hi - lo) * 0.7, f"{name}: отбираю ролики подниши ({len(long_)})…")
-                keep, failed = classify(long_, sub, code, llm, cancel) if long_ else (set(), 0)
+                # уже разобранные для этой подниши ролики нейросеть не спрашиваем — повтор дешевле и быстрее
+                new = [v for v in long_ if v["id"] not in labels]
+                keep, failed = classify(new, sub, code, llm, cancel) if new else (set(), 0)
+                if failed == 0:
+                    labels.update({v["id"]: v["id"] in keep for v in new})
+                    save_labels(channel["id"], sub["subniche"], labels)
+                keep |= {v["id"] for v in long_ if labels.get(v["id"])}
+                if len(new) < len(long_):
+                    log(f"Конкуренция [{code}]: разобраны раньше {len(long_) - len(new)} роликов, нейросети — {len(new)}")
                 measure(res, [v for v in long_ if v["id"] in keep], chans)
                 if failed:
                     res.notes.append(f"Нейросеть не разобрала часть найденных роликов ({failed} из "

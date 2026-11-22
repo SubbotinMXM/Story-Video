@@ -46,7 +46,7 @@ _PROGRESS_EVERY = 0.25  # сек между событиями прогресс�
 # по одному (engine.core.throttle), параллельно идут озвучка, LLM и подбор кадров.
 MAX_PARALLEL = 2
 # выкладка на YouTube — своя полоса: идёт параллельно с монтажом, но по одной (окно браузера в фокусе одно)
-UPLOAD_KINDS = frozenset({"publish", "comments", "polls", "analytics", "scan", "collabs"})  # профили AdsPower — по одной задаче
+UPLOAD_KINDS = frozenset({"publish", "comments", "polls", "analytics", "scan", "collabs", "fixvideo"})  # профили AdsPower — по одной задаче
 # лёгкие задачи (генерация обложек — только сеть) — своя полоса: не ждут ни монтажа, ни выкладки
 LIGHT_KINDS = frozenset({"cover", "niches", "competition"})
 
@@ -55,7 +55,8 @@ LIGHT_KINDS = frozenset({"cover", "niches", "competition"})
 # (engine.core.memguard): иначе Mac уходит в подкачку и замирает всё — окно VPN (Happ выключает туннель через 10 с),
 # Bluetooth (клавиатура и мышь отваливаются)
 HEAVY_KINDS = frozenset({"broll", "slides_full", "slides_resume", "slides_voice", "slides_media", "slides_render"})
-MEM_WAIT_MAX = 10 * 60.0  # память занята не нами (браузер, другие программы) — ждём не дольше, дальше бережно
+MEM_WAIT_MAX = 10 * 60.0  # память занята не нами (браузер, другие программы) — ролик ждёт не дольше, дальше бережно
+MEM_WAIT_UPLOAD = 3 * 60.0  # выкладка и прочие окна Studio — ждут меньше: у них сроки и расписание
 
 
 def mem_need(kind: str) -> int:
@@ -65,6 +66,11 @@ def mem_need(kind: str) -> int:
     if kind in UPLOAD_KINDS:
         return memguard.BROWSER_NEED
     return 0
+
+
+# без доступа к YouTube (отключился VPN) эти задачи не начинаем: им нужен сам YouTube (Studio, ролик-источник,
+# YouTube API). Сборка роликов из готового текста, озвучка и стоки идут дальше — VPN им не нужен
+NET_KINDS = UPLOAD_KINDS | frozenset({"rewrite", "niches", "competition"})
 
 
 def lane_of(kind: str) -> str:
@@ -484,15 +490,18 @@ class JobManager:
         with self._lock:
             while True:
                 now = time.time()
-                if netguard.is_down():
-                    # нет доступа к YouTube (отключился VPN) — ничего не начинаем: задачи не тратят попытки,
-                    # сторож переподключает VPN и разбудит очередь, когда связь вернётся
-                    self._work.wait(timeout=10.0)
-                    continue
+                # нет доступа к YouTube (отключился VPN) — задачи, которым он нужен, не начинаем (не тратят попытки),
+                # сторож переподключает VPN и разбудит очередь, когда связь вернётся; остальные идут
+                offline = netguard.is_down()
                 job = next((j for j in self._jobs if j.status == QUEUED and j.runner is not None
                             and lane_of(j.kind) == lane
                             and float(j.state.get("retry_at") or 0) <= now
+                            and not (offline and j.kind in NET_KINDS)
                             and self._mem_ok(j, now)), None)
+                if job is None and offline and any(j.status == QUEUED and j.kind in NET_KINDS and lane_of(j.kind) == lane
+                                                   for j in self._jobs):
+                    self._work.wait(timeout=10.0)  # ждут связь — сторож разбудит раньше, как только она вернётся
+                    continue
                 if job is None and any(j.status == QUEUED and j.state.get("mem_wait_since") for j in self._jobs
                                        if lane_of(j.kind) == lane):
                     # задача ждёт свободную память — проверяем каждые 15 с
@@ -519,10 +528,13 @@ class JobManager:
         доделается (память занимаем мы сами). Иначе (память занята другими программами) — ждём не дольше
         MEM_WAIT_MAX: работа не встаёт навсегда, а внутри задачи рендер сам идёт бережнее."""
         need = mem_need(job.kind)
-        if not need or not memguard.tight(need):
+        ours = any(j.status == RUNNING and j.kind in HEAVY_KINDS for j in self._jobs)
+        # первый ролик ждёт только при критической нехватке: память тогда занята другими программами,
+        # ожиданием её не вернуть, а рендер сам ужмётся; второй — пока наш первый не освободит память
+        short = memguard.critical() if job.kind in HEAVY_KINDS and not ours else bool(need) and memguard.tight(need)
+        if not need or not short:
             job.state.pop("mem_wait_since", None)
             return True
-        ours = any(j.status == RUNNING and j.kind in HEAVY_KINDS for j in self._jobs)
         since = float(job.state.get("mem_wait_since") or 0)
         if not since:
             job.state["mem_wait_since"] = since = now
@@ -530,8 +542,9 @@ class JobManager:
             log(f"⏸ {job.title}: {job.message}")
             self._emit(job)
         # второй ролик ждёт первый без предела; выкладка и прочее — не дольше MEM_WAIT_MAX (ролики сами ужмутся)
-        if (not ours or job.kind not in HEAVY_KINDS) and now - since >= MEM_WAIT_MAX:
-            log(f"{job.title}: память занята другими программами уже {MEM_WAIT_MAX / 60:.0f} мин — начинаю бережно")
+        limit = MEM_WAIT_MAX if job.kind in HEAVY_KINDS else MEM_WAIT_UPLOAD
+        if (not ours or job.kind not in HEAVY_KINDS) and now - since >= limit:
+            log(f"{job.title}: памяти мало уже {limit / 60:.0f} мин ({memguard.describe()}) — начинаю бережно")
             return True
         return False
 
@@ -834,6 +847,14 @@ def get_manager() -> JobManager:
                 log(f"Соавторства: в списке на проверку {n} приглашений из прошлых выкладок — подтвержу в фоне")
         except Exception:  # noqa: BLE001 — список не собрался: новые приглашения всё равно записываются
             pass
+        try:  # выложенные без обложки/плейлиста раньше — доделать (разово при запуске)
+            from server.runners import backfill_fixes
+
+            n = backfill_fixes(manager)
+            if n:
+                log(f"Доделка роликов: поставлено задач «Доделать ролик» — {n} (выкладки последних дней)")
+        except Exception as exc:  # noqa: BLE001
+            log(f"Доделка роликов: проверка прошлых выкладок не удалась ({exc})")
         threading.Thread(target=collabs.loop, args=(manager,), name="collabs-auto", daemon=True).start()
         # сторож связи: YouTube доступен только через VPN — отвалился, переподключаем и держим очередь на паузе
         threading.Thread(target=netguard.loop, args=(load_config,), name="netguard", daemon=True).start()

@@ -44,7 +44,9 @@ class ReserveTests(unittest.TestCase):
         with _mac(8, 60):  # свободно 4,8, запас 2,5
             self.assertTrue(mg.tight(mg.HEAVY_NEED), "на 8 ГБ второй ролик не влезает")
         with _mac(16, 80, pressure=2):
-            self.assertTrue(mg.tight(0), "macOS сама просит память — новое не начинаем")
+            self.assertFalse(mg.tight(0), "«warn» при забитой подкачке держится часами — решает свободная память")
+        with _mac(16, 80, pressure=4):
+            self.assertTrue(mg.tight(0), "macOS на грани — новое не начинаем")
 
     def test_workers_shrink_with_free_memory(self) -> None:
         with _mac(16, 50):  # 8 − 4 = 4 ГБ на ffmpeg по 0,7 → 5, но не больше 4
@@ -52,6 +54,8 @@ class ReserveTests(unittest.TestCase):
         with _mac(16, 30):  # 4,8 − 4 = 0,8 → 1
             self.assertEqual(mg.workers(4, mg.FFMPEG_NEED), 1)
         with _mac(16, 80, pressure=2):
+            self.assertEqual(mg.workers(4, mg.FFMPEG_NEED), 4)
+        with _mac(16, 80, pressure=4):
             self.assertEqual(mg.workers(4, mg.FFMPEG_NEED), 1)
 
     def test_critical(self) -> None:
@@ -107,10 +111,27 @@ class QueueTests(unittest.TestCase):
             self.assertFalse(m._mem_ok(job, now))
             self.assertIn("память", job.message)
             self.assertFalse(m._mem_ok(job, now + 60))
-            self.assertTrue(m._mem_ok(job, now + jobs_mod.MEM_WAIT_MAX + 1), "дальше — бережно, но работаем")
+            self.assertFalse(m._mem_ok(job, now + jobs_mod.MEM_WAIT_UPLOAD - 1))
+            self.assertTrue(m._mem_ok(job, now + jobs_mod.MEM_WAIT_UPLOAD + 1), "выкладка ждёт не дольше 3 мин")
         with mock.patch.object(mg, "tight", return_value=False):
             self.assertTrue(m._mem_ok(job, now))
         self.assertNotIn("mem_wait_since", job.state)
+
+    def test_first_video_waits_only_when_memory_is_critical(self) -> None:
+        from server import jobs as jobs_mod
+
+        m = object.__new__(jobs_mod.JobManager)
+        m._jobs, m._last_emit = [], {}
+        job = jobs_mod.Job(kind="slides_full", title="Ролик", params={}, runner=None)
+        with mock.patch.object(mg, "tight", return_value=True), mock.patch.object(mg, "critical", return_value=False):
+            self.assertTrue(m._mem_ok(job, time.time()), "память заняли другие программы — ждать бесполезно")
+        with mock.patch.object(mg, "critical", return_value=True), mock.patch.object(mg, "describe", return_value="мало"):
+            self.assertFalse(m._mem_ok(job, time.time()))
+        other = jobs_mod.Job(kind="slides_full", title="Первый", params={}, runner=None, status=jobs_mod.RUNNING)
+        m._jobs = [other]
+        with mock.patch.object(mg, "tight", return_value=True), mock.patch.object(mg, "critical", return_value=False), \
+             mock.patch.object(mg, "describe", return_value="мало"):
+            self.assertFalse(m._mem_ok(job, time.time() + 3600), "второй ждёт, пока наш первый освободит память")
 
     def test_light_jobs_never_wait(self) -> None:
         from server import jobs as jobs_mod
