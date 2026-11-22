@@ -71,6 +71,38 @@ def get_clip(
         return _bundle
 
 
+_users = 0  # сколько этапов подбора кадров сейчас работают с моделью
+
+
+def hold_clip() -> None:
+    """Этап подбора кадров начался: модель нужна (загрузится при первом обращении)."""
+    global _users
+    with _lock:
+        _users += 1
+
+
+def release_clip() -> None:
+    """Этап закончился. Больше никто не подбирает кадры — выгружаем модель и её кэш из памяти:
+    между роликами она не нужна, а держит сотни мегабайт (память Mac бережём — engine.core.memguard)."""
+    global _users, _bundle
+    with _lock:
+        _users = max(0, _users - 1)
+        if _users or _bundle is None:
+            return
+        torch = _bundle.get("torch")
+        _bundle = None
+        _features.clear()
+    import gc
+
+    gc.collect()
+    try:
+        if torch is not None and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:  # noqa: BLE001 — освобождение памяти не должно ронять этап
+        pass
+    log("CLIP: модель выгружена из памяти (подбор кадров закончен)")
+
+
 def _file_key(path: Path) -> tuple[int, int] | None:
     try:
         st = path.stat()

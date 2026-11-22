@@ -22,6 +22,8 @@ os.environ["STORY_VIDEO_ROYAL_OFFLINE"] = "1"
 # уведомления macOS о конце очереди — не в тестах
 os.environ["STORY_VIDEO_NO_NOTIFY"] = "1"
 os.environ["STORY_VIDEO_NO_GUARD"] = "1"  # сторож зависаний браузера в тестах не нужен
+os.environ["STORY_VIDEO_NO_MEMGUARD"] = "1"  # очередь не смотрит на память Mac
+os.environ["STORY_VIDEO_NO_NETGUARD"] = "1"  # сторож связи: без проверок YouTube и переподключения VPN
 
 os.environ["STORY_VIDEO_YT_QUOTA_FILE"] = os.path.join(tempfile.mkdtemp(prefix="story-video-ytquota-"), "q.json")  # память «квота ключа исчерпана»
 os.environ["STORY_VIDEO_YT_CACHE_OFF"] = "1"  # тест кэша включает его сам

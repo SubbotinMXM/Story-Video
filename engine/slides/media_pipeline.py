@@ -92,6 +92,21 @@ def run_media_stage(
     cancel: CancelToken | None = None,
     on_progress: ProgressCb | None = None,
 ) -> MediaStageResult:
+    from engine.slides.clip_ranker import hold_clip, release_clip
+
+    hold_clip()
+    try:
+        return _run_media_stage(req, cancel=cancel, on_progress=on_progress)
+    finally:
+        release_clip()  # модель CLIP не держим в памяти между роликами
+
+
+def _run_media_stage(
+    req: MediaRequest,
+    *,
+    cancel: CancelToken | None = None,
+    on_progress: ProgressCb | None = None,
+) -> MediaStageResult:
     if req.people:
         # в любом режиме: ролик про людей — кадры по героям, а не по фразам и не вперемешку
         from dataclasses import replace

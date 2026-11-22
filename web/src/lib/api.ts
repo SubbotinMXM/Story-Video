@@ -385,6 +385,17 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
   return res.json() as Promise<T>;
 }
 
+/** Сторож связи: доступен ли YouTube (у нас — через VPN) и что программа делает, чтобы его вернуть. */
+export type NetStatus = {
+  up: boolean;
+  down_since: number;
+  reason: string;
+  checked_at: number;
+  connects: number;
+  restarts: number;
+  action: string;
+};
+
 export const api = {
   meta: () => request<Meta>("GET", "/api/meta"),
   settings: () => request<Settings>("GET", "/api/settings"),
@@ -406,6 +417,8 @@ export const api = {
   copyTemplate: (id: string) => request<Template>("POST", `/api/templates/${id}/copy`),
   deleteTemplate: (id: string) => request<{ ok: boolean }>("DELETE", `/api/templates/${id}`),
   launchTemplate: (id: string, body: TemplateLaunchIn) => request<TemplateLaunchOut>("POST", `/api/templates/${id}/launch`, body),
+  netStatus: () => request<NetStatus>("GET", "/api/net"),
+  netCheck: () => request<NetStatus>("POST", "/api/net/check"),
   updateStatus: () => request<UpdateStatus>("GET", "/api/update"),
   updateCheck: () => request<UpdateStatus>("POST", "/api/update/check"),
   updateApply: (when: "now" | "idle") => request<UpdateStatus & { started: boolean }>("POST", "/api/update/apply", { when }),

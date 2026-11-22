@@ -167,10 +167,28 @@ def step(page, name: str):
     except Exception as exc:
         if youtube.browser_lost(exc):
             raise
+        offline = no_connection(page, exc)
+        if offline:
+            # браузер не открыл YouTube вообще (отключился VPN) — это не вёрстка и не канал: снимок не нужен,
+            # очередь подождёт связь (сторож переподключит VPN) и продолжит с этого места
+            log(f"✗ Studio {current_channel()}: шаг «{name}» — нет связи с YouTube ({offline})")
+            raise youtube.StudioError(f"шаг «{name}»: нет связи с YouTube — браузер не открыл страницу ({offline})") from exc
         folder = diagnose(page, name, exc)
         reason = _short(exc)
         log(f"✗ Studio {current_channel()}: шаг «{name}» — {reason}. Снимок и страница: {folder}")
         raise youtube.StudioError(f"шаг «{name}»: {reason}. Снимок и страница: {folder}") from exc
+
+
+def no_connection(page, exc: BaseException) -> str:
+    """Код сетевой ошибки, если вместо страницы YouTube — ошибка браузера (ERR_FAILED и т. п.), иначе ''."""
+    m = re.search(r"net::(ERR_[A-Z_]+)", str(exc))
+    if m:
+        return m.group(1)
+    try:
+        url = page.url
+    except Exception:  # noqa: BLE001
+        return ""
+    return "страница ошибки браузера" if isinstance(url, str) and url.startswith("chrome-error://") else ""
 
 
 def _short(exc: BaseException) -> str:

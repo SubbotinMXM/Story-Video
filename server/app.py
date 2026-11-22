@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from engine.core import netguard
 from engine.core.config import PROJECT_ROOT, load_config, save_config
 from engine.tts import PROVIDERS, get_provider, provider_options
 from engine.slides.llm_client import DEFAULT_BASE_URL, DEFAULT_MODEL, LLMClient
@@ -978,6 +979,20 @@ def clear_jobs() -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.get("/api/net")
+def net_status() -> dict[str, Any]:
+    """Сторож связи: доступен ли YouTube, что делаем с VPN."""
+    return netguard.snapshot()
+
+
+@app.post("/api/net/check")
+def net_check() -> dict[str, Any]:
+    """Проверить связь сейчас (кнопка в плашке «нет доступа к YouTube»)."""
+    netguard.check_now()
+    netguard.kick()
+    return netguard.snapshot()
+
+
 @app.get("/api/events")
 async def events(request: Request) -> StreamingResponse:
     queue = hub.subscribe()
@@ -988,6 +1003,7 @@ async def events(request: Request) -> StreamingResponse:
                 "type": "snapshot",
                 "jobs": get_manager().list(),
                 "logs": list(hub.logs),
+                "net": netguard.snapshot(),
             }
             yield f"data: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
             while not await request.is_disconnected():

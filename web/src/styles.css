@@ -2478,6 +2478,14 @@ code {
 .tpl-banner svg {
   flex: none;
 }
+.net-banner {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--text);
+}
+.net-banner svg {
+  color: var(--warn);
+}
 .tpl-banner-text {
   flex: 1;
   min-width: 0;

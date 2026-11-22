@@ -25,6 +25,7 @@ import { JobsPanel } from "./components/JobsPanel";
 import { WhatsNewDialog } from "./components/WhatsNew";
 import { UpdateButton } from "./components/UpdateButton";
 import { ReportHost } from "./components/ReportDialog";
+import { NetBanner } from "./components/NetBanner";
 import { api, type WhatsNew } from "./lib/api";
 import { useJobs, useSettings, useToasts } from "./lib/store";
 import { BrollPage } from "./pages/BrollPage";
@@ -44,18 +45,78 @@ import { setEditingTemplate, useEditingTemplate } from "./lib/templateEdit";
 import type { PageId } from "./lib/nav";
 
 const NAV: { id: PageId; label: string; icon: ReactNode; group: string }[] = [
-  { id: "steps", label: "Генерация по шагам", icon: <ListChecks size={18} />, group: "Создать" },
-  { id: "templates", label: "Шаблоны", icon: <LayoutTemplate size={18} />, group: "Создать" },
-  { id: "broll", label: "Рассказы", icon: <Clapperboard size={18} />, group: "Создать" },
-  { id: "slides", label: "Стоковые слайды", icon: <Images size={18} />, group: "Создать" },
-  { id: "covers", label: "Обложки", icon: <Palette size={18} />, group: "Создать" },
-  { id: "runs", label: "Запуски слайдов", icon: <History size={18} />, group: "Работа" },
-  { id: "copies", label: "Копии ролика", icon: <Copy size={18} />, group: "Работа" },
-  { id: "comments", label: "Комментарии", icon: <MessageCircleHeart size={18} />, group: "Работа" },
-  { id: "polls", label: "Голосования", icon: <Vote size={18} />, group: "Работа" },
-  { id: "niches", label: "Поиск ниш", icon: <Telescope size={18} />, group: "Работа" },
-  { id: "analytics", label: "Аналитика", icon: <BarChart3 size={18} />, group: "Работа" },
-  { id: "settings", label: "Настройки", icon: <SettingsIcon size={18} />, group: "Приложение" },
+  {
+    id: "steps",
+    label: "Генерация по шагам",
+    icon: <ListChecks size={18} />,
+    group: "Создать",
+  },
+  {
+    id: "templates",
+    label: "Шаблоны",
+    icon: <LayoutTemplate size={18} />,
+    group: "Создать",
+  },
+  {
+    id: "broll",
+    label: "Рассказы",
+    icon: <Clapperboard size={18} />,
+    group: "Создать",
+  },
+  {
+    id: "slides",
+    label: "Стоковые слайды",
+    icon: <Images size={18} />,
+    group: "Создать",
+  },
+  {
+    id: "covers",
+    label: "Обложки",
+    icon: <Palette size={18} />,
+    group: "Создать",
+  },
+  {
+    id: "runs",
+    label: "Запуски слайдов",
+    icon: <History size={18} />,
+    group: "Работа",
+  },
+  {
+    id: "copies",
+    label: "Копии ролика",
+    icon: <Copy size={18} />,
+    group: "Работа",
+  },
+  {
+    id: "comments",
+    label: "Комментарии",
+    icon: <MessageCircleHeart size={18} />,
+    group: "Работа",
+  },
+  {
+    id: "polls",
+    label: "Голосования",
+    icon: <Vote size={18} />,
+    group: "Работа",
+  },
+  {
+    id: "niches",
+    label: "Поиск ниш",
+    icon: <Telescope size={18} />,
+    group: "Работа",
+  },
+  {
+    id: "analytics",
+    label: "Аналитика",
+    icon: <BarChart3 size={18} />,
+    group: "Работа",
+  },
+  {
+    id: "settings",
+    label: "Настройки",
+    icon: <SettingsIcon size={18} />,
+    group: "Приложение",
+  },
 ];
 
 function readPage(): PageId {
@@ -97,7 +158,13 @@ function Toasts() {
     <div className="toasts">
       {toasts.map((t) => (
         <div key={t.id} className={`toast toast-${t.kind}`}>
-          {t.kind === "ok" ? <CheckCircle2 size={18} /> : t.kind === "error" ? <XCircle size={18} /> : <Info size={18} />}
+          {t.kind === "ok" ? (
+            <CheckCircle2 size={18} />
+          ) : t.kind === "error" ? (
+            <XCircle size={18} />
+          ) : (
+            <Info size={18} />
+          )}
           <div className="toast-body">
             <div className="toast-title">{t.title}</div>
             {t.text && <div className="toast-text">{t.text}</div>}
@@ -113,9 +180,12 @@ function Toasts() {
 
 function SaveIndicator() {
   const { saveState } = useSettings();
-  if (saveState === "saving") return <span className="save-state">Сохраняю…</span>;
-  if (saveState === "saved") return <span className="save-state ok">Сохранено</span>;
-  if (saveState === "error") return <span className="save-state bad">Ошибка сохранения</span>;
+  if (saveState === "saving")
+    return <span className="save-state">Сохраняю…</span>;
+  if (saveState === "saved")
+    return <span className="save-state ok">Сохранено</span>;
+  if (saveState === "error")
+    return <span className="save-state bad">Ошибка сохранения</span>;
   return null;
 }
 
@@ -131,9 +201,18 @@ export default function App() {
   // переход из карточки («Промпты → Настройки»): страница + прокрутка к нужной карточке
   useEffect(() => {
     const on = (e: Event) => {
-      const { page: next, anchor } = (e as CustomEvent<{ page: PageId; anchor?: string }>).detail;
+      const { page: next, anchor } = (
+        e as CustomEvent<{ page: PageId; anchor?: string }>
+      ).detail;
       setPage(next);
-      if (anchor) setTimeout(() => document.getElementById(anchor)?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+      if (anchor)
+        setTimeout(
+          () =>
+            document
+              .getElementById(anchor)
+              ?.scrollIntoView({ behavior: "smooth", block: "start" }),
+          80,
+        );
     };
     window.addEventListener("sv-goto", on);
     return () => window.removeEventListener("sv-goto", on);
@@ -154,10 +233,13 @@ export default function App() {
   const [newsOpen, setNewsOpen] = useState<"auto" | "history" | null>(null);
   useEffect(() => {
     if (!settings) return;
-    void api.whatsNew().then((w) => {
-      setNews(w);
-      if (w.unseen.length) setNewsOpen("auto");
-    }).catch(() => undefined); // нет списка версий — просто без окна
+    void api
+      .whatsNew()
+      .then((w) => {
+        setNews(w);
+        if (w.unseen.length) setNewsOpen("auto");
+      })
+      .catch(() => undefined); // нет списка версий — просто без окна
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [Boolean(settings)]);
   const saveEditing = async () => {
@@ -165,10 +247,18 @@ export default function App() {
     try {
       await flush();
       await api.saveTemplate(editing.id);
-      push({ kind: "ok", title: `Шаблон «${editing.name}» обновлён`, text: "Новые запуски пойдут с этими настройками" });
+      push({
+        kind: "ok",
+        title: `Шаблон «${editing.name}» обновлён`,
+        text: "Новые запуски пойдут с этими настройками",
+      });
       setEditingTemplate(null);
     } catch (e) {
-      push({ kind: "error", title: "Шаблон не сохранился", text: (e as Error).message });
+      push({
+        kind: "error",
+        title: "Шаблон не сохранился",
+        text: (e as Error).message,
+      });
     }
   };
   const closeNews = () => {
@@ -192,14 +282,23 @@ export default function App() {
         </div>
         <div className="nav">
           {NAV.map((n) => {
-            const head = n.group !== group ? ((group = n.group), <div className="nav-group">{n.group}</div>) : null;
+            const head =
+              n.group !== group
+                ? ((group = n.group),
+                  (<div className="nav-group">{n.group}</div>))
+                : null;
             return (
               <div key={n.id}>
                 {head}
-                <button className={`nav-item ${page === n.id ? "active" : ""}`} onClick={() => setPage(n.id)}>
+                <button
+                  className={`nav-item ${page === n.id ? "active" : ""}`}
+                  onClick={() => setPage(n.id)}
+                >
                   {n.icon}
                   <span>{n.label}</span>
-                  {n.id === "settings" && needsSetup && <span className="dot" title="Нужно вписать ключи" />}
+                  {n.id === "settings" && needsSetup && (
+                    <span className="dot" title="Нужно вписать ключи" />
+                  )}
                 </button>
               </div>
             );
@@ -209,14 +308,20 @@ export default function App() {
           {running.map((r) => (
             <div key={r.id} className="now-running" title={r.message}>
               <Loader2 size={14} className="spin" />
-              <span className="ellipsis">{Math.round(r.progress * 100)}% · {r.title}</span>
+              <span className="ellipsis">
+                {Math.round(r.progress * 100)}% · {r.title}
+              </span>
             </div>
           ))}
           <SaveIndicator />
           <ReportHost />
           <UpdateButton />
           {news?.version && (
-            <button className="ver-btn" onClick={() => setNewsOpen("history")} title="Что нового: история версий">
+            <button
+              className="ver-btn"
+              onClick={() => setNewsOpen("history")}
+              title="Что нового: история версий"
+            >
               <Sparkles size={13} />
               <span>Версия {news.version}</span>
               {news.unseen.length > 0 && <span className="dot" />}
@@ -224,8 +329,25 @@ export default function App() {
           )}
           <div className="theme-switch">
             {(["light", "system", "dark"] as Theme[]).map((t) => (
-              <button key={t} className={theme === t ? "active" : ""} onClick={() => setTheme(t)} title={t === "system" ? "Как в системе" : t === "light" ? "Светлая" : "Тёмная"}>
-                {t === "light" ? <Sun size={14} /> : t === "dark" ? <Moon size={14} /> : "Авто"}
+              <button
+                key={t}
+                className={theme === t ? "active" : ""}
+                onClick={() => setTheme(t)}
+                title={
+                  t === "system"
+                    ? "Как в системе"
+                    : t === "light"
+                      ? "Светлая"
+                      : "Тёмная"
+                }
+              >
+                {t === "light" ? (
+                  <Sun size={14} />
+                ) : t === "dark" ? (
+                  <Moon size={14} />
+                ) : (
+                  "Авто"
+                )}
               </button>
             ))}
           </div>
@@ -233,19 +355,32 @@ export default function App() {
       </nav>
 
       {newsOpen && news && (
-        <WhatsNewDialog releases={newsOpen === "auto" ? news.unseen : news.history} mode={newsOpen} onClose={closeNews} />
+        <WhatsNewDialog
+          releases={newsOpen === "auto" ? news.unseen : news.history}
+          mode={newsOpen}
+          onClose={closeNews}
+        />
       )}
       <main className="content">
+        <NetBanner />
         {editing && (
           <div className="tpl-banner" role="status">
             <LayoutTemplate size={18} />
             <div className="tpl-banner-text">
-              <b>Правишь шаблон «{editing.name}».</b> Настройки на экранах сейчас — из шаблона; на шагах видно, что было и что стало. Сохрани — или закрой без сохранения.
+              <b>Правишь шаблон «{editing.name}».</b> Настройки на экранах
+              сейчас — из шаблона; на шагах видно, что было и что стало. Сохрани
+              — или закрой без сохранения.
             </div>
-            <button className="btn btn-primary btn-sm" onClick={() => void saveEditing()}>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => void saveEditing()}
+            >
               Сохранить в шаблон
             </button>
-            <button className="btn btn-ghost btn-sm" onClick={() => setEditingTemplate(null)}>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => setEditingTemplate(null)}
+            >
               Закрыть
             </button>
           </div>

@@ -6,7 +6,6 @@ import json
 import math
 import random
 import shutil
-from concurrent.futures import as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -660,20 +659,43 @@ def _render_parallel(
     cancel: CancelToken | None,
     progress: ProgressCb,
 ) -> None:
-    """Несколько ffmpeg сразу. Качество то же, сегменты пишутся в заранее заданные файлы."""
+    """Несколько ffmpeg сразу. Качество то же, сегменты пишутся в заранее заданные файлы.
+    Сколько одновременно — по свободной памяти (запас Mac не трогаем): от RENDER_WORKERS до одного;
+    памяти совсем нет — следующий кусок ждёт, пока закончится текущий."""
+    from concurrent.futures import FIRST_COMPLETED, wait
+
+    from engine.core import memguard
+
     if not jobs:
         return
     total = len(jobs)
     done = 0
+    queue = list(jobs)
+    running: dict = {}
     ex = ThreadPoolExecutor(max_workers=RENDER_WORKERS)
+    slowed = False
     try:
-        futs = {ex.submit(fn): label for _dest, fn, label in jobs}
-        for fut in as_completed(futs):
+        while queue or running:
+            limit = memguard.workers(RENDER_WORKERS, memguard.FFMPEG_NEED)
+            if running and memguard.critical():
+                limit = len(running)  # не добавляем ffmpeg, пока macOS не получит память обратно
+            if limit < RENDER_WORKERS and not slowed:
+                slowed = True
+                log(f"Рендер: меньше ffmpeg одновременно ({limit} из {RENDER_WORKERS}) — бережём память Mac "
+                    f"({memguard.describe()})")
+            while queue and len(running) < max(1, limit):
+                _dest, fn, label = queue.pop(0)
+                running[ex.submit(fn)] = label
+            finished, _ = wait(list(running), timeout=5.0, return_when=FIRST_COMPLETED)
+            for fut in finished:
+                label = running.pop(fut)
+                if cancel:
+                    cancel.check()
+                fut.result()
+                done += 1
+                progress(0.05 + 0.70 * (done / total), f"{label} ({done}/{total})")
             if cancel:
                 cancel.check()
-            fut.result()
-            done += 1
-            progress(0.05 + 0.70 * (done / total), f"{futs[fut]} ({done}/{total})")
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
 

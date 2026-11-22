@@ -20,7 +20,7 @@ from typing import Any
 
 from engine.core.cancel import CancelledError, CancelToken, current_cancel
 from engine.core.config import DATA_DIR
-from engine.core import usage
+from engine.core import memguard, netguard, usage
 from engine.core.logutil import current_job, log, set_log_callback
 from server.events import hub
 from server.keepawake import KeepAwake
@@ -49,6 +49,22 @@ MAX_PARALLEL = 2
 UPLOAD_KINDS = frozenset({"publish", "comments", "polls", "analytics", "scan", "collabs"})  # профили AdsPower — по одной задаче
 # лёгкие задачи (генерация обложек — только сеть) — своя полоса: не ждут ни монтажа, ни выкладки
 LIGHT_KINDS = frozenset({"cover", "niches"})
+
+
+# сборка роликов: CLIP, Whisper, ffmpeg — гигабайты памяти. Программа всегда оставляет Mac запас памяти
+# (engine.core.memguard): иначе Mac уходит в подкачку и замирает всё — окно VPN (Happ выключает туннель через 10 с),
+# Bluetooth (клавиатура и мышь отваливаются)
+HEAVY_KINDS = frozenset({"broll", "slides_full", "slides_resume", "slides_voice", "slides_media", "slides_render"})
+MEM_WAIT_MAX = 10 * 60.0  # память занята не нами (браузер, другие программы) — ждём не дольше, дальше бережно
+
+
+def mem_need(kind: str) -> int:
+    """Сколько памяти займёт задача сверх запаса Mac (0 — лёгкая, не ждёт)."""
+    if kind in HEAVY_KINDS:
+        return memguard.HEAVY_NEED
+    if kind in UPLOAD_KINDS:
+        return memguard.BROWSER_NEED
+    return 0
 
 
 def lane_of(kind: str) -> str:
@@ -226,6 +242,7 @@ class JobManager:
         from engine.core import switches
 
         switches.set_callback(self._on_switch)
+        netguard.on_change(self._on_net)
         for n in range(MAX_PARALLEL):
             threading.Thread(target=self._loop, args=("main",), name=f"job-worker-{n + 1}", daemon=True).start()
         threading.Thread(target=self._loop, args=("upload",), name="upload-worker", daemon=True).start()
@@ -467,11 +484,23 @@ class JobManager:
         with self._lock:
             while True:
                 now = time.time()
+                if netguard.is_down():
+                    # нет доступа к YouTube (отключился VPN) — ничего не начинаем: задачи не тратят попытки,
+                    # сторож переподключает VPN и разбудит очередь, когда связь вернётся
+                    self._work.wait(timeout=10.0)
+                    continue
                 job = next((j for j in self._jobs if j.status == QUEUED and j.runner is not None
                             and lane_of(j.kind) == lane
-                            and float(j.state.get("retry_at") or 0) <= now), None)
+                            and float(j.state.get("retry_at") or 0) <= now
+                            and self._mem_ok(j, now)), None)
+                if job is None and any(j.status == QUEUED and j.state.get("mem_wait_since") for j in self._jobs
+                                       if lane_of(j.kind) == lane):
+                    # задача ждёт свободную память — проверяем каждые 15 с
+                    self._work.wait(timeout=15.0)
+                    continue
                 if job is not None:
                     job.state.pop("retry_at", None)
+                    job.state.pop("mem_wait_since", None)
                     job.status = RUNNING
                     job.started = time.time()
                     job.attempts += 1
@@ -484,6 +513,27 @@ class JobManager:
                 # задачи, ждущие автоповтора, — проснуться к ближайшему повтору
                 due = [t for t in waiting if t > now]
                 self._work.wait(timeout=max(1.0, min(due) - now) if due else None)
+
+    def _mem_ok(self, job: Job, now: float) -> bool:
+        """Хватит ли памяти начать задачу, не трогая запас Mac. Второй тяжёлый ролик ждёт, пока первый
+        доделается (память занимаем мы сами). Иначе (память занята другими программами) — ждём не дольше
+        MEM_WAIT_MAX: работа не встаёт навсегда, а внутри задачи рендер сам идёт бережнее."""
+        need = mem_need(job.kind)
+        if not need or not memguard.tight(need):
+            job.state.pop("mem_wait_since", None)
+            return True
+        ours = any(j.status == RUNNING and j.kind in HEAVY_KINDS for j in self._jobs)
+        since = float(job.state.get("mem_wait_since") or 0)
+        if not since:
+            job.state["mem_wait_since"] = since = now
+            job.message = f"Жду свободную память — {memguard.describe()}"
+            log(f"⏸ {job.title}: {job.message}")
+            self._emit(job)
+        # второй ролик ждёт первый без предела; выкладка и прочее — не дольше MEM_WAIT_MAX (ролики сами ужмутся)
+        if (not ours or job.kind not in HEAVY_KINDS) and now - since >= MEM_WAIT_MAX:
+            log(f"{job.title}: память занята другими программами уже {MEM_WAIT_MAX / 60:.0f} мин — начинаю бережно")
+            return True
+        return False
 
     def _loop(self, lane: str = "main") -> None:
         while True:
@@ -609,6 +659,21 @@ class JobManager:
 
     def _maybe_retry(self, job: Job, exc: BaseException) -> None:
         """Краткий сбой сети/сервиса — поставить задачу обратно в очередь с паузой (с места падения)."""
+        if not netguard.check_now():
+            # упало из-за обрыва связи (VPN) — ждём связь без счёта попыток, продолжим сразу, как вернётся
+            try:
+                title, runner = self._build(job.kind, job.params, job.state)
+            except Exception as build_exc:
+                log(f"Ожидание связи не получилось: {build_exc}")
+                return
+            job.state["wait_net"] = True
+            job.state.pop("retry_at", None)
+            job.runner, job.title = runner, title
+            job.status = QUEUED
+            job.cancel = CancelToken()
+            job.message = "Нет связи с YouTube (отключился VPN) — переподключаю, продолжу с места падения сам"
+            log(f"↻ {job.title}: {job.message}")
+            return
         retry_at = getattr(exc, "retry_at", None)
         if retry_at:
             # известно, когда пробовать снова (лимит загрузок YouTube) — ждём до этого времени, без счёта попыток
@@ -640,6 +705,19 @@ class JobManager:
         job.cancel = CancelToken()
         job.message = f"Сбой сети или сервиса — сам повторю через {wait} мин (повтор {n + 1} из {len(AUTO_RETRY_MIN)})"
         log(f"↻ {job.title}: {job.message}")
+
+    def _on_net(self, snap: dict[str, Any]) -> None:
+        """Сторож связи: состояние — в интерфейс; связь вернулась — ждавшие её задачи идут сразу."""
+        hub.publish("net", {"net": snap})
+        if not snap.get("up"):
+            return
+        with self._lock:
+            for j in self._jobs:
+                if j.status == QUEUED and j.state.pop("wait_net", None):
+                    j.state.pop("retry_at", None)
+                    j.message = "Связь вернулась — продолжаю…"
+                    self._emit(j)
+            self._work.notify_all()
 
     def _emit(self, job: Job, *, throttle: bool = False) -> None:
         now = time.monotonic()
@@ -757,6 +835,8 @@ def get_manager() -> JobManager:
         except Exception:  # noqa: BLE001 — список не собрался: новые приглашения всё равно записываются
             pass
         threading.Thread(target=collabs.loop, args=(manager,), name="collabs-auto", daemon=True).start()
+        # сторож связи: YouTube доступен только через VPN — отвалился, переподключаем и держим очередь на паузе
+        threading.Thread(target=netguard.loop, args=(load_config,), name="netguard", daemon=True).start()
         from engine import updater
 
         threading.Thread(target=updater.loop, args=(manager, load_config), name="updater", daemon=True).start()
