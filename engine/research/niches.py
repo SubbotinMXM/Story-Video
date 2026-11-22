@@ -280,13 +280,16 @@ def _int(v) -> int:
 
 
 def search(api, queries: list[str], f: Filters, *, now: datetime | None = None,
-           cancel: CancelToken | None = None, progress=None) -> tuple[dict[str, Found], dict[str, dict]]:
-    """Ролики по запросам (последние WINDOW_DAYS) → (каналы, ролики {id: {...}})."""
+           cancel: CancelToken | None = None, progress=None,
+           passes: tuple[tuple[str, str], ...] = SEARCH_PASSES,
+           window_days: int = WINDOW_DAYS) -> tuple[dict[str, Found], dict[str, dict]]:
+    """Ролики по запросам (последние window_days) → (каналы, ролики {id: {...}}).
+    passes — проходы поиска на каждый запрос (порядок, длительность): каждый стоит 100 единиц квоты."""
     from engine.rewrite.channels import KeysExhausted, _iso_duration, _iso_time
 
     now = now or datetime.now(timezone.utc)
     # до суток: одинаковый запрос в течение дня берётся из кэша поиска, а не тратит квоту заново
-    after = (now - timedelta(days=WINDOW_DAYS)).strftime("%Y-%m-%dT00:00:00Z")
+    after = (now - timedelta(days=window_days)).strftime("%Y-%m-%dT00:00:00Z")
     region = f.region or LANG_REGION.get(f.language, "")
     video_q: dict[str, set[str]] = {}
     free_ids: set[str] = set()  # найденные без квоты: дату публикации проверяем сами (ниже)
@@ -300,7 +303,7 @@ def search(api, queries: list[str], f: Filters, *, now: datetime | None = None,
         params = {"part": "snippet", "type": "video", "q": q, "maxResults": SEARCH_PAGE,
                   "publishedAfter": after, **({"relevanceLanguage": f.language} if f.language else {}),
                   **({"regionCode": region} if region else {})}
-        for order, duration in SEARCH_PASSES:
+        for order, duration in passes:
             ids: list[str] = []
             if not free:
                 try:
@@ -323,11 +326,14 @@ def search(api, queries: list[str], f: Filters, *, now: datetime | None = None,
         data = api.get("videos", {"part": "snippet,statistics,contentDetails", "id": ",".join(batch)})
         for v in data.get("items") or []:
             sn = v.get("snippet") or {}
-            if v["id"] in free_ids and (_iso_time(sn.get("publishedAt") or "") or now.timestamp()) < now.timestamp() - WINDOW_DAYS * 86400:
+            if v["id"] in free_ids and (_iso_time(sn.get("publishedAt") or "") or now.timestamp()) < now.timestamp() - window_days * 86400:
                 continue  # бесплатный поиск отдаёт «за год» — окно в полгода применяем здесь
             videos[v["id"]] = {"id": v["id"], "title": sn.get("title") or "", "channel": sn.get("channelId") or "",
                                "views": _int((v.get("statistics") or {}).get("viewCount")),
                                "minutes": _iso_duration((v.get("contentDetails") or {}).get("duration") or "") / 60,
+                               "ts": _iso_time(sn.get("publishedAt") or ""),
+                               # язык звука/ролика, как его указал автор (часто пусто) — «ru», «en-US»…
+                               "audio": (sn.get("defaultAudioLanguage") or sn.get("defaultLanguage") or "").lower(),
                                "queries": sorted(video_q.get(v["id"], ()))}
     channels: dict[str, Found] = {}
     for v in videos.values():

@@ -28,11 +28,11 @@ KIND_LABEL = {
     "broll": "Ролик с футажами", "slides_full": "Ролик со слайдами", "slides_resume": "Ролик со слайдами",
     "slides_voice": "Озвучка слайдов", "slides_media": "Подбор кадров", "slides_render": "Рендер слайдов",
     "copies": "Копии с ускорением", "rewrite": "Рерайт текста", "cover": "Обложка", "publish": "Выкладка",
-    "comments": "Комментарии", "polls": "Голосования", "niches": "Поиск ниш", "analytics": "Аналитика",
+    "comments": "Комментарии", "polls": "Голосования", "niches": "Поиск ниш", "competition": "Конкуренция по языкам", "analytics": "Аналитика",
     "collabs": "Соавторства", "scan": "Поиск каналов",
 }
 # тихие задачи: без ошибок отдельного окна не стоят (раз в сутки обновилась аналитика — не событие)
-QUIET_KINDS = frozenset({"analytics", "scan", "niches", "collabs"})
+QUIET_KINDS = frozenset({"analytics", "scan", "niches", "competition", "collabs"})
 REPORTS_KEEP = 30
 KEEP_DAYS = 5
 

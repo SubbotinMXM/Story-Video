@@ -48,7 +48,7 @@ MAX_PARALLEL = 2
 # выкладка на YouTube — своя полоса: идёт параллельно с монтажом, но по одной (окно браузера в фокусе одно)
 UPLOAD_KINDS = frozenset({"publish", "comments", "polls", "analytics", "scan", "collabs"})  # профили AdsPower — по одной задаче
 # лёгкие задачи (генерация обложек — только сеть) — своя полоса: не ждут ни монтажа, ни выкладки
-LIGHT_KINDS = frozenset({"cover", "niches"})
+LIGHT_KINDS = frozenset({"cover", "niches", "competition"})
 
 
 # сборка роликов: CLIP, Whisper, ffmpeg — гигабайты памяти. Программа всегда оставляет Mac запас памяти

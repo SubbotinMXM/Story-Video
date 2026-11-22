@@ -656,6 +656,33 @@ def _niches_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
     return f"Поиск ниш: {label}", run
 
 
+def _competition_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
+    """«Аналитика» → «Конкуренция по языкам»: на каком из выбранных языков подниша канала-образца выгоднее."""
+    from engine.research import competition
+    from engine.slides.stocks_base import parse_keys
+
+    url = str(params.get("url") or "").strip()
+    if not url:
+        raise ValueError("Вставь ссылку на канал или ролик")
+    langs = [str(x).strip() for x in params.get("languages") or [] if str(x).strip()]
+    if not langs:
+        raise ValueError("Отметь хотя бы один язык")
+    keys = parse_keys(cfg.get("youtube_api_keys") or cfg.get("youtube_api_key"))
+    if not keys:
+        raise ValueError("Нужен ключ YouTube Data API (Настройки → Ключи → YouTube)")
+    llm = _llm_opt(cfg)
+    subniche = str(params.get("subniche") or "").strip()
+    fresh = bool(params.get("fresh"))
+
+    def run(job: Job, progress, cancel: CancelToken) -> dict[str, Any]:
+        res = competition.analyze(url, langs, keys, llm, subniche=subniche, fresh=fresh, cancel=cancel,
+                                  progress=progress)
+        head, lines = competition.summary(res)
+        return {"summary": head, "lines": lines}
+
+    return f"Конкуренция по языкам: {url}", run
+
+
 def _similar_job(cfg: dict, params: dict, url: str) -> tuple[str, Any]:
     """«Поиск ниш» → «Похожие на канал»: по ссылке на канал (или ролик) — такие же каналы по тем же критериям."""
     from engine.research import niches
@@ -1471,6 +1498,7 @@ _BUILDERS = {
     "comments": _comments_job,
     "polls": _polls_job,
     "niches": _niches_job,
+    "competition": _competition_job,
     "analytics": _analytics_job,
     "collabs": _collabs_job,
     "scan": _scan_job,

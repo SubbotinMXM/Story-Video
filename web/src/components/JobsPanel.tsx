@@ -33,6 +33,7 @@ const KIND_LABEL: Record<string, string> = {
   comments: "Комментарии",
   polls: "Голосования",
   niches: "Поиск ниш",
+  competition: "Конкуренция по языкам",
   scan: "Поиск каналов",
   analytics: "Аналитика",
   cover: "Обложка",

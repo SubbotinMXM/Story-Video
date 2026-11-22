@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, BarChart3, Check, Clock, Pencil, Plus, RefreshCw, Tags, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, BarChart3, Check, Clock, Globe2, Pencil, Plus, RefreshCw, Tags, Trash2, X } from "lucide-react";
 import { Badge, Button, Card, Empty, PageHeader, Progress, Select, Toggle } from "../components/ui";
 import { api, type AnalyticsAuto, type AnalyticsGroup, type AnalyticsRow, type PublishProfile } from "../lib/api";
 import { useJobs, useLoadedSettings, useProfiles, useToasts } from "../lib/store";
 import { inAnyGroup, inFilter, NO_GROUP, toggleFilter } from "../lib/groups";
+import { CompetitionPanel } from "../components/CompetitionPanel";
 
 type SortKey = "name" | "subscribers" | "watch_hours" | "views_48h" | "public" | "restricted" | "scheduled" | "synced_at";
 const SORTS: { key: SortKey; label: string }[] = [
@@ -66,7 +67,27 @@ function when(ts: number) {
 
 /** Аналитика каналов из профилей AdsPower: подписчики, часы просмотра за всё время, просмотры за 48 часов.
  *  «Синхронизировать» — задача в очереди выкладки по выбранным группам: профили открываются скрыто, цифры читаются из Studio. */
+const TAB_KEY = "analytics-tab";
+type Tab = "channels" | "competition";
+
+function savedTab(): Tab {
+  try {
+    return localStorage.getItem(TAB_KEY) === "competition" ? "competition" : "channels";
+  } catch {
+    return "channels";
+  }
+}
+
 export function AnalyticsPage({ active }: { active: boolean }) {
+  const [tab, setTabState] = useState<Tab>(savedTab);
+  const setTab = (t: Tab) => {
+    setTabState(t);
+    try {
+      localStorage.setItem(TAB_KEY, t);
+    } catch {
+      /* не запомним — не страшно */
+    }
+  };
   const { enqueue, jobs } = useJobs();
   const [rows, setRows] = useState<AnalyticsRow[] | null>(null);
   const [auto, setAuto] = useState<AnalyticsAuto | null>(null);
@@ -217,8 +238,22 @@ export function AnalyticsPage({ active }: { active: boolean }) {
     <div className="page">
       <PageHeader
         title="Аналитика"
-        subtitle="Подписчики, часы просмотра, просмотры за 48 часов и сколько роликов ждёт выхода — по каналам из профилей AdsPower. Каналы собираются в группы, синхронизация и автообновление работают по группам."
+        subtitle={
+          tab === "competition"
+            ? "На каком языке выгоднее делать поднишу канала-образца: где маленькие каналы на этой теме залетают, а серьёзных конкурентов мало."
+            : "Подписчики, часы просмотра, просмотры за 48 часов и сколько роликов ждёт выхода — по каналам из профилей AdsPower. Каналы собираются в группы, синхронизация и автообновление работают по группам."
+        }
       />
+      <div className="tabs niche-views" role="tablist">
+        <button type="button" role="tab" aria-selected={tab === "channels"} className={tab === "channels" ? "active" : ""} onClick={() => setTab("channels")}>
+          <BarChart3 size={15} /> Мои каналы
+        </button>
+        <button type="button" role="tab" aria-selected={tab === "competition"} className={tab === "competition" ? "active" : ""} onClick={() => setTab("competition")}>
+          <Globe2 size={15} /> Конкуренция по языкам
+        </button>
+      </div>
+      {tab === "competition" && <CompetitionPanel active={active} />}
+      <div hidden={tab !== "channels"} className="an-tab">
       <ManualSync
         groups={groups}
         rows={all}
@@ -366,6 +401,7 @@ export function AnalyticsPage({ active }: { active: boolean }) {
           </div>
         </Card>
       )}
+      </div>
     </div>
   );
 }

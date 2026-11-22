@@ -507,6 +507,23 @@ def niches_run_delete(run_id: str) -> dict[str, Any]:
     return {"runs": niches.runs()}
 
 
+@app.get("/api/competition/runs")
+def competition_runs() -> dict[str, Any]:
+    """История проверок «Конкуренция по языкам» (новые сверху)."""
+    from engine.research import competition
+
+    return {"runs": competition.runs()}
+
+
+@app.delete("/api/competition/runs/{run_id}")
+def competition_run_delete(run_id: str) -> dict[str, Any]:
+    from engine.research import competition
+
+    if not competition.remove(run_id):
+        raise HTTPException(404, "Такой проверки уже нет")
+    return {"runs": competition.runs()}
+
+
 @app.delete("/api/niches/runs/{run_id}/channels/{channel_id}")
 def niches_channel_delete(run_id: str, channel_id: str) -> dict[str, Any]:
     """Убрать один канал из выдачи поиска."""
