@@ -412,7 +412,8 @@ def run_publish(req: PublishRequest, state: dict[str, Any], save: Callable[..., 
             continue
         tag = f" [{v.language.upper()}]" if len(versions) > 1 else ""
         mat_lines += [(f"Обложка{tag}: {Path(vm['thumbnail']).name}" if vm.get("thumbnail")
-                       else f"Обложка{tag}: без обложки — поставишь сам"), f"Название{tag}: {vm['title']}",
+                       else f"Обложка{tag}: без обложки" + (" (папка обложек не указана)" if req.prepare is None
+                                                              and not str(req.thumbs_dir or "").strip() else " — поставишь сам")), f"Название{tag}: {vm['title']}",
                       *[str(x) for x in vm.get("lines") or []]]
         # версия-перевод берёт материалы основной — то же предупреждение второй раз не повторяем
         warnings += [f"{tag.strip()} {w}".strip() for w in vm.get("warnings") or []

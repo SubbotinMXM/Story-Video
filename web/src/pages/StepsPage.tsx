@@ -9,7 +9,7 @@ import { BrollFootageCard, BrollIntroCard, MediaModeCard, MEDIA_MODES, SlidesInt
 import { AiCard } from "../components/AiCard";
 import { MixCard } from "../components/MixCard";
 import { MusicCard } from "../components/MusicCard";
-import { PublishCard, usePublishCount } from "../components/PublishCard";
+import { PublishCard, PublishMaterials, usePublishCount } from "../components/PublishCard";
 import { useProvider, useTtsNeedsSetup } from "../components/TtsFields";
 import { TemplateRows } from "../components/TemplateRows";
 import { api, type MusicCatalog } from "../lib/api";
@@ -27,8 +27,8 @@ const STEPS: { id: StepId; title: string; hint: string }[] = [
   { id: "voice", title: "Озвучка", hint: "Сервис, голос, языки" },
   { id: "texts", title: "Тексты в ролике", hint: "Призывы в начале, середине, конце" },
   { id: "video", title: "Видеоряд", hint: "Из чего собирается картинка" },
-  { id: "look", title: "Оформление", hint: "Субтитры, подписка, копии, музыка" },
-  { id: "publish", title: "Выкладка", hint: "Каналы, соавторы, обложки, даты" },
+  { id: "look", title: "Оформление", hint: "Субтитры, подписка, копии, обложка, название" },
+  { id: "publish", title: "Выкладка", hint: "Каналы, соавторы, даты" },
   { id: "summary", title: "Итог и пуск", hint: "Что получится и куда уйдёт" },
 ];
 
@@ -254,6 +254,7 @@ export function StepsPage() {
         </div>
       ),
     look: (
+      <div className="stack-lg">
       <div className="page-cards-2">
         <VideoOptionsCard
           copiesNote={
@@ -269,8 +270,24 @@ export function StepsPage() {
           <BrollIntroCard />
         )}
       </div>
+        <Card
+          title="Для YouTube"
+          description="Как готовятся обложка, название и описание ролика при выкладке."
+        >
+          {publishOn ? (
+            <PublishMaterials section={section} />
+          ) : (
+            <div className="notice small">
+              Нужны только при выкладке на YouTube — сейчас ролики остаются на компьютере. Включить выкладку:{" "}
+              <button type="button" className="link-btn" onClick={() => go("publish")}>
+                шаг «Выкладка»
+              </button>
+            </div>
+          )}
+        </Card>
+      </div>
     ),
-    publish: <PublishCard section={section} />,
+    publish: <PublishCard section={section} materials={false} />,
     summary: (
       <div className="stack-lg">
         {problems.length > 0 && (
@@ -365,9 +382,10 @@ export function StepsPage() {
                   value={
                     section === "slides"
                       ? settings.slides_publish_cover ? "генерируются по оригиналу (или по тексту)" : "название готовится, обложку ставишь сам"
-                      : settings.broll_publish_materials === "competitor" ? "переделка конкурента" : "с компа: папка обложек и файл названий"
+                      : settings.broll_publish_materials === "competitor" ? "переделка конкурента"
+                        : settings.broll_publish_thumbs.trim() ? "с компа: папка обложек и файл названий" : "без обложки · название из файла"
                   }
-                  onEdit={() => go("publish")}
+                  onEdit={() => go("look")}
                 />
                 <Row
                   label="Когда выходят"

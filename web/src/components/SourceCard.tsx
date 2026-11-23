@@ -251,7 +251,10 @@ export function useSource(section: Section) {
           <div className="muted small">
             {stats.map((c) => (
               <div key={c.url}>
-                {c.title}: переписано / в очереди {c.taken}, подходящих осталось ~{c.left}
+                <a href={c.url} target="_blank" rel="noreferrer" title={`Открыть канал: ${c.url}`}>
+                  {c.title || c.url}
+                </a>
+                : переписано / в очереди {c.taken}, подходящих осталось ~{c.left}
               </div>
             ))}
           </div>

@@ -77,8 +77,11 @@ export function usePublishCount(section: PublishSection = "broll"): number {
  *  Каналы (профили) общие для разделов, галочки «куда» и «соавтор» — у каждого раздела свои. */
 export function PublishCard({
   section = "broll",
+  materials = true,
 }: {
   section?: PublishSection;
+  /** false — обложка и название показываются отдельно (шаг «Оформление» в «Генерации по шагам») */
+  materials?: boolean;
 }) {
   const { settings: all, update: updateAll } = useLoadedSettings();
   const K = keys(section);
@@ -665,197 +668,8 @@ export function PublishCard({
               );
             })()}
 
-            <div className="pub-divider" />
-            {slides ? (
-              <div className="stack">
-                <Toggle
-                  checked={all.slides_publish_cover}
-                  onChange={(v) => updateAll({ slides_publish_cover: v })}
-                  label="Генерировать обложку"
-                  description="Выключено — ролик выкладывается без обложки, поставишь её сам в Studio. Название и описание готовятся всё равно."
-                />
-                <Disclosure
-                  id="slides-publish-materials"
-                  summary="Название, описание и обложка — настройки и как готовятся"
-                >
-                  <div className="stack">
-                    <div className="notice small">
-                      <b>Название</b> — по названию оригинала (ролика из
-                      рерайта): несколько вариантов другими словами с тем же
-                      крючком (капслок, «!», «ШОК» — где уместно) и ключевым
-                      словом для поиска в начале; нейросеть выбирает лучший.{" "}
-                      <b>Обложка</b> — по обложке оригинала: те же композиция и
-                      подача, другие люди и текст на языке ролика; несколько
-                      вариантов, нейросеть выбирает лучший (все — в папке
-                      ролика, «обложки»). Ролик не из рерайта — название и
-                      обложку нейросеть придумает по тексту.
-                      <b> Описание</b> — призыв ниже, затем главы с тайм-кодами
-                      и источники (у каждой копии свои).
-                    </div>
-                    <Field
-                      label="Призыв в начале описания"
-                      hint="Первым абзацем, крупно (ЗАГЛАВНЫМИ и с эмодзи). Переводится на язык ролика."
-                    >
-                      <Textarea
-                        value={all.slides_publish_desc_cta}
-                        onChange={(v) =>
-                          updateAll({ slides_publish_desc_cta: v })
-                        }
-                        rows={2}
-                      />
-                    </Field>
-                    <Field
-                      label="Вариантов названия"
-                      hint="Нейросеть пишет столько вариантов, отдельный шаг выбирает лучший"
-                    >
-                      <NumberInput
-                        value={all.slides_publish_title_variants}
-                        onChange={(v) =>
-                          updateAll({ slides_publish_title_variants: v })
-                        }
-                        min={1}
-                        max={8}
-                      />
-                    </Field>
-                    {all.slides_publish_cover && <CoverSettingsFields />}
-                    <div className="muted small">
-                      Промпты названия и обложки:{" "}
-                      <button
-                        type="button"
-                        className="link-btn"
-                        onClick={() => goTo("settings", "cover-prompts")}
-                      >
-                        Настройки → Промпты названий и обложек
-                      </button>
-                    </div>
-                  </div>
-                </Disclosure>
-              </div>
-            ) : (
-              <div className="stack">
-                <Field label="Обложка и название">
-                  <div className="provider-picker" role="radiogroup">
-                    {[
-                      [
-                        "files",
-                        "Взять обложки и названия с компа",
-                        "Папка обложек и файл названий — случайные, без повторов до конца круга.",
-                      ],
-                      [
-                        "competitor",
-                        "Переделать конкурента",
-                        "Обложка ролика-оригинала (из рерайта) переделывается: тот же стиль и подача, другой ракурс, люди и текст. Название — кликбейтный рерайт названия оригинала по смыслу. Ролик не из рерайта — придумаются по тексту рассказа.",
-                      ],
-                    ].map(([id, label, text]) => {
-                      const on =
-                        (all.broll_publish_materials || "files") === id;
-                      return (
-                        <button
-                          key={id}
-                          type="button"
-                          role="radio"
-                          aria-checked={on}
-                          className={`provider ${on ? "active" : ""}`}
-                          onClick={() =>
-                            updateAll({ broll_publish_materials: id })
-                          }
-                        >
-                          <span className="radio" />
-                          <span className="provider-text">
-                            <span className="provider-name">{label}</span>
-                            <span className="muted small">{text}</span>
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </Field>
-                {all.broll_publish_materials === "competitor" ? (
-                  <>
-                    <Field
-                      label="Файл описаний"
-                      hint="Описания универсальные — берутся из файла: пункты «1. Описание…», по кругу без повторов. На другом языке ролика — переводятся."
-                    >
-                      <PathInput
-                        value={settings.broll_publish_descs}
-                        onChange={(v) => update({ broll_publish_descs: v })}
-                        kind="text"
-                        title="Описания"
-                      />
-                    </Field>
-                    <Disclosure
-                      id="broll-publish-competitor"
-                      summary="Настройки генерации обложки и названия"
-                    >
-                      <div className="stack">
-                        <Field
-                          label="Вариантов названия"
-                          hint="Нейросеть пишет столько вариантов, отдельный шаг выбирает лучший"
-                        >
-                          <NumberInput
-                            value={all.slides_publish_title_variants}
-                            onChange={(v) =>
-                              updateAll({ slides_publish_title_variants: v })
-                            }
-                            min={1}
-                            max={8}
-                          />
-                        </Field>
-                        <CoverSettingsFields />
-                        <div className="muted small">
-                          Общие со «Стоковыми слайдами». Промпты названия и
-                          обложки:{" "}
-                          <button
-                            type="button"
-                            className="link-btn"
-                            onClick={() => goTo("settings", "cover-prompts")}
-                          >
-                            Настройки → Промпты названий и обложек
-                          </button>
-                        </div>
-                      </div>
-                    </Disclosure>
-                  </>
-                ) : (
-                  <div className="grid grid-2">
-                    <Field
-                      label="Папка обложек"
-                      hint="Случайная, без повторов: использованная получает «✓ » в имени, круг пройден — пометки снимаются"
-                      span
-                    >
-                      <PathInput
-                        value={settings.broll_publish_thumbs}
-                        onChange={(v) => update({ broll_publish_thumbs: v })}
-                        kind="folder"
-                        title="Обложки"
-                      />
-                    </Field>
-                    <Field
-                      label="Файл названий"
-                      hint="Пункты «1. Название», «2. …» — случайное, без повторов до конца круга"
-                    >
-                      <PathInput
-                        value={settings.broll_publish_titles}
-                        onChange={(v) => update({ broll_publish_titles: v })}
-                        kind="text"
-                        title="Названия"
-                      />
-                    </Field>
-                    <Field
-                      label="Файл описаний"
-                      hint="Пункты «1. Описание…» (можно в несколько строк) — так же по кругу"
-                    >
-                      <PathInput
-                        value={settings.broll_publish_descs}
-                        onChange={(v) => update({ broll_publish_descs: v })}
-                        kind="text"
-                        title="Описания"
-                      />
-                    </Field>
-                  </div>
-                )}
-              </div>
-            )}
+            {materials && <div className="pub-divider" />}
+            {materials && <PublishMaterials section={section} />}
 
             <div className="pub-divider" />
             <div className="grid grid-3">
@@ -975,5 +789,207 @@ export function PublishCard({
         )}
       </div>
     </Card>
+  );
+}
+
+/** Обложка и название ролика (как готовятся при выкладке). В «Генерации по шагам» — на шаге «Оформление»,
+ *  на страницах разделов — внутри карточки выкладки. Ключи настроек те же, шаблоны не меняются. */
+export function PublishMaterials({ section = "broll" }: { section?: PublishSection }) {
+  const { settings: all, update: updateAll } = useLoadedSettings();
+  const settings = all;
+  const update = updateAll;
+  const slides = section === "slides";
+  return (
+
+    slides ? (
+      <div className="stack">
+        <Toggle
+          checked={all.slides_publish_cover}
+          onChange={(v) => updateAll({ slides_publish_cover: v })}
+          label="Генерировать обложку"
+          description="Выключено — ролик выкладывается без обложки, поставишь её сам в Studio. Название и описание готовятся всё равно."
+        />
+        <Disclosure
+          id="slides-publish-materials"
+          summary="Название, описание и обложка — настройки и как готовятся"
+        >
+          <div className="stack">
+            <div className="notice small">
+              <b>Название</b> — по названию оригинала (ролика из
+              рерайта): несколько вариантов другими словами с тем же
+              крючком (капслок, «!», «ШОК» — где уместно) и ключевым
+              словом для поиска в начале; нейросеть выбирает лучший.{" "}
+              <b>Обложка</b> — по обложке оригинала: те же композиция и
+              подача, другие люди и текст на языке ролика; несколько
+              вариантов, нейросеть выбирает лучший (все — в папке
+              ролика, «обложки»). Ролик не из рерайта — название и
+              обложку нейросеть придумает по тексту.
+              <b> Описание</b> — призыв ниже, затем главы с тайм-кодами
+              и источники (у каждой копии свои).
+            </div>
+            <Field
+              label="Призыв в начале описания"
+              hint="Первым абзацем, крупно (ЗАГЛАВНЫМИ и с эмодзи). Переводится на язык ролика."
+            >
+              <Textarea
+                value={all.slides_publish_desc_cta}
+                onChange={(v) =>
+                  updateAll({ slides_publish_desc_cta: v })
+                }
+                rows={2}
+              />
+            </Field>
+            <Field
+              label="Вариантов названия"
+              hint="Нейросеть пишет столько вариантов, отдельный шаг выбирает лучший"
+            >
+              <NumberInput
+                value={all.slides_publish_title_variants}
+                onChange={(v) =>
+                  updateAll({ slides_publish_title_variants: v })
+                }
+                min={1}
+                max={8}
+              />
+            </Field>
+            {all.slides_publish_cover && <CoverSettingsFields />}
+            <div className="muted small">
+              Промпты названия и обложки:{" "}
+              <button
+                type="button"
+                className="link-btn"
+                onClick={() => goTo("settings", "cover-prompts")}
+              >
+                Настройки → Промпты названий и обложек
+              </button>
+            </div>
+          </div>
+        </Disclosure>
+      </div>
+    ) : (
+      <div className="stack">
+        <Field label="Обложка и название">
+          <div className="provider-picker" role="radiogroup">
+            {[
+              [
+                "files",
+                "Взять обложки и названия с компа",
+                "Папка обложек и файл названий — случайные, без повторов до конца круга. Без папки обложек — ролики без обложки.",
+              ],
+              [
+                "competitor",
+                "Переделать конкурента",
+                "Обложка ролика-оригинала (из рерайта) переделывается: тот же стиль и подача, другой ракурс, люди и текст. Название — кликбейтный рерайт названия оригинала по смыслу. Ролик не из рерайта — придумаются по тексту рассказа.",
+              ],
+            ].map(([id, label, text]) => {
+              const on =
+                (all.broll_publish_materials || "files") === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  role="radio"
+                  aria-checked={on}
+                  className={`provider ${on ? "active" : ""}`}
+                  onClick={() =>
+                    updateAll({ broll_publish_materials: id })
+                  }
+                >
+                  <span className="radio" />
+                  <span className="provider-text">
+                    <span className="provider-name">{label}</span>
+                    <span className="muted small">{text}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </Field>
+        {all.broll_publish_materials === "competitor" ? (
+          <>
+            <Field
+              label="Файл описаний"
+              hint="Описания универсальные — берутся из файла: пункты «1. Описание…», по кругу без повторов. На другом языке ролика — переводятся."
+            >
+              <PathInput
+                value={settings.broll_publish_descs}
+                onChange={(v) => update({ broll_publish_descs: v })}
+                kind="text"
+                title="Описания"
+              />
+            </Field>
+            <Disclosure
+              id="broll-publish-competitor"
+              summary="Настройки генерации обложки и названия"
+            >
+              <div className="stack">
+                <Field
+                  label="Вариантов названия"
+                  hint="Нейросеть пишет столько вариантов, отдельный шаг выбирает лучший"
+                >
+                  <NumberInput
+                    value={all.slides_publish_title_variants}
+                    onChange={(v) =>
+                      updateAll({ slides_publish_title_variants: v })
+                    }
+                    min={1}
+                    max={8}
+                  />
+                </Field>
+                <CoverSettingsFields />
+                <div className="muted small">
+                  Общие со «Стоковыми слайдами». Промпты названия и
+                  обложки:{" "}
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => goTo("settings", "cover-prompts")}
+                  >
+                    Настройки → Промпты названий и обложек
+                  </button>
+                </div>
+              </div>
+            </Disclosure>
+          </>
+        ) : (
+          <div className="grid grid-2">
+            <Field
+              label="Папка обложек"
+              hint="Случайная, без повторов: использованная получает «✓ » в имени, круг пройден — пометки снимаются. Пусто — ролики выкладываются без обложки."
+              span
+            >
+              <PathInput
+                value={settings.broll_publish_thumbs}
+                onChange={(v) => update({ broll_publish_thumbs: v })}
+                kind="folder"
+                title="Обложки"
+              />
+            </Field>
+            <Field
+              label="Файл названий"
+              hint="Пункты «1. Название», «2. …» — случайное, без повторов до конца круга"
+            >
+              <PathInput
+                value={settings.broll_publish_titles}
+                onChange={(v) => update({ broll_publish_titles: v })}
+                kind="text"
+                title="Названия"
+              />
+            </Field>
+            <Field
+              label="Файл описаний"
+              hint="Пункты «1. Описание…» (можно в несколько строк) — так же по кругу"
+            >
+              <PathInput
+                value={settings.broll_publish_descs}
+                onChange={(v) => update({ broll_publish_descs: v })}
+                kind="text"
+                title="Описания"
+              />
+            </Field>
+          </div>
+        )}
+      </div>
+    )
   );
 }

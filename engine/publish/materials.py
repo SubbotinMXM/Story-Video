@@ -72,11 +72,13 @@ def thumbnails(folder: Path) -> list[Path]:
 
 
 def check(thumbs_dir: str, titles_file: str, descs_file: str) -> None:
-    """Проверка при запуске (до рерайта и озвучки): папка и файлы есть и не пустые."""
-    for raw, what in ((thumbs_dir, "Папка обложек"), (titles_file, "Файл названий"), (descs_file, "Файл описаний")):
+    """Проверка при запуске (до рерайта и озвучки): папка и файлы есть и не пустые.
+    Папка обложек необязательна: пусто — ролики выкладываются без обложки."""
+    for raw, what in ((titles_file, "Файл названий"), (descs_file, "Файл описаний")):
         if not str(raw or "").strip():
             raise ValueError(f"Выкладка на YouTube: не указан путь — {what}")
-    thumbnails(Path(thumbs_dir).expanduser())
+    if str(thumbs_dir or "").strip():  # папка не указана — ролики выходят без обложки (так задумано)
+        thumbnails(Path(thumbs_dir).expanduser())
     read_numbered(Path(titles_file).expanduser(), "названий")
     read_numbered(Path(descs_file).expanduser(), "описаний")
 
@@ -101,13 +103,17 @@ def pick(thumbs_dir: str, titles_file: str, descs_file: str, *, rng: random.Rand
     rng = rng or random.Random()
     warnings: list[str] = []
     with LOCK:
-        try:
-            thumb = str(_pick_thumbnail(Path(thumbs_dir).expanduser(), rng))
-        except (ValueError, OSError) as exc:
-            # обложки нет — ролик всё равно выходит (название, описание, дата), а в итогах — предупреждение
-            thumb = ""
-            warnings.append(f"{COVER_MISSING} ({exc}) — ролик выложен без обложки, поставь её сам в Studio")
-            log(f"Выкладка: обложку взять не из чего ({exc}) — выкладываю без неё")
+        thumb = ""
+        if not str(thumbs_dir or "").strip():
+            # папку обложек не указали — без обложки по замыслу: не предупреждение и не доделка
+            log("Выкладка: папка обложек не указана — ролик выйдет без обложки")
+        else:
+            try:
+                thumb = str(_pick_thumbnail(Path(thumbs_dir).expanduser(), rng))
+            except (ValueError, OSError) as exc:
+                # обложки нет — ролик всё равно выходит (название, описание, дата), а в итогах — предупреждение
+                warnings.append(f"{COVER_MISSING} ({exc}) — ролик выложен без обложки, поставь её сам в Studio")
+                log(f"Выкладка: обложку взять не из чего ({exc}) — выкладываю без неё")
         titles_path, descs_path = Path(titles_file).expanduser(), Path(descs_file).expanduser()
         title = _pick_item(titles_path, read_numbered(titles_path, "названий"), rng)
         desc = _pick_item(descs_path, read_numbered(descs_path, "описаний"), rng)

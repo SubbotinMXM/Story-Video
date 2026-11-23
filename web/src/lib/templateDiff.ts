@@ -149,28 +149,29 @@ function defs(section: TemplateSection): Def[] {
     { key: `${p}_keep`, step: "publish", label: "Оставлять ролик на компьютере", fmt: onOff },
     { key: `${p}_comment`, step: "publish", label: "Закреплённый комментарий", fmt: text },
   );
+  // обложка и название — на шаге «Оформление» (ключи настроек прежние, шаблоны совместимы)
   if (section === "broll") {
     out.push(
       {
         key: "broll_publish_materials",
-        step: "publish",
+        step: "look",
         label: "Обложки и названия",
         fmt: (v) => (v === "competitor" ? "переделка конкурента" : "с компьютера: папка обложек и файл названий"),
       },
-      { key: "broll_publish_thumbs", step: "publish", label: "Папка обложек", fmt: path },
-      { key: "broll_publish_titles", step: "publish", label: "Файл названий", fmt: path },
-      { key: "broll_publish_descs", step: "publish", label: "Файл описаний", fmt: path },
+      { key: "broll_publish_thumbs", step: "look", label: "Папка обложек", fmt: (v) => (String(v ?? "").trim() ? path(v) : "не указана — без обложки") },
+      { key: "broll_publish_titles", step: "look", label: "Файл названий", fmt: path },
+      { key: "broll_publish_descs", step: "look", label: "Файл описаний", fmt: path },
     );
   } else {
     out.push(
-      { key: "slides_publish_cover", step: "publish", label: "Обложка генерируется", fmt: onOff },
-      { key: "slides_publish_title_variants", step: "publish", label: "Вариантов названия", fmt: num },
-      { key: "slides_publish_desc_cta", step: "publish", label: "Призыв в описании", fmt: text },
+      { key: "slides_publish_cover", step: "look", label: "Обложка генерируется", fmt: onOff },
+      { key: "slides_publish_title_variants", step: "look", label: "Вариантов названия", fmt: num },
+      { key: "slides_publish_desc_cta", step: "look", label: "Призыв в описании", fmt: text },
     );
   }
   out.push(
-    { key: "cover_model", step: "publish", label: "Модель обложек", fmt: (v) => String(v || "") || "по умолчанию" },
-    { key: "cover_variants", step: "publish", label: "Вариантов обложки", fmt: num },
+    { key: "cover_model", step: "look", label: "Модель обложек", fmt: (v) => String(v || "") || "по умолчанию" },
+    { key: "cover_variants", step: "look", label: "Вариантов обложки", fmt: num },
   );
   return out;
 }

@@ -190,3 +190,35 @@ class ShortfallEndpointTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LinkThenChannelTest(unittest.TestCase):
+    """24.11: сначала 1–2 ролика по отдельным ссылкам, потом весь канал — канал их не берёт повторно
+    (и пока задача по ссылке в очереди, и после рерайта, даже если карточку задачи уже удалили)."""
+
+    def setUp(self) -> None:
+        write_json(ch.FILE, {})
+        self.videos = [vid(str(i), 100_000 - i * 1000, 3 + i) for i in range(5)]
+
+    def test_channel_skips_videos_sent_by_link(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from server import app as appmod
+
+        one, two = self.videos[0].id, self.videos[1].id
+        jobs = [{"id": f"L{n}", "kind": "rewrite", "params": {"url": f"https://www.youtube.com/watch?v={v}&t=5s"}}
+                for n, v in enumerate((one, two))]
+        with mock.patch.object(appmod, "_enqueue", lambda items: jobs):
+            r = TestClient(appmod.app).post("/api/jobs", json=[{"kind": "rewrite", "params": j["params"]} for j in jobs])
+        self.assertEqual(r.status_code, 200)
+
+        def pick(states):
+            with mock.patch.object(ch, "list_channel", lambda url, keys: ("UCx", "Конкурент", list(self.videos))):
+                return [v.id for v in ch.pick("https://youtube.com/@k", 10, section="slides", keys=[],
+                                              jobs=states)["videos"]]
+
+        self.assertNotIn(one, pick({"L0": "queued", "L1": "running"}), "по ссылке в очереди — канал не берёт")
+        ch.mark_done(one)
+        ch.mark_done(two)
+        got = pick({})  # карточки задач удалены — переписанные всё равно заняты
+        self.assertEqual(set(got), {v.id for v in self.videos[2:]})

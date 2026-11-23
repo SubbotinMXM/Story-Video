@@ -695,7 +695,8 @@ class BrollCompetitorTest(unittest.TestCase):
         self.assertEqual(_publish_opts({**self.cfg, "royaltechno_api_key": ""}, "broll")["materials"], "competitor")
         with self.assertRaisesRegex(ValueError, "Файл описаний"):
             _publish_opts({**self.cfg, "broll_publish_descs": ""}, "broll")
-        with self.assertRaisesRegex(ValueError, "Папка обложек"):
+        # «с компа»: папка обложек необязательна (пусто — без обложки), а файл названий нужен
+        with self.assertRaisesRegex(ValueError, "Файл названий"):
             _publish_opts({**self.cfg, "broll_publish_materials": "files"}, "broll")
 
     def test_generates_title_cover_and_takes_description(self) -> None:

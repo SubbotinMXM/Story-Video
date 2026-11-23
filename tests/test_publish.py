@@ -63,12 +63,34 @@ class MaterialsTests(unittest.TestCase):
         self.assertEqual(sorted(titles), ["Второе", "Первое", "Третье"])
 
     def test_check_reports_missing_inputs(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Папка обложек"):
-            materials.check("", str(self.titles), str(self.descs))
+        with self.assertRaisesRegex(ValueError, "Нет папки обложек"):
+            materials.check(str(self.tmp / "нет такой"), str(self.titles), str(self.descs))
+        with self.assertRaisesRegex(ValueError, "Файл названий"):
+            materials.check(str(self.thumbs), "", str(self.descs))
         empty = self.tmp / "пусто.txt"
         empty.write_text("просто текст без номеров", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "нет пунктов"):
             materials.check(str(self.thumbs), str(empty), str(self.descs))
+
+
+class NoCoverFolderTest(unittest.TestCase):
+    """24.11: рассказы без обложки — папку обложек не указали, ролики выходят без неё, без предупреждений и доделок."""
+
+    setUp = MaterialsTests.setUp
+
+    def test_empty_folder_means_no_cover_by_design(self) -> None:
+        materials.check("", str(self.titles), str(self.descs))  # запуск не падает
+        m = materials.pick("", str(self.titles), str(self.descs), rng=random.Random(3))
+        self.assertEqual(m.thumbnail, "")
+        self.assertEqual(m.warnings, (), "без папки — не «⚠ Обложки нет»")
+        self.assertTrue(m.title)
+
+    def test_folder_given_but_empty_still_warns(self) -> None:
+        empty = self.tmp / "пустая"
+        empty.mkdir()
+        m = materials.pick(str(empty), str(self.titles), str(self.descs), rng=random.Random(4))
+        self.assertEqual(m.thumbnail, "")
+        self.assertTrue(m.warnings and m.warnings[0].startswith(materials.COVER_MISSING))
 
 
 class ScheduleTests(unittest.TestCase):
