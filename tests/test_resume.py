@@ -258,3 +258,37 @@ def _wait(cond, timeout: float = 5.0) -> None:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScheduledRetrySurvivesRestartTest(unittest.TestCase):
+    """23.11: задачи, ждущие повтора по расписанию (лимит обложек YouTube), после обычного закрытия
+    программы отменялись — пропали бы молча. Теперь ждут дальше, причина и время видны в журнале."""
+
+    def test_waiting_job_stays_queued_with_reason_and_time(self) -> None:
+        import json as _json
+        import time as _time
+
+        from server import jobs as jobs_mod
+
+        def builder(kind, params, state):
+            return "Доделать", lambda job, progress, cancel: {"summary": "ok"}
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            jobs_mod, "JOBS_FILE", Path(tmp) / "jobs.json"
+        ), mock.patch.object(jobs_mod, "DATA_DIR", Path(tmp)):
+            later = _time.time() + 3600
+            base = {"kind": "fixvideo", "title": "Доделать", "params": {}, "attempts": 1,
+                    "created": _time.time(), "started": _time.time()}
+            (Path(tmp) / "jobs.json").write_text(_json.dumps([
+                {**base, "id": "wait1", "status": "queued", "message": "лимит обложек — поставлю завтра",
+                 "state": {"retry_at": later}},
+                {**base, "id": "plain1", "status": "queued", "message": "В очереди", "state": {}, "started": None},
+            ]), encoding="utf-8")
+            m = jobs_mod.JobManager(builder)
+            w, p = m._find("wait1"), m._find("plain1")
+            assert w is not None and p is not None
+            self.assertEqual(w.status, jobs_mod.QUEUED, "ждущая повтора отменилась при закрытии")
+            self.assertEqual(w.message, "лимит обложек — поставлю завтра", "причина ожидания потерялась")
+            self.assertAlmostEqual(w.public()["retry_at"], later, places=0)
+            self.assertEqual(p.status, jobs_mod.CANCELLED, "обычная очередь при закрытии — как раньше")
+            self.assertIsNone(p.public()["retry_at"])

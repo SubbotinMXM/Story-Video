@@ -208,6 +208,10 @@ def apply_and_restart(manager, *, restart_fn=restart) -> dict:
     _update_state(last_applied=time.time())
     try:
         manager._save()
+        from server.jobs import QUEUED, RUNNING, mark_resume
+
+        with manager._lock:  # идущие и ждущие задачи после перезапуска продолжатся сами
+            mark_resume([j.id for j in manager._jobs if j.status in (QUEUED, RUNNING)])
     except Exception:  # noqa: BLE001
         pass
     restart_fn()

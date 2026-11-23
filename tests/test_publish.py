@@ -1356,7 +1356,7 @@ class SafeguardsTest(unittest.TestCase):
         job = mock.MagicMock(playlist_hint=["Истории на ночь"])
         with mock.patch.object(youtube, "_act", lambda c=None: None), \
                 mock.patch.object(human_mod, "click", lambda *a, **k: None), \
-                mock.patch.object(youtube, "_pick_playlist", lambda p, c, trigger=None, want=None: []):
+                mock.patch.object(youtube, "_pick_playlist", lambda p, c, trigger=None, want=None, create="": []):
             notes = youtube._audit_playlist(page, "https://youtu.be/abcdefghijk", job, None)
         self.assertTrue(any("поставил" in n for n in notes), notes)
 
@@ -1770,3 +1770,153 @@ class FixVideoTest(unittest.TestCase):
     def test_nothing_to_do(self) -> None:
         notes, pick = self._run("истории", "истории")
         self.assertIn("доделывать нечего", notes[0])
+
+
+class RuUploadLimitTest(unittest.TestCase):
+    """23.11: русская Studio пишет о суточном лимите без слова «лимит», окно серое — шаг «название» падал по
+    таймауту, а программа повторяла выкладку каждый час (10 попыток). Теперь это UploadLimit на сутки."""
+
+    TEXT = ("Информация Название (обязательное поле) Я ПЛАКАЛА Загрузка недоступна. Загрузить это видео можно будет "
+            "через 24 часа. Если вы хотите добавлять больше видео в день, пройдите проверку.")
+
+    class _Loc:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def inner_text(self, timeout: int = 0) -> str:
+            return self.text
+
+    class _Page:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def locator(self, sel: str):
+            return RuUploadLimitTest._Loc(self.text)
+
+    def test_russian_limit_text_detected(self) -> None:
+        with self.assertRaises(youtube.UploadLimit):
+            youtube._check_dialog_problems(self._Page(self.TEXT))
+
+    def test_ordinary_dialog_is_not_limit(self) -> None:
+        youtube._check_dialog_problems(self._Page("Информация Название Описание Плейлисты Загрузка завершена"))
+
+    def test_failed_step_becomes_limit(self) -> None:
+        from engine.publish import studio_kit
+
+        page = self._Page(self.TEXT)
+        with mock.patch.object(studio_kit, "diagnose", side_effect=AssertionError("лимит — не снимок вёрстки")), \
+                mock.patch.object(studio_kit, "no_connection", return_value=""):
+            with self.assertRaises(youtube.UploadLimit):
+                with studio_kit.step(page, "название"):
+                    raise TimeoutError("Locator.click: Timeout 15000ms exceeded.")
+
+
+class ForYouPlaylistTest(unittest.TestCase):
+    """Нет ни одного плейлиста на канале — программа создаёт «Для вас» на языке роликов, один раз."""
+
+    def test_names_by_language(self) -> None:
+        self.assertEqual(registry.for_you("ru"), "Для вас")
+        self.assertEqual(registry.for_you("it"), "Per te")
+        self.assertEqual(registry.for_you("pt-BR"), "Para você")
+        self.assertEqual(registry.for_you(""), "For you")
+        self.assertEqual(registry.for_you("xx"), "For you")
+
+    def test_only_when_channel_has_none(self) -> None:
+        empty = registry.Channel(id="UC1", name="a", language="pl")
+        self.assertEqual(empty.new_playlist(), "Dla Ciebie")
+        self.assertEqual(empty.new_playlist("ro"), "Pentru tine", "язык ролика важнее языка канала")
+        self.assertEqual(registry.Channel(id="UC2", name="b", playlists=["x"]).new_playlist("ru"), "")
+        self.assertEqual(registry.Channel(id="UC3", name="c", playlists=["x", "y"]).new_playlist("ru"), "",
+                         "несколько — не создаём")
+
+    def test_created_note_is_parsed(self) -> None:
+        notes = ["без обложки", f"{youtube.PLAYLIST_CREATED} «Per te» (на канале не было ни одного) — …"]
+        self.assertEqual(youtube.created_playlist(notes), "Per te")
+        self.assertEqual(youtube.created_playlist(["плейлистов на канале 2 — …"]), "")
+
+
+class CoverVerifiedTest(unittest.TestCase):
+    """23.11: на №37 обложка «выбиралась», но не дозагружалась — программа молчала. Теперь проверка по факту."""
+
+    def _page(self, states):
+        page = mock.MagicMock()
+        seq = iter(states)
+        page.evaluate.side_effect = lambda js, arg=None: next(seq, states[-1])
+        return page
+
+    def test_wait_reads_custom_thumb(self) -> None:
+        self.assertTrue(youtube._wait_custom_thumb(self._page([{"src": "https://i9.ytimg.com/x.jpg"}]), timeout=0))
+        self.assertFalse(youtube._wait_custom_thumb(self._page([{"src": ""}]), timeout=0))
+        self.assertIsNone(youtube._wait_custom_thumb(self._page([None]), timeout=5), "блока нет — не ждём зря")
+
+    def test_plain_copy_has_simple_name(self) -> None:
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        src = d / "✓ Изображение ChatGPT 10 нояб. 2026 г., 11_47_55-9.png"
+        src.write_bytes(b"png")
+        out = youtube._plain_copy(src)
+        self.assertRegex(out.name, r"^cover-[0-9a-f]{10}\.png$")
+        self.assertEqual(out.read_bytes(), b"png")
+
+    def _audit(self, states, put):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        thumb = d / "c.png"
+        thumb.write_bytes(b"x")
+        job = mock.MagicMock(thumbnail=thumb)
+        page = self._page(states)
+        with mock.patch.object(youtube, "goto"), \
+                mock.patch.object(youtube, "_put_thumb_on_edit_page", return_value=put) as p, \
+                mock.patch("engine.publish.studio_kit.step", lambda pg, name: __import__("contextlib").nullcontext()), \
+                mock.patch.object(youtube, "THUMB_WAIT_SEC", 0):
+            with mock.patch.object(youtube.time, "monotonic", side_effect=[0, 100] * 20):
+                notes = youtube._audit_thumbnail(page, "https://youtu.be/abcdefghijk", job, None)
+        return notes, p
+
+    def test_audit_silent_when_cover_is_there(self) -> None:
+        notes, put = self._audit([{"src": "https://i9.ytimg.com/c.jpg"}], True)
+        self.assertEqual(notes, [])
+        put.assert_not_called()
+
+    def test_audit_puts_missing_cover(self) -> None:
+        notes, put = self._audit([{"src": ""}, {"src": "https://i9.ytimg.com/c.jpg"}], True)
+        put.assert_called_once()
+        self.assertTrue(any("поставил на странице ролика" in n for n in notes), notes)
+
+    def test_audit_failure_is_loud(self) -> None:
+        notes, _ = self._audit([{"src": ""}], False)
+        self.assertTrue(notes and notes[0].startswith(youtube.COVER_NOT_SET), notes)
+
+    def test_fix_queued_with_same_file_for_ready_covers(self) -> None:
+        from server.runners import fixes_for
+
+        res = {"p/UC1": {"status": "done", "url": "https://youtu.be/abcdefghijk", "thumbnail": "/x/c.png",
+                         "notes": [youtube.cover_not_set("не встала")]}}
+        with mock.patch("engine.publish.registry.resolve", return_value=[]):
+            out = fixes_for({"section": "broll"}, res, [])
+        self.assertEqual(out, [{"channel": "p/UC1", "url": "https://youtu.be/abcdefghijk",
+                                "cover": {"file": "/x/c.png"}, "playlist": False}])
+
+
+class ThumbLimitTest(unittest.TestCase):
+    """23.11, №37: «Развивайте свой канал… вскоре вы сможете добавлять больше своих значков в день» — суточный
+    лимит своих обложек. Ролик выходит без обложки с пометкой, доделка ждёт сутки (retry_at), а не молчит."""
+
+    RU = ("Развивайте свой канал Соблюдайте правила сообщества, публикуйте видео, и вскоре вы сможете добавлять "
+          "больше своих значков в день. Подробнее… ОК")
+
+    def _page(self, texts):
+        page = mock.MagicMock()
+        page.evaluate.return_value = texts
+        return page
+
+    def test_detected_ru_and_en(self) -> None:
+        self.assertTrue(youtube.thumb_limit_text(self._page(["Сведения", self.RU])))
+        self.assertTrue(youtube.thumb_limit_text(self._page(["Grow your channel … to add more custom thumbnails per day"])))
+        self.assertEqual(youtube.thumb_limit_text(self._page(["Выберите плейлисты Звезды истории ОК"])), "")
+
+    def test_limit_waits_a_day(self) -> None:
+        with self.assertRaises(youtube.ThumbLimit) as cm:
+            youtube._raise_if_thumb_limit(self._page([self.RU]))
+        self.assertGreater(cm.exception.retry_at, __import__("time").time() + 23 * 3600)
+        self.assertIsInstance(cm.exception, youtube.UploadLimit, "шаг Studio пропускает его как есть")

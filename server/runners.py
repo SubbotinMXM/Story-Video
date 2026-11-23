@@ -393,6 +393,8 @@ def _queue_publish(job: Job, publish: dict, params: dict, versions: list[tuple[s
     pub = {**publish, "folder": vers[0]["folder"], "files": vers[0]["files"], "language": vers[0]["language"],
            "versions": vers, "plan_id": str(params.get("publish_plan") or ""),
            "video_name": Path(vers[0]["files"][0][0]).stem, SETTINGS_KEY: params.get(SETTINGS_KEY)}
+    if params.get("source_url"):
+        pub["donor_url"] = str(params["source_url"])  # ролик-донор рерайта — в итоги выкладки
     if publish.get("section") == "slides":
         # оригинал рерайта (его название и обложка — образец для наших)
         pub.update(source_url=str(params.get("source_url") or ""), run_dir=str(params.get("_run_dir") or ""),
@@ -474,7 +476,11 @@ def _publish_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
 
     def run(job: Job, progress, cancel: CancelToken) -> dict[str, Any]:
         try:
-            return run_publish(req, job.state, job.save_state, cancel=cancel, progress=progress)
+            res = run_publish(req, job.state, job.save_state, cancel=cancel, progress=progress)
+            donor = str(params.get("donor_url") or params.get("source_url") or "")
+            if donor and isinstance(res, dict):
+                res["lines"] = [f"Ролик-донор (рерайт): {donor}", *(res.get("lines") or [])]
+            return res
         finally:
             # выложенные каналы, где не встала обложка или плейлист, — доделать сразу следом (а не руками в Studio)
             _queue_fixes(job, params)
@@ -506,9 +512,12 @@ def fixes_for(params: dict, results: dict, done: list[str], assign: dict | None 
                            if str(v.get("language") or "") == lang), None) or params.get("folder")
             cover = {"source_url": params.get("source_url") or "", "folder": folder, "language": lang or "ru",
                      "run_dir": params.get("run_dir") or ""}
+        elif no_cover and r.get("thumbnail"):
+            cover = {"file": r["thumbnail"]}  # обложка была готовая (рассказы) — ставим тот же файл
         if no_playlist:
             targets = resolve([key])
-            no_playlist = bool(targets) and len(targets[0].channel.upload_playlists()) == 1
+            ch = targets[0].channel if targets else None
+            no_playlist = ch is not None and (len(ch.upload_playlists()) == 1 or bool(ch.new_playlist()))
         if cover or no_playlist:
             out.append({"channel": key, "url": r["url"], "cover": cover, "playlist": bool(no_playlist)})
     return out
@@ -660,21 +669,33 @@ def _fixvideo_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
         raise ValueError("Нет ключа AdsPower (Настройки → AdsPower)")
     cover = params.get("cover") if isinstance(params.get("cover"), dict) else None
     want_playlist = bool(params.get("playlist"))
-    settings = _cover_settings(cfg) if cover else None
+    settings = _cover_settings(cfg) if cover and not cover.get("file") else None
     adspower = (_s(cfg, "adspower_api_key"), _s(cfg, "adspower_url"))
     t = targets[0]
 
     def run(job: Job, progress, cancel: CancelToken) -> dict[str, Any]:
         thumb = None
         lines: list[str] = []
-        if cover:
+        if cover and cover.get("file"):
+            # готовая обложка ролика (рассказы: обложка из папки обложек) — та же, что выбиралась при выкладке
+            thumb = Path(str(cover["file"]))
+            if not thumb.is_file():
+                raise ValueError(f"файла обложки нет: {thumb}")
+            lines.append(f"обложка — файл выкладки: {thumb.name}")
+        elif cover:
             thumb = Path(str(job.state.get("thumbnail") or ""))
             if not thumb.is_file():  # обложку генерируем один раз: повтор задачи не тратит генератор заново
                 thumb = _fix_cover(settings, cover, cancel, lambda p, m: progress(0.4 * p, f"Обложка: {m}"))
                 job.save_state(thumbnail=str(thumb))
-            lines.append(f"обложка: {thumb.name} (папка «{thumb.parent.name}»)")
+            donor = str(cover.get("source_url") or "")
+            if donor:
+                lines.append(f"Ролик-донор (рерайт): {donor}")
+            lines.append((f"обложка перерисована с обложки донора {donor}" if donor else
+                          "обложка придумана по тексту ролика") + f": {thumb.name} (папка «{thumb.parent.name}»)")
         playlists = t.channel.upload_playlists() if want_playlist else None
-        lines += run_fix_video(key, url, adspower, thumbnail=thumb, playlists=playlists, cancel=cancel,
+        create = t.channel.new_playlist() if want_playlist else ""  # плейлистов нет — создать «Для вас»
+        lines += run_fix_video(key, url, adspower, thumbnail=thumb, playlists=playlists, create_playlist=create,
+                               only_missing=bool(cover and cover.get("only_missing")), cancel=cancel,
                                progress=lambda p, m: progress(0.4 + 0.6 * p, m))
         return {"summary": f"Ролик доделан: {t.label()} — {url}", "lines": lines}
 
@@ -697,12 +718,20 @@ def _fix_cover(settings, cover: dict, cancel, progress) -> Path:
             story = path.read_text(encoding="utf-8")
             break
     source = str(cover.get("source_url") or "")
+    if not source:
+        raise ValueError("у ролика нет ролика-донора — обложка делается только перерисовкой обложки конкурента")
     title, image = "", None
     if source:
         title, image, _ = cv.youtube_original(source)
+        if image is None:  # обложку только перерисовываем с донора — по тексту не придумываем; повтор позже
+            raise RuntimeError(f"обложка ролика-донора временно не скачивается ({source}) — повторю позже")
     lang = str(cover.get("language") or "ru")
     res = cv.make_cover(settings, folder / COVER_DIR, reference=image, language=lang, story=story, title=title,
                         cancel=cancel, progress=progress)
+    if not res.acceptable:
+        # редактор и после повторного разбора считает лучший вариант слабее образца — такую на ролик не ставим
+        raise RuntimeError(f"обложка вышла слабее образца донора ({'; '.join(res.notes)[:300]}) — варианты в папке "
+                           f"«{(folder / COVER_DIR)}», ролик не тронут; «Продолжить» сгенерирует заново")
     return Path(res.path)
 
 
@@ -1394,7 +1423,8 @@ def _scan_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
         channels = scan_profile(key, url, pid, headless=True, cancel=cancel, progress=progress, env=env)
         registry.set_channels(pid, channels, studio=env or None)
         names = [f"{c.name} ({c.handle})" for c in channels]
-        bad = [f"{c.name}: плейлистов {len(c.playlists)} — нужен ровно один" for c in channels if len(c.playlists) != 1]
+        bad = [f"{c.name}: плейлистов {len(c.playlists)} — выбери, в какой класть ролики" for c in channels
+               if len(c.playlists) > 1 and not c.playlist]
         bad += [f"№{prof.number} {prof.name}: {w}" for w in env_warnings(env)]
         if env:
             names.append(f"Studio: язык {env.get('lang')}, {'12' if env.get('hour12') else '24'} ч, {env.get('tz')}, "
@@ -1573,7 +1603,8 @@ def _rewrite_job(cfg: dict, params: dict, state: dict) -> tuple[str, Any]:
                   SETTINGS_KEY: params.get(SETTINGS_KEY)}
         if section == "slides":
             follow["media_mode"] = params.get("media_mode")
-        lines = [f"Исходник: «{out.source.title}» — {out.source.words} слов",
+        lines = [f"Ролик-донор: {url}",
+                 f"Исходник: «{out.source.title}» — {out.source.words} слов",
                  f"Рерайт: {out.words} слов, язык {out.language}, промпт «{prompt.get('name')}»",
                  f"Писал: {out.engine_note}", *([out.review] if out.review else []), *[f"Призывы: {n}" for n in framing]]
         if params.get("review"):

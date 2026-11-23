@@ -324,3 +324,43 @@ class StubbornFieldTest(unittest.TestCase):
 
     def test_select_all_ignored_falls_back_to_backspace(self) -> None:
         self.assertEqual(self._run(False), "ПОГРУЗИТЕСЬ В МИР СПОКОЙНОГО СНА!")
+
+
+class NoticeJsInRealChromeTest(unittest.TestCase):
+    """_NOTICE_JS в настоящем Chrome: уведомление «ОК» закрываем, рабочие окна с кнопкой «ОК» — нет
+    (23.11: окно плейлистов русской Studio закрывается «ОК», его принимали за уведомление и закрывали)."""
+
+    PAGE = """<style>div,tp-yt-paper-dialog,ytcp-playlist-dialog{display:block;width:300px;height:120px}
+        button{width:60px;height:30px}</style>
+    <ytcp-playlist-dialog><tp-yt-paper-dialog role="dialog"><div id="playlists-list">
+        <ytcp-checkbox-lit>Звезды</ytcp-checkbox-lit><ytcp-checkbox-lit>истории</ytcp-checkbox-lit></div>
+        <button aria-label="ОК">ОК</button></tp-yt-paper-dialog></ytcp-playlist-dialog>
+    <div role="dialog" id="form"><input type="text"><button>OK</button></div>
+    <div role="dialog" id="pick"><div role="radio">а</div><div role="radio">б</div><button>OK</button></div>
+    %s"""
+    NOTICE = '<div role="dialog" id="note">Что нового <div role="checkbox">больше не показывать</div><button>Понятно</button></div>'
+
+    def _eval(self, html: str):
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self.skipTest("нет playwright")
+        with sync_playwright() as p:
+            try:
+                b = p.chromium.launch(channel="chrome", headless=True)
+            except Exception as exc:  # noqa: BLE001
+                self.skipTest(f"нет Chrome: {exc}")
+            try:
+                page = b.new_page()
+                page.set_content(html)
+                return page.evaluate(human._NOTICE_JS)
+            finally:
+                b.close()
+
+    def test_working_dialogs_with_ok_are_left_alone(self) -> None:
+        self.assertIsNone(self._eval(self.PAGE % ""), "окно плейлистов/формы/выбора — не уведомление")
+
+    def test_real_notice_is_still_dismissed(self) -> None:
+        hit = self._eval(self.PAGE % self.NOTICE)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit[2], "Понятно")

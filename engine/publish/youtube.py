@@ -36,6 +36,40 @@ class UploadLimit(StudioError):
         self.until = until
 
 
+class ThumbLimit(UploadLimit):
+    """YouTube: на канале исчерпан суточный лимит СВОИХ ОБЛОЖЕК («…вскоре вы сможете добавлять больше своих значков
+    в день»; 23.11, №37: по 10 роликов в день на канал). Ролик выкладывается без обложки, доделка ставит её
+    на следующий день (retry_at — очередь сама вернётся к задаче)."""
+
+    def __init__(self, message: str, until: float) -> None:
+        super().__init__(message, until)
+        self.retry_at = until
+
+
+THUMB_LIMIT_HOURS = 24
+_THUMB_LIMIT_RE = re.compile(r"больше своих значков|больше собственных значков|more custom thumbnails|"
+                             r"custom thumbnails (?:per|a|each) day|значк\w* в день", re.I)
+_DIALOG_TEXTS_JS = """() => [...document.querySelectorAll('ytcp-dialog, tp-yt-paper-dialog, [role=dialog], [role=alertdialog]')]
+    .filter(e => e.offsetParent !== null || getComputedStyle(e).position === 'fixed')
+    .map(e => (e.innerText || '').replace(/\\s+/g, ' ').trim()).filter(Boolean)"""
+
+
+def thumb_limit_text(page) -> str:
+    """Текст окна Studio о суточном лимите своих обложек, если оно на экране, иначе ''."""
+    try:
+        texts = page.evaluate(_DIALOG_TEXTS_JS) or []
+    except Exception:  # noqa: BLE001
+        return ""
+    return next((t for t in texts if _THUMB_LIMIT_RE.search(t)), "")
+
+
+def _raise_if_thumb_limit(page) -> None:
+    text = thumb_limit_text(page)
+    if text:
+        raise ThumbLimit(f"суточный лимит своих обложек на канале исчерпан (YouTube: «{text[:110]}») — "
+                         f"обложку поставлю завтра", time.time() + THUMB_LIMIT_HOURS * 3600)
+
+
 class NeedsUser(StudioError):
     """Окно, которое программа не проходит сама: вход, «подтвердите, что это вы», новые правила."""
 
@@ -61,6 +95,8 @@ class UploadJob:
     coauthors: list  # registry.Target — каналы-соавторы
     private_only: bool = False  # проверка: в конце «Private» + «Save» вместо запланированной публикации
     publish_now: bool = False  # выложить сразу («Public» + «Publish»), без расписания
+    # на канале нет ни одного плейлиста — создать этот («Для вас» на языке ролика) и положить ролик в него
+    new_playlist: str = ""
 
 
 @dataclass(frozen=True)
@@ -609,7 +645,11 @@ TITLE_MAX, DESCRIPTION_MAX = 100, 5000
 # загрузку не обрываем никогда: ждём, сколько нужно. Процент стоит 15 минут — подсвечиваем канал в очереди
 SLOW_SEC = 15 * 60
 _TZ = re.compile(r"GMT\s*([+-])(\d{1,2}):?(\d{2})?")
-_LIMIT_WORDS = ("daily upload limit", "upload limit", "limit reached", "лимит")
+# 23.11: русская Studio пишет без слова «лимит» — «Загрузка недоступна. Загрузить это видео можно будет через 24 часа.
+# Если вы хотите добавлять больше видео в день, пройдите проверку» (программа 10 раз подряд падала на «названии»)
+_LIMIT_WORDS = ("daily upload limit", "upload limit", "limit reached", "лимит", "загрузка недоступна",
+                "upload unavailable", "uploading is unavailable", "через 24 час", "in 24 hours",
+                "больше видео в день", "more videos per day", "upload more videos")
 
 
 _FIND_MARKED = """(() => { const walk = (root) => { const el = root.querySelector('[data-sv-file="1"]'); if (el) return el;
@@ -688,6 +728,64 @@ def cover_not_set(why: str) -> str:
     return f"{COVER_NOT_SET} ({why}) — ролик выложен без неё, поставь обложку сам в Studio"
 
 
+# своя обложка ролика: картинка в блоке «Загрузить файл» (ytcp-thumbnail-uploader). Нет своей — у картинки пустой
+# адрес; пока файл грузится — в блоке «Загрузка…» / «Uploading…». 23.11: на №37 обложка «выбиралась» (файл
+# подавался в поле), но так и не дозагружалась, а программа писала, что всё хорошо — теперь проверяем по факту.
+_CUSTOM_THUMB_JS = """(root) => { const scope = root ? document.querySelector(root) : document;
+    if (!scope) return null;
+    const u = scope.querySelector('ytcp-video-custom-still-editor ytcp-thumbnail-uploader') || scope.querySelector('ytcp-thumbnail-uploader');
+    if (!u) return null;
+    const img = u.querySelector('img#img-with-fallback');
+    const src = img ? (img.getAttribute('src') || '') : '';
+    return {src: src}; }"""
+THUMB_WAIT_SEC = 120
+
+
+def custom_thumb(page, root: str = "") -> bool | None:
+    """Стоит ли у ролика своя обложка (root — окно загрузки или вся страница ролика). None — блока не нашли."""
+    try:
+        st = page.evaluate(_CUSTOM_THUMB_JS, root or None)
+    except Exception:  # noqa: BLE001
+        return None
+    if st is None:
+        return None
+    return bool(st.get("src"))
+
+
+def _wait_custom_thumb(page, root: str = "", timeout: float = THUMB_WAIT_SEC) -> bool | None:
+    """Дождаться, пока выбранная обложка загрузится и появится в блоке (Studio грузит её отдельно от видео).
+    None — блока обложки на странице нет (другая вёрстка): судить не по чему, зря не ждём."""
+    end = time.monotonic() + timeout
+    misses = 0
+    while True:
+        st = custom_thumb(page, root)
+        if st:
+            return True
+        misses = misses + 1 if st is None else 0
+        if misses >= 3:
+            log("Studio: блок обложки не нашёлся — проверить, встала ли обложка, не по чему")
+            return None
+        if time.monotonic() >= end:
+            return False
+        page.wait_for_timeout(2000)
+
+
+def _plain_copy(thumbnail: Path) -> Path:
+    """Копия обложки с простым именем (cover-<…>.png): в именах файлов бывают «✓», неразрывные пробелы и запятые
+    («✓ Изображение ChatGPT 10 нояб. 2026 г., 11_47_55-9.png») — браузеру и Studio отдаём файл без них."""
+    import hashlib
+    import shutil
+    import tempfile
+
+    src = Path(thumbnail)
+    tag = hashlib.sha1(str(src.resolve()).encode()).hexdigest()[:10]
+    out = Path(tempfile.gettempdir()) / "story_video_covers" / f"cover-{tag}{src.suffix.lower() or '.png'}"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not out.is_file() or out.stat().st_size != src.stat().st_size or out.stat().st_mtime < src.stat().st_mtime:
+        shutil.copy2(src, out)
+    return out
+
+
 def _set_thumbnail(page, channel, thumbnail: Path, cancel) -> list[str]:
     """Обложка в окне загрузки. Не встала (файла нет, кнопки нет, Studio не приняла, канал не подтверждён) —
     ролик всё равно выкладываем: название, описание, плейлист, соавторы, дата; → строки-предупреждения."""
@@ -697,17 +795,29 @@ def _set_thumbnail(page, channel, thumbnail: Path, cancel) -> list[str]:
         return [cover_not_set(f"файла обложки нет: {thumbnail}")]
     try:
         with step(page, f"обложка {thumbnail.name}"):
-            _act(cancel)
-            how = human.choose_file(page, _THUMB_BUTTONS, thumbnail, what="обложка",
-                                    fallback_input=el(page, "thumbnail_input", state="attached"))
-            log(f"Studio {channel.handle}: обложка выбрана {how}")
-            page.wait_for_timeout(4000)
-            text = _dialog_text(page).lower()
-            if "verify" in text:
-                return [cover_not_set("канал не подтверждён по телефону — свои обложки YouTube разрешает после "
-                                      "подтверждения")]
-            if any(w in text for w in _THUMB_FAIL_WORDS):
-                return [cover_not_set("Studio не приняла файл обложки")]
+            plain = _plain_copy(thumbnail)
+            for attempt in (1, 2):
+                _act(cancel)
+                how = human.choose_file(page, _THUMB_BUTTONS, plain, what="обложка",
+                                        fallback_input=el(page, "thumbnail_input", state="attached"))
+                log(f"Studio {channel.handle}: обложка выбрана {how}")
+                page.wait_for_timeout(4000)
+                text = _dialog_text(page).lower()
+                if "verify" in text or ("подтверд" in text and "значк" in text):
+                    return [cover_not_set("канал не подтверждён по телефону — свои обложки YouTube разрешает после "
+                                          "подтверждения")]
+                if any(w in text for w in _THUMB_FAIL_WORDS):
+                    return [cover_not_set("Studio не приняла файл обложки")]
+                _raise_if_thumb_limit(page)
+                if _wait_custom_thumb(page, "ytcp-uploads-dialog") is not False:
+                    break
+                log(f"Studio {channel.handle}: обложка не появилась в окне за {THUMB_WAIT_SEC} с (попытка {attempt})")
+            else:
+                # окно загрузки не показало обложку — после сохранения _audit_thumbnail поставит её на странице ролика
+                log(f"Studio {channel.handle}: обложку в окне загрузки не видно — поставлю после сохранения")
+    except ThumbLimit as exc:
+        log(f"Studio {channel.handle}: {exc}")
+        return [cover_not_set(str(exc))]
     except StudioError as exc:
         log(f"Studio {channel.handle}: обложка не поставилась — выкладываю без неё ({exc})")
         return [cover_not_set(str(exc).split(". Снимок")[0][:200])]
@@ -855,6 +965,7 @@ def upload(cdp_url: str, channel, job: UploadJob, *, cancel: CancelToken | None 
                                               want=job.publish_at.date())
                 notes.append("видео уже было сохранено прошлой попыткой — повторно не загружал")
                 notes += _audit_playlist(page, draft_url, job, cancel)
+                notes += _audit_thumbnail(page, draft_url, job, cancel)
                 file_ok = _check_file_uploaded(page, channel.id, draft_url, job.title)
                 if not file_ok:
                     notes.append("не смог убедиться, что Studio приняла видеофайл — файл на компьютере оставлен")
@@ -897,7 +1008,10 @@ def upload(cdp_url: str, channel, job: UploadJob, *, cancel: CancelToken | None 
                 notes.append("без обложки — поставишь сам в Studio")
             try:
                 with step(page, "плейлист"):
-                    notes += _pick_playlist(page, cancel, want=list(job.playlist_hint or []))
+                    picked = _pick_playlist(page, cancel, want=list(job.playlist_hint or []), create=job.new_playlist)
+                    notes += picked
+                    if created_playlist(picked):
+                        job.playlist_hint = [created_playlist(picked)]  # заставка, подсказка и проверка — по нему
             except StudioError as exc:
                 # плейлист ещё раз проверяется и ставится после сохранения (_audit_playlist) — из-за него
                 # выкладку не роняем; обрыв связи — роняем (очередь подождёт VPN)
@@ -1008,6 +1122,7 @@ def upload(cdp_url: str, channel, job: UploadJob, *, cancel: CancelToken | None 
             _confirm_saved(page, url)
         with step(page, "проверка плейлиста на ролике"):
             notes += _audit_playlist(page, url, job, cancel)
+        notes += _audit_thumbnail(page, url, job, cancel)
         if not job.private_only and not job.publish_now:
             notes += _check_scheduled(page, expected_date, url, channel_id=channel.id, title=job.title,
                                       want=job.publish_at.date())
@@ -1507,12 +1622,69 @@ def _check_file_uploaded(page, channel_id: str, url: str, title: str) -> bool:
     return bool(row and _DURATION.search(row))
 
 
+def _put_thumb_on_edit_page(page, thumbnail: Path, cancel) -> bool:
+    """На странице уже выложенного ролика: выбрать обложку, дождаться её, сохранить. → встала ли (по странице)."""
+    from engine.publish.studio_kit import el
+
+    plain = _plain_copy(thumbnail)
+    for _attempt in (1, 2):
+        _act(cancel)
+        human.choose_file(page, _EDIT_THUMB_BUTTONS, plain, what="обложка",
+                          fallback_input=page.locator(_EDIT_THUMB_INPUT).first)
+        page.wait_for_timeout(3000)
+        _raise_if_thumb_limit(page)
+        if _wait_custom_thumb(page) is not False:
+            break
+    else:
+        return False
+    save = el(page, "video_save")
+    if save.get_attribute("aria-disabled") == "true":
+        return False
+    _act(cancel)
+    human.click(page, save)
+    page.wait_for_timeout(6000)
+    return True
+
+
+def _audit_thumbnail(page, url: str, job: UploadJob, cancel) -> list[str]:
+    """После сохранения — своя обложка на странице ролика есть? Нет (окно загрузки её «съело») — ставим здесь же
+    и перепроверяем после перезагрузки. Не вышло — пометка COVER_NOT_SET: по ней ставится доделка ролика."""
+    from engine.publish.studio_kit import step
+
+    if job.thumbnail is None or not Path(job.thumbnail).is_file() or not url:
+        return []
+    edit = f"{STUDIO}/video/{_video_id(url)}/edit"
+    with step(page, "проверка обложки на ролике"):
+        goto(page, edit)
+        page.locator("ytcp-video-metadata-playlists").first.wait_for(timeout=40000)
+        page.wait_for_timeout(4000)
+        if _wait_custom_thumb(page, timeout=20) is not False:
+            return []  # стоит (или блока нет — не по чему судить)
+    log(f"Studio: на ролике {url} нет своей обложки — ставлю на странице ролика")
+    try:
+        with step(page, "обложка на странице ролика"):
+            put = _put_thumb_on_edit_page(page, Path(job.thumbnail), cancel)
+            goto(page, edit)
+            page.locator("ytcp-video-metadata-playlists").first.wait_for(timeout=40000)
+            page.wait_for_timeout(4000)
+            ok = put and _wait_custom_thumb(page, timeout=30) is not False
+    except StudioError as exc:
+        if "нет связи" in str(exc):
+            raise
+        return [cover_not_set(f"не встала ни в окне загрузки, ни на странице ролика: {str(exc).split('. Снимок')[0][:120]}")]
+    if ok:
+        return ["обложка не встала в окне загрузки — поставил на странице ролика после сохранения"]
+    return [cover_not_set("не встала ни в окне загрузки, ни на странице ролика")]
+
+
 def _audit_playlist(page, url: str, job: UploadJob, cancel) -> list[str]:
     """После сохранения — прочитать плейлист на странице видео и, если он не стоит, поставить (14.11: на повторах
     плейлист снимался). Единственный плейлист канала должен быть выбран; не вышло — пометка, а не молчание."""
     from engine.publish.studio_kit import LayoutError
 
     names = [str(x).strip() for x in (job.playlist_hint or []) if str(x).strip()]
+    if not names and job.new_playlist:
+        names = [job.new_playlist]  # плейлистов не было: в окне загрузки создать не вышло — создаём здесь
     if len(names) != 1:
         return []  # несколько плейлистов / нет ни одного — это отдельная пометка при выборе
 
@@ -1532,7 +1704,7 @@ def _audit_playlist(page, url: str, job: UploadJob, cancel) -> list[str]:
     log(f"Studio: плейлист «{names[0]}» на ролике не стоит (поле: «{shown()[:40]}») — ставлю")
     trigger = page.locator("ytcp-video-metadata-playlists").first
     try:
-        notes = _pick_playlist(page, cancel, trigger=trigger, want=names)
+        notes = _pick_playlist(page, cancel, trigger=trigger, want=names, create=job.new_playlist)
         _act(cancel)
         human.click(page, page.locator("ytcp-button#save").first)
         page.wait_for_timeout(5000)
@@ -1569,7 +1741,7 @@ def _thumb_srcs(page) -> set[str]:
 
 
 def fix_video(cdp_url: str, channel, url: str, *, thumbnail: Path | None = None, playlists: list[str] | None = None,
-              cancel: CancelToken | None = None) -> list[str]:
+              create_playlist: str = "", only_missing: bool = False, cancel: CancelToken | None = None) -> list[str]:
     """Доделать уже выложенный ролик: поставить обложку и/или плейлист на странице ролика в Studio, сохранить и
     проверить, что встало (перечитать страницу). → строки для итогов. Ролик не удаляется и не перезаливается."""
     from engine.publish.studio_kit import el, set_channel, step
@@ -1579,6 +1751,8 @@ def fix_video(cdp_url: str, channel, url: str, *, thumbnail: Path | None = None,
         raise StudioError(f"не понял ссылку на ролик: {url}")
     set_channel(channel.handle or channel.id)
     names = [str(x).strip() for x in (playlists or []) if str(x).strip()]
+    if playlists is not None and not names and create_playlist:
+        names = [create_playlist]  # на канале нет плейлистов — создать «Для вас» (один раз) и поставить
     notes: list[str] = []
     edit = f"{STUDIO}/video/{vid}/edit"
 
@@ -1600,24 +1774,34 @@ def fix_video(cdp_url: str, channel, url: str, *, thumbnail: Path | None = None,
             open_edit()
         changed = False
         before = _thumb_srcs(page)
+        if thumbnail is not None and only_missing and _wait_custom_thumb(page, timeout=15):
+            notes.append(f"своя обложка на ролике уже стоит — не трогал ({url})")
+            thumbnail = None
         if thumbnail is not None:
             if not thumbnail.is_file():
                 raise StudioError(f"файла обложки нет: {thumbnail}")
             with step(page, f"доделка: обложка {thumbnail.name}"):
-                _act(cancel)
-                how = human.choose_file(page, _EDIT_THUMB_BUTTONS, thumbnail, what="обложка",
-                                        fallback_input=page.locator(_EDIT_THUMB_INPUT).first)
-                log(f"Studio {channel.handle}: обложка для {vid} выбрана {how}")
-                page.wait_for_timeout(6000)
+                plain = _plain_copy(thumbnail)
+                for _attempt in (1, 2):
+                    _act(cancel)
+                    how = human.choose_file(page, _EDIT_THUMB_BUTTONS, plain, what="обложка",
+                                            fallback_input=page.locator(_EDIT_THUMB_INPUT).first)
+                    log(f"Studio {channel.handle}: обложка для {vid} выбрана {how}")
+                    page.wait_for_timeout(4000)
+                    _raise_if_thumb_limit(page)
+                    if _wait_custom_thumb(page) is not False:
+                        break
+                else:
+                    raise StudioError("обложка выбрана, но Studio её так и не показала (загрузка обложки не прошла)")
                 changed = True
         want_pl = len(names) == 1 and names[0].casefold() not in shown_playlist().casefold()
         if want_pl:
             with step(page, "доделка: плейлист"):
                 notes += _pick_playlist(page, cancel, trigger=page.locator("ytcp-video-metadata-playlists").first,
-                                        want=names)
+                                        want=names, create=create_playlist)
                 changed = True
         if not changed:
-            return [f"ролик {url}: доделывать нечего — плейлист уже стоит"]
+            return notes or [f"ролик {url}: доделывать нечего — плейлист уже стоит"]
         with step(page, "доделка: сохранить"):
             save = el(page, "video_save")
             if save.get_attribute("aria-disabled") == "true":
@@ -1629,6 +1813,8 @@ def fix_video(cdp_url: str, channel, url: str, *, thumbnail: Path | None = None,
             open_edit()
             if thumbnail is not None:
                 after = _thumb_srcs(page)
+                if _wait_custom_thumb(page, timeout=30) is False:
+                    raise StudioError("обложку выбрал и сохранил, но своей обложки на ролике нет")
                 if after and after != before:
                     notes.append(f"обложка поставлена ({url})")
                 else:
@@ -1687,7 +1873,53 @@ def _playlist_checked(box) -> bool:
         return False
 
 
-def _pick_playlist(page, cancel: CancelToken | None, trigger=None, want: list[str] | None = None) -> list[str]:
+PLAYLIST_CREATED = "создан плейлист"
+
+
+def created_playlist(notes: list[str]) -> str:
+    """Название плейлиста, который _pick_playlist создал (по пометке), иначе ''."""
+    for n in notes or []:
+        m = re.match(re.escape(PLAYLIST_CREATED) + r" «(.+?)»", str(n))
+        if m:
+            return m.group(1)
+    return ""
+
+
+_NEW_PLAYLIST_ITEM = re.compile(r"playlist|плейлист|playlista|plejlist|lista|liste", re.I)
+
+
+def _create_playlist(page, cancel: CancelToken | None, name: str) -> None:
+    """В открытом окне выбора плейлистов: «Новый плейлист» → «Новый плейлист» в меню → название → «Создать».
+    Видимость Studio по умолчанию — «Открытый доступ». Ждём, пока плейлист появится в списке окна."""
+    _act(cancel)
+    human.click(page, page.locator("ytcp-playlist-dialog .new-playlist-button").first)
+    items = page.locator("ytcp-text-menu tp-yt-paper-item")
+    items.first.wait_for(state="visible", timeout=10000)
+    texts = [items.nth(i).inner_text(timeout=3000) for i in range(items.count())]
+    k = next((i for i, t in enumerate(texts) if _NEW_PLAYLIST_ITEM.search(t or "")), 0)  # не «подкаст»/«курс»
+    _act(cancel)
+    human.click(page, items.nth(k))
+    form = page.locator("ytcp-playlist-creation-dialog")
+    title = form.locator("#textbox").first
+    title.wait_for(state="visible", timeout=15000)
+    _type_into(page, title, name, cancel)
+    create = form.locator("#create-button").first
+    _act(cancel)
+    human.click(page, create)
+    try:
+        create.wait_for(state="hidden", timeout=20000)
+    except Exception as exc:  # noqa: BLE001
+        raise StudioError(f"плейлист «{name}» не создался: окно создания не закрылось") from exc
+    boxes = page.locator("#playlists-list ytcp-checkbox-lit")
+    for _ in range(20):
+        if any(_box_label(boxes.nth(i)).casefold() == name.casefold() for i in range(boxes.count())):
+            break
+        page.wait_for_timeout(500)
+    log(f"Studio: на канале не было плейлистов — создал «{name}»")
+
+
+def _pick_playlist(page, cancel: CancelToken | None, trigger=None, want: list[str] | None = None,
+                   create: str = "") -> list[str]:
     """Плейлист ролика: want — плейлисты канала для выкладки (registry.Channel.upload_playlists). Один плейлист
     в want (выбранный человеком или единственный на канале) — отмечаем его по названию; на канале ровно один
     плейлист — его; иначе ни одного и пометка. Уже отмеченный не трогаем (клик по нему снимет галочку).
@@ -1696,14 +1928,34 @@ def _pick_playlist(page, cancel: CancelToken | None, trigger=None, want: list[st
 
     _act(cancel)
     human.click(page, trigger if trigger is not None else el(page, "playlist_trigger"))
-    el(page, "playlist_list")
+    try:  # окно открылось: кнопка «Новый плейлист» есть всегда (пустой список плейлистов «невидим» — по нему не ждём)
+        page.locator("ytcp-playlist-dialog .new-playlist-button").first.wait_for(state="visible", timeout=15000)
+    except Exception:  # noqa: BLE001
+        el(page, "playlist_list")
     page.wait_for_timeout(1500)
     boxes = page.locator("#playlists-list ytcp-checkbox-lit")
     n = boxes.count()
     notes: list[str] = []
     names = [str(x).strip() for x in (want or []) if str(x).strip()]
     target = None
-    if len(names) == 1 and n > 1:
+    if n == 0 and create:
+        # пусто — точно ли? список подгружается: создаём, только если и через 4 с ни одного (иначе будет дубль)
+        for _ in range(8):
+            page.wait_for_timeout(500)
+            n = boxes.count()
+            if n:
+                break
+        if n == 0:
+            _create_playlist(page, cancel, create)
+            n = boxes.count()
+            labels = [_box_label(boxes.nth(i)) for i in range(n)]
+            target = next((i for i, t in enumerate(labels) if t.casefold() == create.casefold()), 0 if n == 1 else None)
+            notes.append(f"{PLAYLIST_CREATED} «{create}» (на канале не было ни одного) — в него пойдут и следующие ролики")
+            if target is None:
+                notes.append(f"созданный плейлист «{create}» не нашёлся в списке — проверь в Studio")
+    if target is not None:
+        pass
+    elif len(names) == 1 and n > 1:
         labels = [_box_label(boxes.nth(i)) for i in range(n)]
         target = next((i for i, t in enumerate(labels) if t.casefold() == names[0].casefold()), None)
         if target is None:
@@ -1727,7 +1979,10 @@ def _pick_playlist(page, cancel: CancelToken | None, trigger=None, want: list[st
                      "на канале нет плейлиста — ролик без плейлиста")
     # «Done» / «Готово» — последняя кнопка окна. Окно бывает уже закрыто само (22.11: 15 с ждали кнопку и роняли всю
     # выкладку) — тогда закрывать нечего; Escape не жмём: он закрывает и окно загрузки
-    done = page.locator("ytcp-playlist-dialog ytcp-button").last
+    done = page.locator("ytcp-playlist-dialog ytcp-button.done-button")
+    if not done.count():
+        done = page.locator("ytcp-playlist-dialog ytcp-button").last
+    done = done.first
     try:
         done.wait_for(state="visible", timeout=5000)
     except Exception:  # noqa: BLE001

@@ -644,3 +644,33 @@ class AnalyticsGroupsConfigTest(unittest.TestCase):
         multi = _normalize({"analytics_view": {"profile": "p12,p3", "group": "g1,g2,none"}})["analytics_view"]
         self.assertEqual((multi["profile"], multi["group"]), ("p12,p3", "g1,g2,none"), "можно выбрать несколько групп и профилей")
         self.assertEqual(_normalize({})["analytics_groups"], [])
+
+
+class PlannedRestartTests(_ManagerCase):
+    def test_queue_survives_planned_restart(self) -> None:
+        def builder(kind, params, state):
+            return params.get("t", kind), (lambda job, progress, cancel: {})
+
+        with mock.patch.object(jobs_mod, "RESUME_FILE", self.root / "resume.json"):
+            data = [
+                {"id": "a", "kind": "publish", "title": "А", "status": "running", "started": 1.0, "params": {"t": "А"}},
+                {"id": "b", "kind": "publish", "title": "Б", "status": "queued", "params": {"t": "Б"}},
+                {"id": "c", "kind": "publish", "title": "В", "status": "queued", "params": {"t": "В"}},
+            ]
+            (self.root / "jobs.json").write_text(json.dumps(data), encoding="utf-8")
+            jobs_mod.mark_resume(["a", "b"])
+            with mock.patch.object(jobs_mod.JobManager, "_claim", side_effect=lambda lane="main": threading.Event().wait()):
+                m = jobs_mod.JobManager(builder)
+            st = {j.id: (j.status, j.runner is not None) for j in m._jobs}
+            self.assertEqual(st["a"], (jobs_mod.QUEUED, True), "шедшая — продолжится")
+            self.assertEqual(st["b"], (jobs_mod.QUEUED, True))
+            self.assertEqual(st["c"][0], jobs_mod.CANCELLED, "не из метки — как раньше, ждёт решения")
+            self.assertFalse((self.root / "resume.json").exists(), "метка одноразовая")
+
+
+class StartupCodeTests(unittest.TestCase):
+    def test_get_manager_uses_module_log(self) -> None:
+        """22.11: локальный импорт log в get_manager сделал имя локальным — строка выше упала при запуске
+        (UnboundLocalError), приложение не открылось. Фоновая часть get_manager в тестах не выполняется,
+        поэтому проверяем так."""
+        self.assertNotIn("log", jobs_mod.get_manager.__code__.co_varnames)

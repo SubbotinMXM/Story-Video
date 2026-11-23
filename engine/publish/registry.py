@@ -36,6 +36,11 @@ class Channel:
         """Плейлисты для выкладки: выбранный (если он ещё есть на канале) или все плейлисты канала."""
         return [self.playlist] if self.playlist and self.playlist in self.playlists else list(self.playlists)
 
+    def new_playlist(self, lang: str = "") -> str:
+        """Название плейлиста, который можно создать, если на канале их нет вовсе («Для вас» на языке роликов);
+        плейлисты есть — пусто (несколько — не создаём, выбирает человек)."""
+        return "" if self.playlists else for_you(lang or self.language or self.titles_language)
+
 
 @dataclass
 class ProfileEntry:
@@ -137,6 +142,43 @@ def set_playlist(channel_id: str, playlist: str) -> None:
                     c.playlist, found = name, True
         if not found:
             raise ValueError("канал не найден")
+        save(profiles)
+
+
+# «Для вас» на языке роликов канала: на канале нет ни одного плейлиста — программа сама создаёт этот (один раз)
+# и кладёт в него все ролики (23.11, просьба человека). Язык не знаем — английский.
+FOR_YOU = {
+    "ru": "Для вас", "uk": "Для вас", "be": "Для вас", "en": "For you", "it": "Per te", "es": "Para ti",
+    "pt": "Para você", "de": "Für dich", "fr": "Pour vous", "pl": "Dla Ciebie", "ro": "Pentru tine",
+    "cs": "Pro vás", "sk": "Pre vás", "bg": "За вас", "sr": "За вас", "hr": "Za vas", "nl": "Voor jou",
+    "sv": "För dig", "da": "Til dig", "no": "For deg", "fi": "Sinulle", "hu": "Neked", "el": "Για εσάς",
+    "tr": "Senin için", "kk": "Сіз үшін", "uz": "Siz uchun", "ka": "თქვენთვის", "hy": "Ձեզ համար",
+    "az": "Sizin üçün", "lt": "Jums", "lv": "Jums", "et": "Sulle", "he": "בשבילך", "ar": "لك", "fa": "برای شما",
+    "hi": "आपके लिए", "id": "Untukmu", "ms": "Untuk anda", "vi": "Dành cho bạn", "th": "สำหรับคุณ",
+    "ja": "あなたへのおすすめ", "ko": "추천", "zh": "为你推荐",
+}
+
+
+def for_you(lang: str) -> str:
+    """Название плейлиста «Для вас» на языке lang (ru, it, pt-BR…)."""
+    code = (lang or "").strip().lower().replace("_", "-").split("-")[0]
+    return FOR_YOU.get(code, FOR_YOU["en"])
+
+
+def add_playlist(channel_id: str, playlist: str) -> None:
+    """Программа создала на канале плейлист: в учёт (во всех профилях, где есть канал) и сделать его плейлистом
+    выкладки — следующие ролики пойдут в него, второй раз он не создаётся."""
+    name = (playlist or "").strip()
+    if not name:
+        return
+    with LOCK:
+        profiles = load()
+        for p in profiles.values():
+            for c in p.channels:
+                if c.id == channel_id:
+                    if name not in c.playlists:
+                        c.playlists = [*c.playlists, name]
+                    c.playlist = name
         save(profiles)
 
 

@@ -173,6 +173,9 @@ def step(page, name: str):
             # очередь подождёт связь (сторож переподключит VPN) и продолжит с этого места
             log(f"✗ Studio {current_channel()}: шаг «{name}» — нет связи с YouTube ({offline})")
             raise youtube.StudioError(f"шаг «{name}»: нет связи с YouTube — браузер не открыл страницу ({offline})") from exc
+        # шаг упал, а в окне загрузки — суточный лимит/просьба подтвердить телефон: это не вёрстка, а причина
+        # (окно серое, поля недоступны) — лимит ждёт сутки, а не повторяется каждый час
+        youtube._check_dialog_problems(page)
         folder = diagnose(page, name, exc)
         reason = _short(exc)
         log(f"✗ Studio {current_channel()}: шаг «{name}» — {reason}. Снимок и страница: {folder}")

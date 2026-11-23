@@ -144,16 +144,28 @@ _COVER_JS = """(el) => { const r = el.getBoundingClientRect();
 # Информационное окно YouTube с одной кнопкой («Remember that anyone can see your posts» — «Got it», «Что нового» и т.п.):
 # оно затемняет страницу и ждёт нажатия. Ищем кнопку подтверждения в видимом диалоге.
 _NOTICE_JS = """() => { const ok = /^\\s*(got it|понятно|ok|okay|ок|хорошо|i understand|я понимаю)\\s*$/i;
+    // приветствие Studio («Welcome to YouTube Studio … Continue», 22.11 перекрыло «Save»): «Continue» — только в нём
+    const welcome = /welcome to youtube studio|добро пожаловать в (творческую студию|youtube studio)/i;
+    const go = /^\\s*(continue|продолжить|get started|начать)\\s*$/i;
     const boxes = document.querySelectorAll('tp-yt-paper-dialog, [role=dialog], ytd-modal-with-title-and-button-renderer, '
-        + 'yt-confirm-dialog-renderer, ytd-popup-container yt-dialog-view-model, yt-dialog-view-model');
+        + 'yt-confirm-dialog-renderer, ytd-popup-container yt-dialog-view-model, yt-dialog-view-model, ytcp-dialog#welcome-dialog');
     for (const box of boxes) {
         const r = box.getBoundingClientRect();
         if (r.width < 50 || r.height < 50 || getComputedStyle(box).visibility === 'hidden') continue;
         if (box.matches('ytd-backstage-post-dialog-renderer, ytcp-uploads-dialog') || box.closest('ytcp-uploads-dialog')) continue;
+        // рабочие окна, где программа сама что-то выбирает, — не уведомления, даже если кнопка в них «ОК»
+        // (23.11: окно плейлистов русской Studio закрывается кнопкой «ОК» — его закрывали перед кликом по галочке,
+        // все доделки плейлиста на №37 падали): выбор плейлиста, календарь, меню, и любое окно с полями/галочками
+        if (box.closest('ytcp-playlist-dialog, ytcp-date-picker, ytcp-text-menu, ytcp-video-visibility-select')) continue;
+        // (одна галочка «больше не показывать» у уведомления бывает — его закрываем; два варианта выбора или поле — нет)
+        if (!welcome.test(box.innerText || '') && (box.querySelector('textarea, [contenteditable=true], '
+            + 'input:not([type=hidden]):not([type=checkbox]):not([type=radio])') || box.querySelectorAll('ytcp-checkbox-lit, '
+            + 'tp-yt-paper-checkbox, tp-yt-paper-radio-button, [role=checkbox], [role=radio]').length > 1)) continue;
         for (const b of box.querySelectorAll('button, yt-button-renderer, ytcp-button, tp-yt-paper-button, [role=button]')) {
             const t = (b.innerText || b.textContent || b.getAttribute('aria-label') || '').trim();
             const br = b.getBoundingClientRect();
-            if (ok.test(t) && br.width > 4 && br.height > 4) return [br.left + br.width / 2, br.top + br.height / 2, t]; } }
+            const greet = go.test(t) && welcome.test(box.innerText || '');
+            if ((ok.test(t) || greet) && br.width > 4 && br.height > 4) return [br.left + br.width / 2, br.top + br.height / 2, t]; } }
     return null; }"""
 
 

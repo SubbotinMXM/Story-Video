@@ -190,6 +190,31 @@ class MakeCoverTest(unittest.TestCase):
         self.assertEqual(len(self.refs), 1)
         self.assertNotIn("Take each face", self.prompt)
 
+    def test_text_concept_is_not_reused_for_a_real_reference(self) -> None:
+        """22.11: ночью образец не скачался — придумали по тексту; доделка с настоящим образцом взяла старое описание."""
+        with mock.patch.object(cv, "pick_best", lambda *a, **k: (0, True, "ок")):
+            cv.make_cover(self.cs, self.tmp, reference=None, language="ru", story="текст")
+            self.assertTrue(self.prompt.startswith("C"), "без образца — по тексту")
+            cv.make_cover(self.cs, self.tmp, reference=png_bytes(800, 450, noise=False), language="ru")
+        self.assertTrue(self.prompt.startswith("P"), "образец появился — разбираем его, а не берём описание по тексту")
+
+    def test_rejected_best_means_fresh_analysis(self) -> None:
+        answers = iter([(0, False, "героини слабее образца")] * 2 + [(1, True, "как образец")])
+        seen = []
+        real = cv.analyze_full
+
+        def analyze(llm, ref, lang, **k):
+            seen.append(k.get("context", ""))
+            return real(llm, ref, lang, **k)
+
+        with mock.patch.object(cv, "pick_best", lambda *a, **k: next(answers)), \
+             mock.patch.object(cv, "analyze_full", analyze):
+            res = cv.make_cover(self.cs, self.tmp, reference=png_bytes(800, 450, noise=False), language="ru")
+        self.assertTrue(res.acceptable)
+        self.assertEqual(len(seen), 2, "образец разобран заново")
+        self.assertIn("ЗАБРАКОВАНА", seen[1])
+        self.assertIn("героини слабее образца", seen[1])
+
     def test_bad_round_generates_again(self) -> None:
         answers = iter([(0, False, "кривой текст"), (2, True, "ок")])
         with mock.patch.object(cv, "pick_best", lambda *a, **k: next(answers)):
@@ -285,21 +310,39 @@ class SlidesMaterialsTest(unittest.TestCase):
         mat = sm.prepare(folder=self.folder, files=self.files[:1], source_url="", language="", story="Привет мир " * 50,
                          cover=self.cs, desc_cta="CTA")
         self.assertEqual(mat["title"], "Из текста")
-        self.assertIsNone(self.reference)
+        self.assertFalse(hasattr(self, "reference"), "нет донора — обложку по тексту НЕ придумываем (режима нет)")
+        self.assertEqual(mat["thumbnail"], "")
+        self.assertTrue(any("нет ролика-донора" in x for x in mat["lines"]))
 
     def test_cover_failure_offline_waits_instead_of_publishing_without_cover(self) -> None:
         from engine.core import netguard
 
         boom = mock.patch.object(cv, "make_cover", side_effect=RuntimeError("готовая картинка не скачалась"))
-        with boom, mock.patch.object(netguard, "check_now", return_value=False):
+        orig = mock.patch.object(cv, "youtube_original", lambda url, with_image=True: ("Ориг", b"img", "ru"))
+        with boom, orig, mock.patch.object(netguard, "check_now", return_value=False):
             with self.assertRaises(RuntimeError) as err:
-                sm.prepare(folder=self.folder, files=self.files[:1], source_url="", language="ru", story="s",
-                           cover=self.cs, desc_cta="CTA")
+                sm.prepare(folder=self.folder, files=self.files[:1], source_url="https://youtu.be/x", language="ru",
+                           story="s", cover=self.cs, desc_cta="CTA")
         self.assertIn("нет связи", str(err.exception), "очередь распознает обрыв и подождёт связь")
-        with boom, mock.patch.object(netguard, "check_now", return_value=True):
-            mat = sm.prepare(folder=self.folder, files=self.files[:1], source_url="", language="ru", story="s",
-                             cover=self.cs, desc_cta="CTA")
+        with boom, orig, mock.patch.object(netguard, "check_now", return_value=True):
+            mat = sm.prepare(folder=self.folder, files=self.files[:1], source_url="https://youtu.be/x", language="ru",
+                             story="s", cover=self.cs, desc_cta="CTA")
         self.assertEqual(mat["thumbnail"], "", "связь есть, а генератор упал — как раньше: без обложки, с пометкой")
+
+    def test_donor_cover_missing_means_no_invented_cover(self) -> None:
+        from engine.core import netguard
+
+        made = []
+        with mock.patch.object(cv, "youtube_original", lambda url, with_image=True: ("Ориг", None, "ru")), \
+             mock.patch.object(sm.time, "sleep", lambda s: None), \
+             mock.patch.object(netguard, "check_now", return_value=True), \
+             mock.patch.object(cv, "make_cover", side_effect=lambda *a, **k: made.append(1)):
+            mat = sm.prepare(folder=self.folder, files=self.files[:1], source_url="https://youtu.be/x", language="ru",
+                             story="s", cover=self.cs, desc_cta="CTA")
+        self.assertEqual(made, [], "по тексту обложку не придумываем — только перерисовка донора")
+        self.assertEqual(mat["thumbnail"], "")
+        self.assertTrue(any(x.startswith(sm.COVER_FAILED) and "доделка" not in x and "Доделать ролик" in x
+                            for x in mat["lines"]))
 
     def test_original_unavailable_falls_back(self) -> None:
         with mock.patch.object(cv, "youtube_original", side_effect=RuntimeError("bot check")):
@@ -704,11 +747,12 @@ class CoverFailsTest(unittest.TestCase):
     def test_cancel_is_not_swallowed(self) -> None:
         from engine.core.cancel import CancelledError
 
-        with mock.patch.object(cv, "title_from_story", lambda *a, **k: "Т"), \
+        with mock.patch.object(cv, "rewrite_title", lambda *a, **k: "Т"), \
+                mock.patch.object(cv, "youtube_original", lambda url, with_image=True: ("Ориг", b"img", "ru")), \
                 mock.patch.object(cv, "make_cover", side_effect=CancelledError("стоп")):
             with self.assertRaises(CancelledError):
-                sm.title_and_cover(folder=Path(tempfile.mkdtemp()), source_url="", language="ru", story="s",
-                                   cover=cv.CoverSettings(api_key="k", llm=("k", "u", "m")))
+                sm.title_and_cover(folder=Path(tempfile.mkdtemp()), source_url="https://youtu.be/x", language="ru",
+                                   story="s", cover=cv.CoverSettings(api_key="k", llm=("k", "u", "m")))
 
     def test_launch_warning_when_balance_low(self) -> None:
         from server import runners
@@ -826,3 +870,23 @@ class CoverTextCheckTest(unittest.TestCase):
             res = cv.make_cover(cs, tmp, reference=png_bytes(800, 450, noise=False), language="ru")
         self.assertEqual(picked[0], ["вариант1_2.png", "вариант1_3.png"], "вариант с ошибкой в выбор не попадает")
         self.assertFalse(any("ошибка" in n for n in res.notes))
+
+
+class RedrawRuleTest(unittest.TestCase):
+    """Обложка — перерисованный оригинал: откровенность и сексуальность образца не смягчать (22.11)."""
+
+    def test_redraw_rule_added_to_any_analyze_prompt(self) -> None:
+        from engine.publish import cover_prompts as cp
+
+        for prompts in (None, {"analyze": "мой промпт: другие люди"}):
+            text = cp.render(prompts, "analyze", язык="русский")
+            self.assertIn("ПЕРЕРИСОВКА ОРИГИНАЛА", text)
+            self.assertIn("large full bust", text)
+
+    def test_no_rule_asks_to_tone_down(self) -> None:
+        from engine.publish import cover_prompts as cp
+
+        for role in ("analyze", "pick", "generate"):
+            text = cp.render(None, role, язык="русский", лист="", надписи="")
+            self.assertNotIn("без откровенности", text, role)
+            self.assertNotIn("ПЕРЕКОМПОНУЙ", text, role)

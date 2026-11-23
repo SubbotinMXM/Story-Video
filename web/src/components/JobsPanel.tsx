@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronsUp,
   Circle,
+  Clock,
   Copy,
   FolderOpen,
   Inbox,
@@ -62,6 +63,14 @@ function elapsed(job: Job, now: number) {
   const s = Math.max(0, Math.round(end - job.started));
   const m = Math.floor(s / 60);
   return m ? `${m} мин ${s % 60} с` : `${s} с`;
+}
+
+// «через 22 ч 38 мин» — сколько осталось до повтора по расписанию
+function left(sec: number, now: number) {
+  const m = Math.max(0, Math.round((sec - now / 1000) / 60));
+  const h = Math.floor(m / 60);
+  if (m < 1) return "вот-вот";
+  return h ? `через ${h} ч ${m % 60} мин` : `через ${m} мин`;
 }
 
 function stamp(sec: number) {
@@ -205,6 +214,17 @@ function JobCard({ job, now, onShowLog, queuePos, queueLen }: {
           </div>
         </div>
       )}
+      {job.status === "queued" && job.retry_at ? (
+        <div className="job-wait small" role="status">
+          <div className="job-wait-head">
+            <Clock size={14} aria-hidden />
+            <b>Продолжит сама {stamp(job.retry_at)}</b>
+            <span className="muted">{left(job.retry_at, now)}</span>
+          </div>
+          <LongText className="muted" text={job.error || job.message} lines={2} />
+          <div className="muted">Это не зависание: задача ждёт своего времени. Перезапуск программы ей не мешает.</div>
+        </div>
+      ) : null}
       {!open && job.status !== "running" && job.status !== "queued" && (
         <LongText className="job-note muted small" text={job.error || job.message} lines={2} />
       )}
@@ -338,11 +358,14 @@ export function JobsPanel() {
   const { push } = useToasts();
 
   const running = jobs.some((j) => j.status === "running");
+  // ждущие повтора по расписанию — обратный отсчёт раз в 30 с (часы, не секунды)
+  const waiting = jobs.some((j) => j.status === "queued" && j.retry_at);
   useEffect(() => {
-    if (!running) return;
-    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    if (!running && !waiting) return;
+    setNow(Date.now());
+    const t = window.setInterval(() => setNow(Date.now()), running ? 1000 : 30000);
     return () => window.clearInterval(t);
-  }, [running]);
+  }, [running, waiting]);
 
   const ordered = useMemo(() => {
     const rank = { running: 0, queued: 1, failed: 2, done: 2, cancelled: 2 } as const;

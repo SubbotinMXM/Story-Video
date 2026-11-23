@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -108,7 +109,8 @@ def title_and_cover(*, folder: Path, source_url: str, language: str, story: str,
                     make_cover: bool = True, base: dict | None = None, cancel: CancelToken | None = None,
                     progress: ProgressCb | None = None) -> tuple[str, str, list[str], list[str]]:
     """Название и обложка «по конкуренту»: оригинал рерайта (source_url) — его название переписывается,
-    обложка переделывается по образцу; без оригинала — придумываются по тексту ролика.
+    обложка ПЕРЕРИСОВЫВАЕТСЯ с обложки оригинала (и только так: по тексту обложка не придумывается — нет образца,
+    нет обложки, пометка и доделка). Название без оригинала — по тексту ролика.
     base — материалы основной версии (эта — перевод): название заново на языке версии, обложка — та же
     с переведёнными надписями. → (название, файл обложки, надписи обложки, строки для итогов)."""
     from engine.core.langdetect import detect_language
@@ -117,6 +119,7 @@ def title_and_cover(*, folder: Path, source_url: str, language: str, story: str,
     work = folder / COVER_DIR
     lines: list[str] = []
     orig_title, image = "", None
+    donor_cover_missing = False
     if source_url and (not make_cover or base is not None):
         try:  # без обложки нужно только название оригинала
             orig_title = cv.youtube_original(source_url, with_image=False)[0]
@@ -131,8 +134,13 @@ def title_and_cover(*, folder: Path, source_url: str, language: str, story: str,
             _wait_net_or(exc, "оригинал не открылся")
             log(f"Выкладка: оригинал не открылся ({exc}) — обложку и название придумаю по тексту")
             lines.append(f"оригинал не открылся ({str(exc)[:120]}) — обложка и название по тексту ролика")
-        if source_url and image is None and orig_title:
-            lines.append("обложку оригинала скачать не вышло — обложка придумана по тексту ролика")
+        if image is None and orig_title:
+            time.sleep(5)  # обложка донора — единственный образец: ещё одна попытка
+            try:
+                image = cv.youtube_original(source_url)[1]
+            except Exception as exc:  # noqa: BLE001
+                _wait_net_or(exc, "обложка ролика-донора не скачалась")
+        donor_cover_missing = image is None
     if orig_title:
         title = cv.rewrite_title(cover.llm, orig_title, lang, story=story, variants=cover.title_variants,
                                  prompts=cover.prompts, notes=lines)
@@ -147,6 +155,16 @@ def title_and_cover(*, folder: Path, source_url: str, language: str, story: str,
 
         thumbnail = cover_for(cover, cover.llm, str(base.get("thumbnail") or ""), base.get("cover_text"), lang, work,
                               lines) if base.get("thumbnail") else ""
+    elif make_cover and not source_url:
+        # обложка делается ТОЛЬКО перерисовкой обложки конкурента; по тексту не придумываем (такого режима нет)
+        lines.append("Обложка не делалась: у ролика нет ролика-донора (обложка делается только по обложке конкурента)")
+    elif make_cover and source_url and donor_cover_missing:
+        # обложка — это перерисованная обложка донора; без неё по тексту не придумываем: выходим без обложки,
+        # «Доделать ролик» перерисует её с донора, когда та скачается
+        log(f"Выкладка: обложку ролика-донора {source_url} скачать не вышло — без обложки, доделка перерисует её")
+        lines.append(f"{COVER_FAILED} (обложку ролика-донора скачать не вышло: {source_url}) — ролик выйдет без "
+                     "обложки; «Доделать ролик» будет пробовать скачать и перерисовать её. Если и там не выйдет — "
+                     "доделай обложку сам")
     elif make_cover:
         try:
             res = cv.make_cover(cover, work, reference=image, language=lang, story=story, title=orig_title,
@@ -160,8 +178,11 @@ def title_and_cover(*, folder: Path, source_url: str, language: str, story: str,
             lines.append(cover_failed_warning(exc, source_url))
         else:
             thumbnail, cover_text = str(res.path), list(res.text)
-            lines += [f"Обложка: {cv.model_label(res.model)}, лучший из {len(res.variants)} вариантов, все — в папке "
-                      f"«{COVER_DIR}»", *res.notes]
+            origin = (f"перерисована с обложки ролика-донора {source_url}" if image is not None else
+                      "придумана по тексту ролика (обложки донора нет)")
+            log(f"Выкладка: обложка {origin}")
+            lines += [f"Обложка: {origin}; {cv.model_label(res.model)}, лучший из {len(res.variants)} вариантов, все — "
+                      f"в папке «{COVER_DIR}»", *res.notes]
     else:
         lines.append("Обложка не генерировалась (выключено) — поставишь сам в Studio")
     return title, thumbnail, cover_text, lines

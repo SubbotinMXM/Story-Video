@@ -271,6 +271,7 @@ def run_publish(req: PublishRequest, state: dict[str, Any], save: Callable[..., 
                             thumbnail=Path(vm["thumbnail"]) if vm.get("thumbnail") else None,
                             publish_at=datetime.fromisoformat(rec["publish_at"]),
                             playlist_hint=t.channel.upload_playlists(),
+                            new_playlist=t.channel.new_playlist(version.language),
                             # соавторы — только того же языка, что ролик (язык не указан — как раньше)
                             coauthors=[c for c in coauthors if not language_mismatch(version.language, c.channel)],
                             publish_now=req.publish_now,
@@ -298,6 +299,9 @@ def run_publish(req: PublishRequest, state: dict[str, Any], save: Callable[..., 
                                 session = _restart_profile(ap, pid, t.label(), attempt)
                                 rec.setdefault("notes", []).append(
                                     "профиль закрывался во время загрузки — в Studio мог остаться лишний черновик, проверь")
+                        _remember_created_playlist(t, up.notes)
+                        if job.thumbnail is not None:
+                            rec["thumbnail"] = str(job.thumbnail)  # для доделки, если обложка не встала
                         rec.update(status=DONE, url=up.url, notes=[*rec.get("notes", []), *up.notes], error="",
                                    invites=up.invites or {}, title=job.title, file_ok=bool(up.file_ok))
                         # приглашение создано — оно обязано быть принято, даже если дальше всё упадёт (см. collabs.py)
@@ -869,8 +873,19 @@ def run_comments(channels: list[str], adspower: tuple[str, str], llm: tuple[str,
 
 
 
+def _remember_created_playlist(t, notes: list[str]) -> None:
+    """Программа создала на канале плейлист «Для вас» — в учёт: следующие ролики идут в него, второй не создаётся."""
+    name = youtube.created_playlist(notes)
+    if name:
+        try:
+            registry.add_playlist(t.channel.id, name)
+        except Exception as exc:  # noqa: BLE001 — учёт не должен ронять выкладку
+            log(f"Плейлист «{name}» создан, но в учёт не записался: {exc}")
+
+
 def run_fix_video(key: str, url: str, adspower: tuple[str, str], *, thumbnail: Path | None = None,
-                  playlists: list[str] | None = None, cancel: CancelToken | None = None,
+                  playlists: list[str] | None = None, create_playlist: str = "", only_missing: bool = False,
+                  cancel: CancelToken | None = None,
                   progress: ProgressCb | None = None) -> list[str]:
     """«Доделать ролик»: на уже выложенный ролик поставить обложку и/или плейлист (профиль AdsPower канала)."""
     targets = registry.resolve([key])
@@ -888,8 +903,11 @@ def run_fix_video(key: str, url: str, adspower: tuple[str, str], *, thumbnail: P
                 try:
                     if progress:
                         progress(0.5, f"Studio: {t.label()} — ролик {url}")
-                    return youtube.fix_video(session.cdp_url, t.channel, url, thumbnail=thumbnail,
-                                             playlists=playlists, cancel=cancel)
+                    notes = youtube.fix_video(session.cdp_url, t.channel, url, thumbnail=thumbnail,
+                                              playlists=playlists, create_playlist=create_playlist,
+                                              only_missing=only_missing, cancel=cancel)
+                    _remember_created_playlist(t, notes)
+                    return notes
                 except Exception as exc:
                     if cancel is not None and cancel.is_cancelled():
                         raise

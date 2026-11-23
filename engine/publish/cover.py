@@ -74,6 +74,7 @@ class CoverResult:
     notes: list[str] = field(default_factory=list)
     translations: dict[str, Path] = field(default_factory=dict)  # язык → обложка
     model: str = ""  # id модели генератора (nano-banana-pro-2k)
+    acceptable: bool = True  # редактор признал лучший вариант годным (не слабее образца)
 
     def as_dict(self) -> dict[str, Any]:
         return {"path": str(self.path), "variants": [str(v) for v in self.variants], "prompt": self.prompt,
@@ -159,9 +160,10 @@ def analyze_full(llm, reference: bytes, language: str, *, prompts: dict | None =
                  context: str = "") -> dict[str, Any]:
     """Образец → {prompt, text, original_text, people}. context — название/начало текста ролика: по нему
     нейросеть узнаёт, кто из известных людей на обложке."""
-    user = "Вот обложка-образец. Составь промпт по правилам."
+    user = "Вот обложка-образец. Составь промпт по правилам: перерисуй именно этот образец."
     if context.strip():
-        user += "\n\nО чём ролик (по этому можно понять, кто на обложке):\n" + context.strip()[:1500]
+        user += ("\n\nО чём ролик — ТОЛЬКО чтобы понять, кто из известных людей на обложке; обложку строй по образцу, "
+                 "а не по тексту ролика:\n" + context.strip()[:1500])
     data = _ask_image(llm, "cover_analyze", _P(prompts, "analyze", язык=lang_label(language)), user, reference)
     prompt = str(data.get("prompt") or "").strip()
     if len(prompt) < 80:
@@ -797,7 +799,8 @@ def url_of(path: Path) -> str:
 
 
 def make_cover(cs: CoverSettings, work: Path, *, reference: bytes | None, language: str, story: str = "",
-               title: str = "", cancel: CancelToken | None = None, progress: ProgressCb | None = None) -> CoverResult:
+               title: str = "", cancel: CancelToken | None = None, progress: ProgressCb | None = None,
+               _redo: str = "") -> CoverResult:
     """Обложка целиком. reference — образец (байты картинки) или None (придумать по тексту story).
     title — название ролика-оригинала (подсказка, кто из известных людей на обложке).
     Известные люди образца остаются теми же: генератор получает их другие настоящие фото."""
@@ -821,16 +824,25 @@ def make_cover(cs: CoverSettings, work: Path, *, reference: bytes | None, langua
     ref = to_jpeg(reference) if reference else None
     if ref:
         (work / "образец.jpg").write_bytes(ref)
+    # описание обложки из прошлой попытки годится, только если сделано по ТОЙ ЖЕ картинке-образцу: 22.11 ночью
+    # обложку донора не скачали и придумали по тексту, а доделка взяла это описание вместо разбора настоящего образца
+    source_key = hashlib.sha1(ref).hexdigest() if ref else "concept"
+    if info.get("prompt") and info.get("source") != source_key:
+        info = {}
     if not info.get("prompt"):
         step(0.05, "Обложка: нейросеть разбирает образец…" if ref else "Обложка: нейросеть придумывает обложку…")
         if ref:
             context = "\n".join(s for s in (f"Название: {title}" if title else "", (story or "")[:1000]) if s)
+            if _redo:  # прошлый разбор дал обложку слабее образца — редактор сказал, чем именно
+                context += ("\n\nПРОШЛАЯ ПОПЫТКА ЗАБРАКОВАНА редактором (обложка не похожа на образец / слабее): "
+                            f"{_redo[:600]}\nПерерисуй образец точнее: те же люди по типу, фигурам и откровенности "
+                            "нарядов, та же сцена и подача.")
             a = analyze_full(cs.llm, ref, language, prompts=cs.prompts, context=context)
             keep(prompt=a["prompt"], text=a["text"], original_text=a["original_text"], people=a["people"],
-                 language=language)
+                 language=language, source=source_key)
         else:
             prompt, text = concept(cs.llm, story, language, prompts=cs.prompts)
-            keep(prompt=prompt, text=text, language=language)
+            keep(prompt=prompt, text=text, language=language, source=source_key)
     prompt, text = str(info["prompt"]), list(info.get("text") or [])
     shown = (" / ".join(f'"{t}"' for t in text) + ".") if text else "(no text at all — do not add any lettering)."
     notes: list[str] = []
@@ -889,10 +901,19 @@ def make_cover(cs: CoverSettings, work: Path, *, reference: bytes | None, langua
     if ref and cs.model in NO_REFERENCE_MODELS:
         notes.append(f"{model_label(cs.model)} не принимает образец картинкой — обложка сделана по текстовому "
                      "описанию образца (сходство ниже)")
+    if not ok and ref and not _redo:
+        # лучший вариант слабее образца — разбираем образец заново (с замечаниями редактора) и генерируем ещё раз
+        log(f"Обложка: лучший вариант слабее образца ({why[:160]}) — разбираю образец заново")
+        keep(prompt="", text=[])
+        again = make_cover(cs, work, reference=reference, language=language, story=story, title=title,
+                           cancel=cancel, progress=progress, _redo=why or "не похожа на образец")
+        again.notes[:0] = [f"первая попытка слабее образца ({why[:120]}) — образец разобран заново", *notes]
+        return again
     chosen = save_for_youtube(variants[best], work / "обложка.jpg")
     keep(chosen=variants[best].name, reason=why, acceptable=ok, model=cs.model, model_label=model_label(cs.model),
          generated=time.strftime("%d.%m.%Y %H:%M"))
-    return CoverResult(path=chosen, variants=variants, prompt=prompt, text=text, notes=notes, model=cs.model)
+    return CoverResult(path=chosen, variants=variants, prompt=prompt, text=text, notes=notes, model=cs.model,
+                       acceptable=bool(ok))
 
 
 def translate_cover(cs: CoverSettings, image: Path, text: list[str], language: str, work: Path, *,

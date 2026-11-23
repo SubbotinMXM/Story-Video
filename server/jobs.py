@@ -36,6 +36,29 @@ RESUMABLE = {FAILED, CANCELLED}
 # тесты (tests/_isolate.py) задают свой файл очереди: настоящий jobs.json пользователя они не трогают
 JOBS_FILE = Path(os.environ["STORY_VIDEO_JOBS_FILE"]) if os.environ.get("STORY_VIDEO_JOBS_FILE") else DATA_DIR / "jobs.json"
 HISTORY_LIMIT = 100
+# плановый перезапуск (обновление, перезапуск по просьбе): какие задачи шли и ждали — после запуска они продолжаются
+# сами, а не «Прервано закрытием». Метка живёт RESUME_TTL секунд — старую (программа упала) не используем
+RESUME_FILE = JOBS_FILE.with_name("resume_after_restart.json")
+RESUME_TTL = 15 * 60
+
+
+def mark_resume(ids: list[str]) -> None:
+    """Перед плановым перезапуском: эти задачи после запуска продолжить сами."""
+    RESUME_FILE.write_text(json.dumps({"at": time.time(), "ids": list(ids)}), encoding="utf-8")
+
+
+def _take_resume() -> set[str]:
+    try:
+        raw = json.loads(RESUME_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    try:
+        RESUME_FILE.unlink()
+    except OSError:
+        pass
+    if not isinstance(raw, dict) or time.time() - float(raw.get("at") or 0) > RESUME_TTL:
+        return set()
+    return {str(i) for i in raw.get("ids") or []}
 
 # (job, progress_cb, cancel) -> result dict
 Runner = Callable[["Job", Callable[[float, str], None], CancelToken], dict[str, Any]]
@@ -82,7 +105,7 @@ _TRANSIENT = (
     "connecttimeout", "connecterror", "readtimeout", "handshake operation timed out", "timed out",
     "connection reset", "connection refused", "remoteprotocolerror", "server disconnected",
     "nodename nor servname", "temporary failure in name resolution", "network is unreachable",
-    "сервис llm перегружен", "no upstream accounts", "нет связи", "временно не работает",
+    "сервис llm перегружен", "no upstream accounts", "нет связи", "временно не работает", "временно не скачивается",
     " 500", " 502", " 503", " 504", " 520", " 521", " 522", " 523", " 524", "cloudflare",
     # YouTube временно ограничил доступ с этого адреса — обычно проходит само через какое-то время
     "подтвердить, что это не робот",
@@ -190,6 +213,8 @@ class Job:
             "result": self.result,
             "error": self.error,
             "attempts": self.attempts,
+            # ждёт повтора по расписанию (лимит YouTube, сбой сети) — когда продолжит сама
+            "retry_at": (float(self.state.get("retry_at") or 0) or None) if self.status == QUEUED else None,
             "resumable": self.status in RESUMABLE,
             "stopping": self.status == RUNNING and self.cancel.is_cancelled(),
             "stop_at": self.stop_at if self.status == RUNNING and self.cancel.is_cancelled() else None,
@@ -444,6 +469,7 @@ class JobManager:
             raw = json.loads(JOBS_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
+        resume = _take_resume()
         for item in raw if isinstance(raw, list) else []:
             try:
                 job = Job(
@@ -465,7 +491,21 @@ class JobManager:
                 )
             except (KeyError, TypeError, ValueError):
                 continue
-            if job.status in (QUEUED, RUNNING):
+            scheduled = job.status == QUEUED and float(job.state.get("retry_at") or 0) > 0
+            if job.status in (QUEUED, RUNNING) and (job.id in resume or scheduled):
+                # ждущая повтора по расписанию (лимит YouTube и т. п.) не «прервана» закрытием —
+                # она и так стояла, поэтому после любого перезапуска продолжает ждать своего времени
+                # плановый перезапуск: задача продолжится сама (идущая — с места остановки, по своему state)
+                try:
+                    job.title, job.runner = self._build(job.kind, job.params, job.state)
+                    job.status = QUEUED
+                    if not scheduled:  # у ждущей повтора остаётся причина ожидания
+                        job.message = "Продолжаю после перезапуска программы" if job.started else "В очереди"
+                except Exception as exc:  # noqa: BLE001 — настройки сломались: ждём человека, как раньше
+                    job.status, job.error = FAILED, f"после перезапуска не продолжилась: {exc}"
+                    job.message = "Прервано закрытием приложения"
+                    job.finished = job.finished or time.time()
+            elif job.status in (QUEUED, RUNNING):
                 # приложение закрыли посреди работы — ждём решения пользователя
                 job.status = CANCELLED if job.status == QUEUED else FAILED
                 job.error = None if job.status == CANCELLED else "Приложение было закрыто во время работы"
@@ -842,8 +882,6 @@ def get_manager() -> JobManager:
                 states = [dict(j.state) for j in manager._jobs if j.kind == "publish"]
             n = collabs.backfill(states)
             if n:
-                from engine.core.logutil import log
-
                 log(f"Соавторства: в списке на проверку {n} приглашений из прошлых выкладок — подтвержу в фоне")
         except Exception:  # noqa: BLE001 — список не собрался: новые приглашения всё равно записываются
             pass

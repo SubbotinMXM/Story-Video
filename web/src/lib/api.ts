@@ -313,6 +313,7 @@ export type Job = {
   // выкладка: живой статус по каналам
   live?: { channel: string; status: string; pct: number; stage: string; when: string; speed?: number; updated: number }[] | null;
   attempts: number;
+  retry_at?: number | null; // ждёт повтора по расписанию — когда продолжит сама (сек)
   resumable: boolean;
   run: string;
   created: number;

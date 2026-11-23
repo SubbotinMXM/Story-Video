@@ -2524,6 +2524,23 @@ code {
 .job-note {
   line-height: 1.45;
 }
+/* ждёт повтора по расписанию: когда продолжит и почему */
+.job-wait {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--warn-soft);
+  line-height: 1.45;
+  min-width: 0;
+}
+.job-wait-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--warn);
+}
 .lt {
   min-width: 0;
 }
