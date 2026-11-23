@@ -643,7 +643,7 @@ def rewrite_channels(body: ChannelsIn) -> dict[str, Any]:
     chosen: set[str] = set()  # один канал двумя ссылками (@имя и /channel/UC…) — ролики не повторяются
     for url in urls:
         try:
-            # с каждого канала берём кандидатов «с запасом» — сколько реально нужно, решит spread (всего ровно count)
+            # с каждого канала — кандидаты «с запасом»; spread сравнит каналы и возьмёт лучшие (всего ровно count)
             got = pick(url, count, section=section, keys=keys, jobs=states, exclude=chosen)
         except ChannelError as exc:
             report.append({"url": url, "error": str(exc)})
@@ -848,7 +848,7 @@ def templates_launch(tid: str, body: TemplateLaunchIn) -> dict[str, Any]:
         lists.append(entry)
         report.append(entry)
     items: list[JobIn] = []
-    for ent, v in spread(lists, count):  # по очереди: по ролику с каждого канала, пока не наберётся N
+    for ent, v in spread(lists, count):  # самые залетевшие со всех каналов вместе, ровно N
         items.append(JobIn(kind="rewrite", params={**common, "url": v.url, "video_title": v.title,
                                                    "channel_title": ent["channel"], "force": True}))
     if not items:

@@ -5,8 +5,14 @@
 канала). Отсев: Shorts, трансляции и премьеры, короче минимума раздела (из короткого не выйдет нужный объём).
 
 «Залётность» = скорость (просмотры в день с публикации) × отрыв от обычного уровня канала (просмотры ÷
-медиана канала). Сначала — лучшие за последние WINDOW_DAYS дней, кончились — более старые (по отрыву).
+медиана канала) — для всех роликов, и свежих, и старых: возраст старше WINDOW_DAYS дней считается мягче
+(старый ролик набрал основное в первые недели — средняя скорость за всю жизнь его занижала бы). Каналы-доноры
+сравниваются между собой: со всех берутся ролики с самой большой залётностью (не поровну с каждого).
 Рейтинг каждый раз считается заново: новый залетевший ролик пойдёт первым.
+
+Экономия запросов: список роликов канала кэшируется (CACHE_FRESH_SEC — берётся как есть); позже — дочитываются
+только новые ролики, а просмотры обновляются у новых и недавних (младше REFRESH_DAYS), у старых — раз в
+CACHE_FULL_SEC (их цифры почти не меняются).
 
 Журнал переписанного (общий на всю программу, оба раздела, и ссылки руками тоже): ролик, который уже
 взят, с канала второй раз не берётся. Взят = поставлен в очередь; задачу удалили или отменили до конца
@@ -29,6 +35,11 @@ FILE = "rewrite_ledger.json"
 WINDOW_DAYS = 30
 MIN_SEC = {"broll": 10 * 60, "slides": 8 * 60}  # короче — не хватит исходника на нужный объём
 MAX_VIDEOS = 1500  # столько последних роликов канала смотрим (страниц API — MAX_VIDEOS / 50)
+OLD_AGE_POWER = 0.8  # возраст сверх WINDOW_DAYS — в этой степени (смягчение для старых роликов)
+CACHE_FILE = "rewrite_channel_cache.json"
+CACHE_FRESH_SEC = 6 * 3600  # список канала моложе — без запросов
+CACHE_FULL_SEC = 7 * 86400  # просмотры старых роликов обновляем не чаще
+REFRESH_DAYS = 90  # у роликов младше — просмотры обновляем при каждом дочитывании
 API = "https://www.googleapis.com/youtube/v3"
 _VID = re.compile(r"(?:v=|youtu\.be/|/shorts/|/live/|/embed/)([\w-]{11})")
 
@@ -206,7 +217,10 @@ def _channel_query(url: str) -> dict:
     raise ChannelError(f"не понял ссылку на канал: {u} (нужно youtube.com/@имя или youtube.com/channel/UC…)")
 
 
-def _list_api(url: str, keys: list[str]) -> tuple[str, str, list[Video]]:
+def _list_api(url: str, keys: list[str], cached: dict | None = None) -> tuple[str, str, list[Video]]:
+    """cached — прошлый список канала из кэша ({"videos": [...], "full_at": …}): тогда дочитываем только новые
+    ролики (лента загрузок идёт от новых к старым — до первого знакомого), а просмотры обновляем у новых и недавних;
+    у старых — только если полному обновлению больше CACHE_FULL_SEC."""
     api = _Api(keys)
     try:
         data = api.get("channels", {"part": "snippet,contentDetails", **_channel_query(url)})
@@ -216,26 +230,38 @@ def _list_api(url: str, keys: list[str]) -> tuple[str, str, list[Video]]:
         ch = items[0]
         cid, title = ch["id"], ch["snippet"]["title"]
         uploads = ch["contentDetails"]["relatedPlaylists"]["uploads"]
+        known = {v["id"]: Video(**v) for v in (cached or {}).get("videos") or []} if cached else {}
+        full = not known or time.time() - float((cached or {}).get("full_at") or 0) > CACHE_FULL_SEC
         ids: list[str] = []
         token = ""
         while len(ids) < MAX_VIDEOS:
             page = api.get("playlistItems", {"part": "contentDetails", "playlistId": uploads, "maxResults": 50,
                                              **({"pageToken": token} if token else {})})
-            ids += [i["contentDetails"]["videoId"] for i in page.get("items") or []]
+            got = [i["contentDetails"]["videoId"] for i in page.get("items") or []]
+            ids += got
             token = page.get("nextPageToken") or ""
-            if not token:
-                break
-        videos: list[Video] = []
-        for k in range(0, len(ids), 50):
+            if not token or (known and any(i in known for i in got)):
+                break  # дальше — уже знакомые ролики
+        if known:  # знакомые, до которых не листали, — из кэша (в том же порядке: от новых к старым)
+            ids += [i for i in known if i not in set(ids)][:max(0, MAX_VIDEOS - len(ids))]
+        now = time.time()
+        stale = [i for i in ids if full or i not in known
+                 or not known[i].published or now - known[i].published < REFRESH_DAYS * 86400]
+        fresh: dict[str, Video] = {}
+        for k in range(0, len(stale), 50):
             batch = api.get("videos", {"part": "snippet,contentDetails,statistics,liveStreamingDetails",
-                                       "id": ",".join(ids[k:k + 50])})
+                                       "id": ",".join(stale[k:k + 50])})
             for v in batch.get("items") or []:
                 sn = v.get("snippet") or {}
-                videos.append(Video(
+                fresh[v["id"]] = Video(
                     id=v["id"], title=sn.get("title") or "", views=int((v.get("statistics") or {}).get("viewCount") or 0),
                     published=_iso_time(sn.get("publishedAt") or ""),
                     duration=_iso_duration((v.get("contentDetails") or {}).get("duration") or ""),
-                    live=bool(v.get("liveStreamingDetails")) or sn.get("liveBroadcastContent") in ("live", "upcoming")))
+                    live=bool(v.get("liveStreamingDetails")) or sn.get("liveBroadcastContent") in ("live", "upcoming"))
+        # ролик, который спросили, но API не вернул, — удалён или скрыт: в список не попадает
+        videos = [fresh[i] if i in fresh else known[i] for i in ids if i in fresh or (i in known and i not in stale)]
+        log(f"Каналы: «{title}» — запросов статистики {(len(stale) + 49) // 50}"
+            + (f" (из кэша {len(ids) - len(stale)} роликов)" if known else ""))
         return cid, title, videos
     finally:
         api.close()
@@ -259,11 +285,27 @@ def _list_ytdlp(url: str) -> tuple[str, str, list[Video]]:
     return cid, title, videos
 
 
+def _cache_key(url: str) -> str:
+    return re.sub(r"/(videos|shorts|streams|featured)/?$", "", (url or "").strip().rstrip("/")).lower()
+
+
 def list_channel(url: str, keys: list[str]) -> tuple[str, str, list[Video]]:
-    """→ (ID канала, название, ролики)."""
+    """→ (ID канала, название, ролики). Список кэшируется: моложе CACHE_FRESH_SEC — без запросов вовсе,
+    старше — дочитываются только новые ролики (см. _list_api)."""
+    key = _cache_key(url)
+    with LOCK:
+        cached = (read_json(CACHE_FILE, {}) or {}).get(key)
+    if cached and time.time() - float(cached.get("at") or 0) < CACHE_FRESH_SEC:
+        log(f"Каналы: «{cached.get('title')}» — список роликов из кэша (без запросов)")
+        return cached["cid"], cached["title"], [Video(**v) for v in cached.get("videos") or []]
+    full_at = time.time()
     if keys:
         try:
-            return _list_api(url, keys)
+            cid, title, videos = _list_api(url, keys, cached if cached and cached.get("api") else None)
+            full = not (cached and cached.get("api")) or time.time() - float(cached.get("full_at") or 0) > CACHE_FULL_SEC
+            _remember(key, cid, title, videos, api=True,
+                      full_at=full_at if full else float(cached.get("full_at") or full_at))
+            return cid, title, videos
         except ChannelError as exc:
             if "не понял" in str(exc) or "не найден" in str(exc):
                 raise
@@ -271,17 +313,39 @@ def list_channel(url: str, keys: list[str]) -> tuple[str, str, list[Video]]:
         except httpx.HTTPError as exc:
             log(f"Каналы: YouTube API не отвечает ({exc}) — беру список через yt-dlp")
     try:
-        return _list_ytdlp(url)
+        cid, title, videos = _list_ytdlp(url)
     except Exception as exc:
         raise ChannelError(f"список роликов канала не получить: {str(exc)[:200]}") from None
+    _remember(key, cid, title, videos, api=False, full_at=full_at)
+    return cid, title, videos
+
+
+def _remember(key: str, cid: str, title: str, videos: list[Video], *, api: bool, full_at: float) -> None:
+    try:
+        with LOCK:
+            data = read_json(CACHE_FILE, {}) or {}
+            data[key] = {"at": time.time(), "full_at": full_at, "api": api, "cid": cid, "title": title,
+                         "videos": [{k: v for k, v in asdict(x).items() if k not in ("score", "recent")} for x in videos]}
+            write_json(CACHE_FILE, data)
+    except OSError as exc:  # кэш — только экономия: не записался — работаем дальше
+        log(f"Каналы: кэш списка не записан ({exc})")
 
 
 # ---------- рейтинг ----------
 
 
+def effective_age(days: float, window_days: int = WINDOW_DAYS) -> float:
+    """Возраст для скорости: до window_days — как есть, дальше — мягче (степень OLD_AGE_POWER)."""
+    days = max(1.0, days)
+    if days <= window_days:
+        return days
+    return window_days + (days - window_days) ** OLD_AGE_POWER
+
+
 def rank(videos: list[Video], *, min_sec: float, now: float | None = None,
          window_days: int = WINDOW_DAYS) -> list[Video]:
-    """Подходящие ролики по «залётности»: сначала свежие (за window_days), потом остальные."""
+    """Подходящие ролики по «залётности» (скорость × отрыв от уровня канала) — свежие и старые вместе.
+    Ролики без даты (запасной путь без ключей) — после датированных, по отрыву."""
     now = now or time.time()
     ok = [v for v in videos if not v.live and (v.duration == 0 or v.duration >= min_sec) and v.views > 0]
     if not ok:
@@ -292,10 +356,10 @@ def rank(videos: list[Video], *, min_sec: float, now: float | None = None,
         if v.published:
             age = max(1.0, (now - v.published) / 86400)
             v.recent = age <= window_days
-            v.score = (v.views / age) * ratio if v.recent else ratio
+            v.score = (v.views / effective_age(age, window_days)) * ratio
         else:
             v.recent, v.score = False, ratio
-    return sorted(ok, key=lambda v: (not v.recent, -v.score))
+    return sorted(ok, key=lambda v: (not v.published, -v.score))
 
 
 def pick(url: str, count: int, *, section: str, keys: list[str], jobs: dict | None = None,
@@ -317,20 +381,27 @@ def pick(url: str, count: int, *, section: str, keys: list[str], jobs: dict | No
 
 
 def spread(entries: list[dict], count: int) -> list[tuple[dict, Video]]:
-    """Ровно count роликов из каналов-доноров (или сколько есть): по очереди по ролику с каждого, пока не наберётся.
-    Первым идёт канал, с которого раньше брали меньше всего, — так при малом числе роликов доноры чередуются.
+    """Ровно count роликов из каналов-доноров (или сколько есть): каналы сравниваются между собой — берутся ролики
+    с самой большой залётностью отовсюду (с сильного канала может уйти больше, со слабого — ничего).
     В entries — результаты pick(): у каждого «videos» (кандидаты по рейтингу). Заполняет entry["taken"], обновляет entry["left"]."""
-    order = sorted(entries, key=lambda e: int(e.get("taken_before") or 0))
-    out: list[tuple[dict, Video]] = []
-    for e in order:
+    for e in entries:
         e["taken"] = 0
-    want = max(0, int(count))
-    for rnd in range(want):
-        for e in order:
-            if len(out) < want and rnd < len(e["videos"]):
-                out.append((e, e["videos"][rnd]))
-                e["taken"] += 1
-    for e in order:
+    # равная залётность (или нет данных — без ключей) — по очереди: место в своём канале, потом реже бравшийся донор
+    pool = [(e, v, i) for e in entries for i, v in enumerate(e["videos"])]
+    pool.sort(key=lambda evi: (not getattr(evi[1], "published", 0), -float(getattr(evi[1], "score", 0) or 0),
+                               evi[2], int(evi[0].get("taken_before") or 0)))
+    out: list[tuple[dict, Video]] = []
+    seen: set[str] = set()
+    for e, v, _i in pool:
+        if len(out) >= max(0, int(count)):
+            break
+        if v.id in seen:
+            continue
+        seen.add(v.id)
+        out.append((e, v))
+        e["taken"] += 1
+    for e in entries:
+        e["videos"].sort(key=lambda v: v.id not in seen)  # взятые — первыми (для отчёта «что взято»)
         e["left"] = int(e.get("left") or 0) + len(e["videos"]) - e["taken"]  # кандидаты, которые не понадобились
         if e.get("id") and e.get("url"):  # pick записал в учёт «взято» по кандидатам — исправляем на реально взятые
             _save_channel(e["id"], title=e.get("channel") or "", url=e["url"], total=int(e.get("total") or 0),

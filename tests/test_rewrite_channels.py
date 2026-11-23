@@ -25,8 +25,16 @@ class RankTest(unittest.TestCase):
                   vid("short", 5_000_000, 2, minutes=1), vid("stream", 5_000_000, 3, live=True),
                   vid("old_meh", 8_000, 300), vid("mid", 50_000, 20)]
         order = [v.title for v in ch.rank(videos, min_sec=600, now=NOW)]
-        self.assertEqual(order[:3], ["ролик fresh_hit", "ролик mid", "ролик fresh_meh"], "свежие — по залётности")
-        self.assertEqual(order[3:], ["ролик old_hit", "ролик old_meh"], "потом старые — по отрыву от канала")
+        # старые сравниваются со свежими по той же залётности (возраст сверх 30 дней — мягче):
+        # 900 тыс. за 400 дней при медиане 50 тыс. — сильнее обычного свежего ролика
+        self.assertEqual(order, ["ролик fresh_hit", "ролик old_hit", "ролик mid", "ролик fresh_meh", "ролик old_meh"])
+
+    def test_200k_in_2_days_beats_300k_in_a_month_and_old_by_speed(self) -> None:
+        videos = [vid("fast", 200_000, 2), vid("month", 300_000, 30), vid("y35", 500_000, 35),
+                  vid("y700", 500_000, 700), vid("base", 20_000, 10), vid("base2", 20_000, 12)]
+        order = [v.title for v in ch.rank(videos, min_sec=600, now=NOW)]
+        self.assertLess(order.index("ролик fast"), order.index("ролик month"))
+        self.assertLess(order.index("ролик y35"), order.index("ролик y700"), "старые — тоже по скорости")
         self.assertNotIn("ролик short", order)
         self.assertNotIn("ролик stream", order)
 
@@ -151,6 +159,68 @@ class SpreadTests(unittest.TestCase):
     def test_donor_used_least_so_far_goes_first(self) -> None:
         a, b = self.entry("A", ["a1", "a2"], before=7), self.entry("B", ["b1", "b2"], before=1)
         self.assertEqual([v.id for _e, v in ch.spread([a, b], 1)], ["b1"], "малый счёт — первым: доноры чередуются")
+
+
+class CrossChannelTests(unittest.TestCase):
+    """Каналы сравниваются между собой: берутся самые залетевшие отовсюду, а не поровну."""
+
+    def test_strong_channel_gives_more(self) -> None:
+        def v(i, score):
+            return ch.Video(id=i, title=i, views=1, published=NOW, score=score)
+
+        hits = {"channel": "Хиты", "videos": [v("h1", 900), v("h2", 800), v("h3", 10)], "left": 0}
+        flat = {"channel": "Ровный", "videos": [v("f1", 50), v("f2", 40)], "left": 0}
+        out = ch.spread([hits, flat], 3)
+        self.assertEqual([x.id for _e, x in out], ["h1", "h2", "f1"])
+        self.assertEqual((hits["taken"], flat["taken"]), (2, 1))
+
+
+class ChannelCacheTests(unittest.TestCase):
+    """Экономия запросов: повтор в течение CACHE_FRESH_SEC — без API; позже — только новые ролики и недавние."""
+
+    def setUp(self) -> None:
+        write_json(ch.CACHE_FILE, {})
+
+    def test_fresh_cache_skips_api_then_incremental(self) -> None:
+        calls = []
+
+        class Api:
+            def __init__(self, keys):
+                pass
+
+            def close(self):
+                pass
+
+            def get(self, path, params):
+                calls.append((path, params.get("id") or params.get("pageToken") or ""))
+                if path == "channels":
+                    return {"items": [{"id": "UCx", "snippet": {"title": "К"},
+                                       "contentDetails": {"relatedPlaylists": {"uploads": "UUx"}}}]}
+                if path == "playlistItems":
+                    ids = self.ids
+                    return {"items": [{"contentDetails": {"videoId": i}} for i in ids]}
+                return {"items": [{"id": i, "snippet": {"title": i, "publishedAt": self.when.get(i, "2020-01-01T00:00:00Z")},
+                                   "contentDetails": {"duration": "PT20M"}, "statistics": {"viewCount": "100"}}
+                                  for i in params["id"].split(",")]}
+
+        Api.ids = ["old1xxxxxxx", "old2xxxxxxx"]
+        Api.when = {}
+        with mock.patch.object(ch, "_Api", Api):
+            ch.list_channel("https://youtube.com/@k", ["key"])
+            n = len(calls)
+            ch.list_channel("https://youtube.com/@k/videos", ["key"])
+            self.assertEqual(len(calls), n, "свежий кэш — ни одного запроса")
+            # кэш устарел: новый ролик сверху — статистика только по нему (старые не трогаем)
+            data = ch.read_json(ch.CACHE_FILE, {})
+            for rec in data.values():
+                rec["at"] -= ch.CACHE_FRESH_SEC + 1
+            write_json(ch.CACHE_FILE, data)
+            Api.ids = ["new1xxxxxxx", "old1xxxxxxx", "old2xxxxxxx"]
+            calls.clear()
+            _cid, _t, videos = ch.list_channel("https://youtube.com/@k", ["key"])
+        stats = [c for c in calls if c[0] == "videos"]
+        self.assertEqual(stats, [("videos", "new1xxxxxxx")])
+        self.assertEqual([v.id for v in videos], ["new1xxxxxxx", "old1xxxxxxx", "old2xxxxxxx"])
 
 
 class ShortfallEndpointTests(unittest.TestCase):
