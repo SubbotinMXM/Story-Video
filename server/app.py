@@ -1187,8 +1187,11 @@ class SubLoginIn(BaseModel):
 
 
 def _terminal(cmd: str) -> None:
-    """Открыть Терминал с командой: вход в аккаунт идёт через браузер, Терминал показывает ход и ссылку."""
-    safe = cmd.replace("\\", "\\\\").replace('"', '\\"')
+    """Открыть Терминал с командой: вход в аккаунт идёт через браузер, Терминал показывает ход и ссылку.
+    Команда начинается с пробела: oh-my-zsh в новом окне может спросить «Would you like to update? [Y/n]» и съесть
+    первый символ набранного как ответ — так терялась открывающая кавычка, и zsh зависал на «quote>» (24.11, вход
+    в Claude). Пробел он съест как «нет» (обновлять не станет), а без вопроса пробел перед командой ничего не меняет."""
+    safe = (" " + cmd).replace("\\", "\\\\").replace('"', '\\"')
     script = f'tell application "Terminal" to do script "{safe}"'
     subprocess.run(["osascript", "-e", script, "-e", 'tell application "Terminal" to activate'], check=False)
 

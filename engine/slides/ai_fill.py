@@ -388,6 +388,8 @@ def fill_pool(
         return videos, images
     total = max(len(videos) + len(images), image_target + video_target)
     cap = int(total * (cfg.share if share is None else share))
+    # нехватка картинок до нормы закрывается AI целиком — в пределах денежного лимита ролика (fit_budget)
+    cap = max(cap, max(0, image_target - len(images)))
     plan_q = {"image": [q for q in plan.image_queries if q] or [plan.summary], "video": [q for q in plan.video_queries if q] or [plan.summary]}
     tasks: list[GenTask] = []
     quality = _quality(judge, pool)

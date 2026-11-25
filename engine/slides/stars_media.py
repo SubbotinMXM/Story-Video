@@ -1048,6 +1048,17 @@ def collect_people_timeline(
                     media.setdefault(s.id, []).extend({**i, "kind": "image"} for i in more)
                     log(f"Люди: добор {s.name} — ещё {len(more)} фото")
             dropped = dedupe_media(media, run_dir, list(dict.fromkeys(order or [s.id for s in stars])))
+        have_photos = sum(1 for v in media.values() for it in v if it.get("kind") != "video")
+        if have_photos < MIN_PHOTOS_PER_VIDEO * min(1.0, end / 1200.0) // 2:
+            # героев мало в сети (инженер, учёный): ролик из 4 фото на 40 минут — брак. Режим «люди» не годится
+            log(f"Люди: фото героев всего {have_photos} (нужно не меньше {round(MIN_PHOTOS_PER_VIDEO * min(1.0, end / 1200.0) / 2)}) — "
+                "ролик не про знаменитостей, подбираю по теме, как обычно")
+            _stop_broll(bg, stop_broll)
+            shutil.rmtree(run_dir / "pool", ignore_errors=True)
+            cast_file.write_text(json.dumps(
+                {"v": CAST_VERSION, "stars": [], "parts": [], "n": len(sents), "people": False}, ensure_ascii=False),
+                encoding="utf-8")
+            return None
         missing = [s.name for s in stars if not media.get(s.id) and seconds.get(s.id)]
         neutral = neutral_media(http, clients, run_dir) if missing else []
         if missing:
@@ -1078,6 +1089,16 @@ def collect_people_timeline(
         if judge is not None:
             judge.close()
 
+    unique = (sum(1 for v in media.values() for it in v) + len(broll) + len(neutral))
+    need_unique = round(MIN_PHOTOS_PER_VIDEO * min(1.0, end / 1200.0))
+    if unique < need_unique:
+        log(f"Люди: разных кадров всего {unique} (нужно не меньше {need_unique}) — "
+            "подбираю по теме, как обычно")
+        shutil.rmtree(run_dir / "pool", ignore_errors=True)
+        cast_file.write_text(json.dumps(
+            {"v": CAST_VERSION, "stars": [], "parts": [], "n": len(sents), "people": False}, ensure_ascii=False),
+            encoding="utf-8")
+        return None
     slots = build_slots(times, media, stars, rng=random.Random(req.seed), neutral=neutral, broll=broll)
     wrong = foreign_slots(slots, times, stars)
     if wrong:  # так быть не должно: лучше остановиться, чем показать Никулина на рассказе про Миронова

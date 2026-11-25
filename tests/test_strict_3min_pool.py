@@ -59,6 +59,11 @@ class LateBlockTests(unittest.TestCase):
 
 
 class Strict3MinFlowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        p = unittest.mock.patch("engine.slides.pool_floor.top_up_images", side_effect=lambda images, *a, **k: images)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_only_first_minutes_searched_per_phrase(self) -> None:
         from engine.slides.media_pipeline import MediaRequest, MediaSourcesConfig
         from engine.slides.story_context import StoryContext

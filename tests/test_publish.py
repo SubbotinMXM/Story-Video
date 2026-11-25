@@ -705,6 +705,51 @@ class BrollWiringTests(Fixture):
             runners._broll({**cfg, "broll_publish_channels": []}, {"text": "Рассказ"}, {})
 
 
+class CommentTranslationTests(unittest.TestCase):
+    """Комментарий-призыв уходит на языке канала: перевод один на язык и запоминается."""
+
+    CALL = "Подписывайтесь на канал, чтобы не пропустить новые выпуски 🔔"
+
+    def setUp(self) -> None:
+        import shutil
+
+        from engine.publish.store import publish_dir
+
+        shutil.rmtree(publish_dir(), ignore_errors=True)
+        self.addCleanup(shutil.rmtree, publish_dir(), True)
+
+    def test_russian_channel_and_unknown_language_keep_the_text(self) -> None:
+        from engine.publish.localize import comment_for
+
+        self.assertEqual(comment_for(self.CALL, "ru", ("k", "u", "m")), (self.CALL, ""))
+        self.assertEqual(comment_for(self.CALL, "", ("k", "u", "m")), (self.CALL, ""))
+
+    def test_other_language_translated_once_then_taken_from_memory(self) -> None:
+        from unittest import mock
+
+        from engine.publish import localize
+
+        with mock.patch.object(localize, "translate_text", return_value=("", "¡Suscríbete al canal! 🔔")) as tr:
+            first = localize.comment_for(self.CALL, "es", ("k", "u", "m"))
+            second = localize.comment_for(self.CALL, "es-ES", ("k", "u", "m"))
+        self.assertEqual(first, ("¡Suscríbete al canal! 🔔", ""))
+        self.assertEqual(second[0], first[0])
+        self.assertEqual(tr.call_count, 1, "второй канал того же языка — из памяти, без нейросети")
+
+    def test_no_key_or_failed_translation_leaves_text_with_a_note(self) -> None:
+        from unittest import mock
+
+        from engine.publish import localize
+
+        text, note = localize.comment_for(self.CALL, "es", None)
+        self.assertEqual(text, self.CALL)
+        self.assertIn("не переведён на ES", note)
+        with mock.patch.object(localize, "translate_text", side_effect=RuntimeError("лимит")):
+            text, note = localize.comment_for(self.CALL, "de", ("k", "u", "m"))
+        self.assertEqual(text, self.CALL)
+        self.assertIn("лимит", note)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -315,7 +315,13 @@ def run_publish(req: PublishRequest, state: dict[str, Any], save: Callable[..., 
                             live.after_upload(t, "комментарий-призыв под вышедшими роликами")
                             # этот ролик ещё в отложке — призыв под теми, что уже вышли (обычно один)
                             try:
-                                rec["notes"] += youtube.backfill_comments(session.cdp_url, t.channel, req.comment,
+                                # канал на другом языке — призыв переведён (один перевод на язык, запоминается)
+                                from engine.publish.localize import comment_for
+
+                                call, why = comment_for(req.comment, registry.normalize(t.channel.language), req.llm)
+                                if why:
+                                    rec["notes"].append(why)
+                                rec["notes"] += youtube.backfill_comments(session.cdp_url, t.channel, call,
                                                                           cancel=cancel)
                             except Exception as exc:
                                 if cancel is not None and cancel.is_cancelled():

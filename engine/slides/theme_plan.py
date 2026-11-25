@@ -10,6 +10,7 @@ from pathlib import Path
 from engine.core.jsonish import json_dict
 from engine.slides.llm_client import LLMClient
 from engine.core.logutil import log
+from engine.slides.source_mix import subject_of
 from engine.slides.story_context import AMBIGUITY_RULE, StoryContext, extract_story_context
 
 THEME_NAME = "theme.json"
@@ -32,8 +33,11 @@ Rules:
   not "fishing village"): a frame from another country is useless for this film
 - For places, cities, nature: prefer professional cinematic footage words ("aerial drone", "cinematic 4K",
   "timelapse", "golden hour") — not vlogs, news or amateur clips
-- If characters[] has a real person, the film is ABOUT that person: at least 12 of 16
-  image queries and 4 of 16 video queries must show THEM, with their full name in the query.
+- ONLY when STORY CONTEXT subject is "person" (a biography of a celebrity or historical figure) the film is ABOUT
+  that person: at least 12 of 16 image queries and 4 of 16 video queries must show THEM, with their full name in
+  the query. For any other subject (an invention, a chip, a technology, an event, a place) NO query names a person (name searches return strangers and namesakes): ALL queries show the topic itself: the devices, components, schematics,
+  machines, workplaces, materials, processes, places and scenes of the era — a person's photos are rare, so
+  queries made of a name find 4-8 pictures and the film needs 80+ different ones.
   * Person who lived in the age of photography (after ~1850: actors, singers, politicians,
     athletes, scientists of the 20th–21st century): REAL PHOTOS of that person only —
     "<name> photo", "<name> portrait photo", "<name> 1970s", "<name> on stage",
@@ -252,6 +256,11 @@ def _bias_main_character(plan: ThemePlan) -> None:
         return
     kind = hero_era(plan.context)
     images, videos = person_queries(name, plan.context.era, plan.context.place, kind)
+    if subject_of(plan.context.subject, visual_style=plan.context.visual_style,
+                  historical=plan.context.historical) != "person":
+        # рассказ о технологии/событии, а не биография: фото создателя в сети редки, а поиск по имени подсовывает
+        # чужих людей (однофамильцев, современных «инженеров») — запросов по имени нет, всё по теме
+        images, videos = [], []
     if kind == "photo":
         # от LLM для человека эпохи фото не берём «статуи/бюсты» — интернет полон его фото
         bad = re.compile(r"\b(statue|bust|sculpture|marble|bronze|engraving|ancient)\b", re.I)

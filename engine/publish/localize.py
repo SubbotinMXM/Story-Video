@@ -44,6 +44,42 @@ def translate_text(llm, title: str, description: str, language: str) -> tuple[st
     return (cv._clean_title(data.get("title")) or title, str(data.get("description") or description).strip())
 
 
+COMMENT_CACHE = "comment_translations.json"  # {«язык|текст»: перевод} — один и тот же перевод на все каналы и ролики
+
+
+def comment_for(text: str, language: str, llm) -> tuple[str, str]:
+    """Комментарий-призыв для канала на его языке: текст написан на одном языке (обычно русском), канал на другом —
+    нейросеть переводит (эмодзи, ссылки, @упоминания и #хештеги — как есть). Перевод запоминается: на канал этого языка
+    уходит всегда один и тот же текст, без повторной траты нейросети. → (текст, пометка для итогов или «»).
+    Язык канала не указан, текст уже на нём или перевод не вышел — текст как был (в последнем случае — с пометкой)."""
+    from engine.publish.store import LOCK, read_json, write_json
+
+    code = (language or "").split("-")[0].split("_")[0].lower()
+    if not text.strip() or not code or not needs_translation(text, code):
+        return text, ""
+    key = f"{code}|{text.strip()}"
+    with LOCK:
+        cached = (read_json(COMMENT_CACHE, {}) or {}).get(key)
+    if cached:
+        return cached, ""
+    if not llm or not llm[0]:
+        return text, (f"комментарий-призыв не переведён на {code.upper()} (нет ключа нейросети — Настройки → LLM): "
+                      "оставлен как написан")
+    try:
+        done = translate_text(llm, "", text, code)[1].strip()
+    except Exception as exc:
+        log(f"Комментарий-призыв: перевод на {code.upper()} не вышел ({str(exc).splitlines()[0][:120]})")
+        return text, f"комментарий-призыв не переведён на {code.upper()} ({str(exc).splitlines()[0][:100]}): оставлен как написан"
+    if not done:
+        return text, ""
+    with LOCK:
+        data = read_json(COMMENT_CACHE, {}) or {}
+        data[key] = done
+        write_json(COMMENT_CACHE, data)
+    log(f"Комментарий-призыв: переведён на {code.upper()}")
+    return done, ""
+
+
 def read_cover_text(llm, image: Path) -> list[str]:
     data = cv._ask_image(llm, "cover_read_text", _READ, "Прочитай надписи.", cv.to_jpeg(image.read_bytes()))
     return cv._lines(data.get("text"))

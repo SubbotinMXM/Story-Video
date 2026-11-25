@@ -49,6 +49,8 @@ Rate every candidate with integers 0-10:
 - "reject": a short reason if the candidate must not be used at all, else "". Reject: wrong country or culture,
   wrong era/anachronism, watermark or logo, burned-in text or subtitles, collage or split screen, meme,
   screenshot of a website/app/game, distorted AI artifacts (extra fingers, melted faces, gibberish text).
+Era is judged only by what visibly dates a frame (clothes, cars, screens, devices that did not exist yet). A component,
+schematic, tool, material or place that looks the same across decades is NOT an anachronism.
 Be strict: a generic village with no sign of the film's country is NOT the film's country.
 Return ONLY JSON: {"items": [{"n": 1, "context": 7, "beat": 6, "quality": 8, "reject": ""}]}
 """

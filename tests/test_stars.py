@@ -308,6 +308,12 @@ class TimelineMatchTests(unittest.TestCase):
 
 
 class StageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # маленькие фикстуры: норма «80 фото на ролик» проверяется в test_pool_floor
+        p = unittest.mock.patch.object(st, "MIN_PHOTOS_PER_VIDEO", 1)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_stage_writes_timeline_and_uses_only_own_photos(self) -> None:
         from engine.slides.media_pipeline import MediaRequest, MediaSourcesConfig
         from engine.slides.theme_plan import ThemePlan
@@ -354,6 +360,12 @@ class StageTests(unittest.TestCase):
 
 class RobustnessTests(unittest.TestCase):
     """Сбои по дороге не должны ронять сборку или оставлять фоновую работу."""
+    def setUp(self) -> None:
+        # маленькие фикстуры: норма «80 фото на ролик» проверяется в test_pool_floor
+        p = unittest.mock.patch.object(st, "MIN_PHOTOS_PER_VIDEO", 1)
+        p.start()
+        self.addCleanup(p.stop)
+
 
     def stage(self, fake_star, *, judge=None, broll=None):
         from engine.slides.media_pipeline import MediaRequest, MediaSourcesConfig
@@ -469,6 +481,12 @@ def _run(tmp: str) -> Path:
 
 class AutoPeopleTests(unittest.TestCase):
     """Логика «Звёзд» сама включается в любом режиме, если ролик про людей."""
+    def setUp(self) -> None:
+        # маленькие фикстуры: норма «80 фото на ролик» проверяется в test_pool_floor
+        p = unittest.mock.patch.object(st, "MIN_PHOTOS_PER_VIDEO", 1)
+        p.start()
+        self.addCleanup(p.stop)
+
 
     def _req(self, run: Path):
         from engine.slides.media_pipeline import MediaRequest, MediaSourcesConfig

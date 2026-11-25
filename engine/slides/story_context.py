@@ -37,6 +37,11 @@ Rules:
   (a country or people today, a living star, "from ancient times to now"), historical=false:
   modern, high-quality footage is preferred
 - For historical=true: avoid MUST list modern lifestyle cues; must_include MUST lock era/place
+- Stories about an INVENTION, technology, a chip, a program, a material or a scientific idea (even when an engineer is
+  its central figure) are NOT biographies: subject=history (or other), NOT person, and historical=false — photos of the
+  same components, circuits, devices, workplaces and diagrams exist today and fit perfectly. Put the decade only into
+  "era"; "avoid" lists only things that visibly break the story (e.g. smartphones). subject=person is only for a
+  film about a celebrity's life as a personality (career, relationships, scandals).
 - Be concrete, English only, short phrases
 """
 

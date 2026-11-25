@@ -551,6 +551,11 @@ class SilentVideoTests(Base):
 
 
 class PipelineTests(unittest.TestCase):
+    def setUp(self) -> None:
+        p = unittest.mock.patch("engine.slides.theme_media.MIN_UNIQUE_IMAGES", 1)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_theme_person_video_never_uses_ai(self) -> None:
         """Ролик про конкретного человека: только его настоящие кадры, AI не подмешиваем."""
         from engine.slides import theme_media as tm

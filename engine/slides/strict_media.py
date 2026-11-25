@@ -215,6 +215,24 @@ def _late_pool(
     return videos, images
 
 
+def _top_up_late(late_pool, plan, req, script_path: Path, *, http, clients, pool: Path, trials: Path, frames: Path,
+                 slots, cancel, progress, judge) -> tuple[list[dict], list[dict]]:
+    """Картинок в пуле после начала меньше нормы (поиск по имени героя находит единицы) — добор по теме ролика."""
+    from engine.slides.pool_floor import top_up_images
+
+    videos, images = late_pool
+    target = LATE_IMAGES[0]
+    if len(images) >= target:
+        return late_pool
+    log(f"Пул после 2 минут: картинок {len(images)} из {target} — добираю по теме ролика (предметы, места, процессы)")
+    images = top_up_images(
+        images, plan, script_path.read_text(encoding="utf-8"), req=req, http=http, clients=clients,
+        rng=random.Random((req.seed or 0) + 7), pool=pool, trials=trials, frames=frames, cancel=cancel, progress=progress,
+        judge=judge, exclude=[x for x in slots if x] + videos, target=target, pct_lo=0.68, pct_hi=0.9,
+    )
+    return videos, images
+
+
 def _pregenerate_data(side, req, plan: ThemePlan, beats: list[Beat], queries: list[str], *, pool: Path, judge,
                       cancel: CancelToken | None):
     """Куски про цифры известны сразу после запросов — их инфографика генерируется параллельно
@@ -679,6 +697,9 @@ def collect_strict_timeline(
             if not late_fut.done():
                 progress(0.68, "Пул для остального ролика: дособираю…")
             late_pool = _drop_like_head(*late_fut.result(), slots, run_dir)
+            late_pool = _top_up_late(late_pool, plan, req, script_path, http=http, clients=clients, pool=pool,
+                                     trials=trials, frames=frames, slots=slots, cancel=cancel, progress=progress,
+                                     judge=judge)
             _fill_head_from_pool(beats, slots, *late_pool, run_dir)
             _upgrade_head(beats, slots, late_pool[0], run_dir)
         else:
@@ -736,7 +757,8 @@ def collect_strict_timeline(
         if req.ai is not None and req.ai.active:
             from engine.slides.ai_fill import fill_pool
 
-            videos, images = fill_pool(videos, images, plan, req.ai, pool=pool, image_target=len(images),
+            videos, images = fill_pool(videos, images, plan, req.ai, pool=pool,
+                                       image_target=max(len(images), LATE_IMAGES[0]),
                                        video_target=len(videos), cancel=cancel, tag="late", judge=judge,
                                        moments=_late_moments(words, late_start))
         if not videos and not images:

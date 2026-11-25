@@ -96,7 +96,12 @@ def run_media_stage(
 
     hold_clip()
     try:
-        return _run_media_stage(req, cancel=cancel, on_progress=on_progress)
+        done = _run_media_stage(req, cancel=cancel, on_progress=on_progress)
+        # последняя страховка для любого режима: мало разных кадров — ролик не собираем и не выкладываем
+        from engine.slides.pool_floor import check_timeline
+
+        check_timeline(req.run_dir)
+        return done
     finally:
         release_clip()  # модель CLIP не держим в памяти между роликами
 

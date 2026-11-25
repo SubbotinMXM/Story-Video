@@ -368,3 +368,19 @@ class SwitchNoticeTest(unittest.TestCase):
         toasts = [d for k, d in events if k == "switch"]
         self.assertEqual(len(toasts), 1, "повтор той же смены — без второго уведомления")
         self.assertEqual(toasts[0]["title"], "Рерайт: тест")
+
+
+class TerminalCommandTest(unittest.TestCase):
+    """24.11: oh-my-zsh в новом окне спрашивает «update? [Y/n]» и съедает первый символ набранного — команда
+    начинается с пробела, чтобы съелся он, а не открывающая кавычка (иначе zsh висит на «quote>»)."""
+
+    def test_command_starts_with_space_and_quotes_survive(self) -> None:
+        from unittest import mock
+
+        from server import app as appmod
+
+        seen = []
+        with mock.patch.object(appmod.subprocess, "run", lambda args, **k: seen.append(args)):
+            appmod._terminal("'/x/claude' auth login --claudeai" + appmod._DONE_HINT)
+        script = seen[0][2]
+        self.assertTrue(script.startswith('tell application "Terminal" to do script " \'/x/claude\''), script)

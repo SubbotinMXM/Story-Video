@@ -53,6 +53,7 @@ CLIP_SEC = 10.0
 IMAGE_FIT_MIN = 6  # локальный CLIP мягче LLM-judge
 IMAGE_NEED_MIN = 80
 IMAGE_NEED_MAX = 100
+MIN_UNIQUE_IMAGES = 80  # меньше разных картинок в пуле — не ролик
 GOOGLE_NEED_MIN = 1
 VIDEO_NEED_MIN = 10
 VIDEO_NEED_MAX = 15
@@ -137,8 +138,11 @@ def collect_theme_pool(
                 frames=frames, cancel=cancel, progress=progress, pct_lo=0.12, pct_hi=0.92,
                 image_need=image_need, video_need=video_need,
             )
-            if not images:
-                log(f"Фото «{hero[0]}» не нашлось — подбираю по теме, как обычно")
+            if len(images) < MIN_UNIQUE_IMAGES:
+                log(f"Фото «{hero[0]}»: найдено {len(images)} — для ролика нужно не меньше {MIN_UNIQUE_IMAGES}. "
+                    "Подбираю по теме ролика, как обычно")
+                for item in [*videos, *images]:
+                    (run_dir / str(item.get("path") or "")).unlink(missing_ok=True)
                 hero = None
         if hero is None:
             videos, images, rejected_v, rejected_i = gather_pool(
@@ -160,6 +164,15 @@ def collect_theme_pool(
                 # 80–100 картинок всего: Google по доле темы + стоки до цели (не сверху — дольше)
                 stocks_on_top_of_google=False,
                 judge=judge,
+            )
+        if len(images) < image_need and hero is None:
+            # картинок меньше нормы: поиск по имени героя находит единицы — добираем по теме ролика
+            from engine.slides.pool_floor import top_up_images
+
+            images = top_up_images(
+                images, plan, script, req=req, http=http, clients=clients, rng=random.Random((req.seed or 0) + 7),
+                pool=pool, trials=trials, frames=frames, cancel=cancel, progress=progress, judge=judge,
+                exclude=None, target=image_need, pct_lo=0.88, pct_hi=0.92,
             )
     finally:
         http.close()
@@ -520,7 +533,11 @@ def _fill_kind(
                     continue
                 looks.append(fp)
                 ext = trial.suffix or ".jpg"
-                dest = pool / f"{kind}_{len(saved):02d}_{hit['provider']}{ext}"
+                n_name = len(saved)
+                dest = pool / f"{kind}_{n_name:02d}_{hit['provider']}{ext}"
+                while dest.exists():  # часть кадров могла уйти из пула — имя не должно затереть чужой файл
+                    n_name += 1
+                    dest = pool / f"{kind}_{n_name:02d}_{hit['provider']}{ext}"
                 trial.replace(dest)
                 use_sec = float(hit["duration"])
                 if prefer_video:
