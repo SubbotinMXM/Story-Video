@@ -917,6 +917,12 @@ def collect_people_timeline(
     named = [c for c in ctx.characters if str(c).strip()]
     # «человек» — основная тема; но ролик о съёмках/скандалах знаменитостей LLM нередко метит «история» —
     # если в нём несколько людей, разметку по героям всё равно запрашиваем (решит people и число героев)
+    from engine.slides.story_context import focus_of
+
+    if focus_of(ctx) == "mixed" and len(ctx.key_people) <= 3:
+        # вещь + её создатель (изобретение, здание, открытие): блоков по героям нет, люди идут в общем подборе по теме.
+        # Четверо и больше главных людей — это уже ролик про людей, разметка по героям идёт как обычно
+        return None
     if subject != "person" and not (subject in ("history", "other") and len(named) >= 2):
         return None  # ролик не про людей — разметка по героям не нужна (и LLM не спрашиваем)
 

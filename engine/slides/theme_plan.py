@@ -10,8 +10,13 @@ from pathlib import Path
 from engine.core.jsonish import json_dict
 from engine.slides.llm_client import LLMClient
 from engine.core.logutil import log
-from engine.slides.source_mix import subject_of
-from engine.slides.story_context import AMBIGUITY_RULE, StoryContext, extract_story_context
+from engine.slides.story_context import (
+    AMBIGUITY_RULE,
+    StoryContext,
+    extract_story_context,
+    focus_of,
+    spread_text,
+)
 
 THEME_NAME = "theme.json"
 
@@ -33,17 +38,23 @@ Rules:
   not "fishing village"): a frame from another country is useless for this film
 - For places, cities, nature: prefer professional cinematic footage words ("aerial drone", "cinematic 4K",
   "timelapse", "golden hour") — not vlogs, news or amateur clips
-- ONLY when STORY CONTEXT subject is "person" (a biography of a celebrity or historical figure) the film is ABOUT
-  that person: at least 12 of 16 image queries and 4 of 16 video queries must show THEM, with their full name in
-  the query. For any other subject (an invention, a chip, a technology, an event, a place) NO query names a person (name searches return strangers and namesakes): ALL queries show the topic itself: the devices, components, schematics,
-  machines, workplaces, materials, processes, places and scenes of the era — a person's photos are rare, so
-  queries made of a name find 4-8 pictures and the film needs 80+ different ones.
-  * Person who lived in the age of photography (after ~1850: actors, singers, politicians,
+- Follow STORY CONTEXT "focus":
+  * person or people — the film is ABOUT those people: at least 12 of 16 image queries and 4 of 16 video queries
+    must show THEM, with the full name (or the key person's "search" string) in the query. With several people
+    spread the queries between them.
+  * mixed — the film is about a THING and the person behind it. Both appear on screen. The queries that show the
+    key people are added by the program, so you write ONLY queries about the thing: its parts, devices, schematics,
+    diagrams, machines, workplaces, materials, processes, places and scenes of the era. NO query names a person
+    (name searches also return strangers and namesakes).
+  * topic (or no focus) — NO query names a person; every query shows the topic itself.
+  Photos of one person are rare (4-8 usable pictures), the film needs 80+ different ones: never build the pool from
+  a name alone unless focus is person or people.
+  * (for focus person or people) Person who lived in the age of photography (after ~1850: actors, singers, politicians,
     athletes, scientists of the 20th–21st century): REAL PHOTOS of that person only —
     "<name> photo", "<name> portrait photo", "<name> 1970s", "<name> on stage",
     "<name> interview", "<name> with <colleague>". NEVER statues, busts, paintings,
     engravings or "ancient" — the internet has real photos of them.
-  * Person from before photography (Archimedes, Caesar, Peter the Great): statue, bust,
+  * (for focus person or people) Person from before photography (Archimedes, Caesar, Peter the Great): statue, bust,
     portrait painting, engraving, illustration.
   Only the remaining queries are the city, places, objects, era.
 - If there is NO main person (nature, a city, a general topic), do not invent one.
@@ -109,7 +120,7 @@ def build_theme_plan(script_text: str, client: LLMClient) -> ThemePlan:
         "STORY CONTEXT:\n"
         + json.dumps(ctx.to_dict(), ensure_ascii=False)
         + "\n\nSCRIPT:\n"
-        + text[:7000]
+        + spread_text(text, 9000)
         + "\n\nWrite the B-roll pool queries."
     )
     raw = client.complete(label="theme_queries", system=QUERY_SYSTEM, user=user)
@@ -250,17 +261,33 @@ def person_queries(name: str, era: str, place: str, kind: str | None = None) -> 
 
 
 def _bias_main_character(plan: ThemePlan) -> None:
-    """Если ролик про человека, запросы на его изображения идут первыми."""
-    name = _main_name(plan.context.characters)
+    """Запросы на изображения людей ролика: про человека/людей — впереди и много; «вещь + создатель» — немного
+    (треть пула), остальное по теме; тема без людей — запросов по имени нет (поиск по имени даёт однофамильцев)."""
+    ctx = plan.context
+    focus = focus_of(ctx)
+    if focus == "topic":
+        return
+    kind = hero_era(ctx)
+    if focus == "mixed":
+        people = ctx.key_people[:3]
+        if not people:
+            return
+        per_img = max(2, 6 // len(people))
+        per_vid = 2 if len(people) == 1 else 1
+        images: list[str] = []
+        videos: list[str] = []
+        for p in people:
+            i, v = person_queries(p.get("search") or p["name"], ctx.era, ctx.place, kind)
+            images += i[:per_img]
+            videos += v[:per_vid]
+        plan.image_queries = _prepend_unique(images, plan.image_queries)[:24]
+        plan.video_queries = _prepend_unique(videos, plan.video_queries)[:20]
+        log(f"ThemePlan: вещь + создатель, люди {[p['name'] for p in people]} — {len(images)} запросов по ним, остальное по теме")
+        return
+    name = (ctx.key_people[0]["name"] if ctx.key_people else "") or _main_name(ctx.characters)
     if not name:
         return
-    kind = hero_era(plan.context)
-    images, videos = person_queries(name, plan.context.era, plan.context.place, kind)
-    if subject_of(plan.context.subject, visual_style=plan.context.visual_style,
-                  historical=plan.context.historical) != "person":
-        # рассказ о технологии/событии, а не биография: фото создателя в сети редки, а поиск по имени подсовывает
-        # чужих людей (однофамильцев, современных «инженеров») — запросов по имени нет, всё по теме
-        images, videos = [], []
+    images, videos = person_queries(name, ctx.era, ctx.place, kind)
     if kind == "photo":
         # от LLM для человека эпохи фото не берём «статуи/бюсты» — интернет полон его фото
         bad = re.compile(r"\b(statue|bust|sculpture|marble|bronze|engraving|ancient)\b", re.I)
@@ -269,6 +296,16 @@ def _bias_main_character(plan: ThemePlan) -> None:
     plan.image_queries = _prepend_unique(images, plan.image_queries)[:20]
     plan.video_queries = _prepend_unique(videos, plan.video_queries)[:18]
     log(f"ThemePlan: герой {name!r} ({kind}) — его изображения впереди")
+
+
+def hero_names(ctx: StoryContext) -> list[str]:
+    """Имена (в нижнем регистре), по которым запрос считается «про героя»: главные люди ролика, а у старых запусков —
+    первый персонаж."""
+    names = [p["name"].lower() for p in ctx.key_people]
+    if names:
+        return names
+    main = _main_name(ctx.characters).lower()
+    return [main] if main else []
 
 
 def _main_name(characters: list[str]) -> str:

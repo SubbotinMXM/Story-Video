@@ -71,6 +71,8 @@ def topic_queries(plan, script: str, client, *, used: list[str], count: int = TO
 def _names_of(plan) -> list[str]:
     """Имена и фамилии героев (в нижнем регистре): запросы по теме их не содержат."""
     out: list[str] = []
+    for p in plan.context.key_people:
+        out.extend(w.lower() for w in str(p.get("name") or "").split() if len(w) >= 4)
     for raw in plan.context.characters:
         for part in re.split(r"[,()]", str(raw)):
             words = [w for w in part.split() if len(w) >= 4 and w[:1].isupper()]

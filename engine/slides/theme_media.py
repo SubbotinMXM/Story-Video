@@ -41,7 +41,7 @@ from engine.slides.stocks_base import StockCandidate
 from engine.slides.theme_plan import (
     ThemePlan,
     ensure_theme_plan,
-    _main_name,
+    hero_names,
 )
 from engine.slides.look import fingerprint, seen
 from engine.slides.source_mix import GOOGLE_SHARE, MIN_HEIGHT, subject_of
@@ -405,7 +405,7 @@ def _fill_kind(
 
     gathered = _gather(
         clients, queries, sources, prefer_video=prefer_video, rng=rng, cancel=cancel,
-        hero_name=_main_name(plan.context.characters),
+        heroes=hero_names(plan.context),
     )
     gathered.sort(key=_order)
     found = _hero_first(gathered, plan, prefer_video=prefer_video)
@@ -692,10 +692,10 @@ def _gather(
     prefer_video: bool,
     rng: random.Random,
     cancel: CancelToken | None,
-    hero_name: str = "",
+    heroes: list[str] | None = None,
 ) -> list[StockCandidate]:
     jobs: list[tuple[str, str, int]] = []
-    hero = hero_name.strip().lower()
+    names = [h.strip().lower() for h in heroes or [] if h and h.strip()]
     seed_base = rng.randrange(1 << 30)
     n = 0
     for q in queries:
@@ -708,7 +708,7 @@ def _gather(
                 continue
             # на Pexels/Pixabay/Unsplash конкретного человека нет — по его имени они дают
             # случайные статуи и портреты незнакомцев; там ищем только эпоху и место
-            if source == "stocks" and hero and hero in q.lower():
+            if source == "stocks" and any(h in q.lower() for h in names):
                 continue
             jobs.append((q, source, seed_base + n))
             n += 1
@@ -794,8 +794,8 @@ def _google_need(plan: ThemePlan, image_need: int, custom: dict | None = None) -
 
 
 def _is_hero(query: str, plan: ThemePlan) -> bool:
-    name = _main_name(plan.context.characters).lower()
-    return bool(name) and name in (query or "").lower()
+    low = (query or "").lower()
+    return any(name in low for name in hero_names(plan.context))
 
 
 def _hero_first(

@@ -102,5 +102,64 @@ class HeroQueriesTests(unittest.TestCase):
         self.assertGreaterEqual(sum("Bob Dobkin" in q for q in plan.image_queries), 8)
 
 
+class FocusTests(unittest.TestCase):
+    def _plan(self, **raw) -> theme_plan.ThemePlan:
+        base = {"era": "1970s", "place": "California", "characters": ["Bob Dobkin"], "subject": "history"}
+        ctx = StoryContext.from_dict({**base, **raw})
+        return theme_plan.ThemePlan(context=ctx, image_queries=[f"voltage regulator {i}" for i in range(14)],
+                                    video_queries=["circuit board macro"])
+
+    def test_context_fields_agree(self) -> None:
+        mixed = StoryContext.from_dict({"subject": "person", "focus": "mixed", "historical": True})
+        self.assertEqual((mixed.subject, mixed.focus), ("history", "mixed"))
+        biography = StoryContext.from_dict({"subject": "other", "focus": "person"})
+        self.assertEqual(biography.subject, "person")
+        self.assertEqual(StoryContext.from_dict({"subject": "person"}).focus, "")  # старый запуск — по subject
+
+    def test_thing_and_creator_gets_both(self) -> None:
+        plan = self._plan(focus="mixed", key_people=[{"name": "Hans Camenzind", "search": "Hans Camenzind Signetics engineer"}])
+        theme_plan._bias_main_character(plan)
+        people = [q for q in plan.image_queries if "Camenzind" in q]
+        self.assertEqual(len(people), 6, "треть пула — сам человек")
+        self.assertTrue(all("Signetics engineer" in q or q == "Hans Camenzind Signetics engineer" for q in people))
+        self.assertGreaterEqual(sum("regulator" in q for q in plan.image_queries), 14, "остальное — по теме")
+        self.assertTrue(any("Camenzind" in q for q in plan.video_queries))
+
+    def test_several_creators_share_the_person_queries(self) -> None:
+        plan = self._plan(focus="mixed", key_people=[{"name": "Ann One"}, {"name": "Bob Two"}, {"name": "Cy Three"}])
+        theme_plan._bias_main_character(plan)
+        for name in ("Ann One", "Bob Two", "Cy Three"):
+            self.assertEqual(sum(name in q for q in plan.image_queries), 2, name)
+
+    def test_biography_and_topic(self) -> None:
+        bio = self._plan(focus="person", key_people=[{"name": "Bob Dobkin"}], person_era="photo")
+        theme_plan._bias_main_character(bio)
+        self.assertGreaterEqual(sum("Bob Dobkin" in q for q in bio.image_queries), 8)
+        topic = self._plan(focus="topic")
+        theme_plan._bias_main_character(topic)
+        self.assertEqual(sum("Bob Dobkin" in q for q in topic.image_queries), 0)
+
+    def test_hero_names_cover_all_key_people(self) -> None:
+        ctx = StoryContext.from_dict({"focus": "mixed", "key_people": [{"name": "Ann One"}, {"name": "Bob Two"}]})
+        self.assertEqual(theme_plan.hero_names(ctx), ["ann one", "bob two"])
+        self.assertEqual(theme_plan.hero_names(StoryContext.from_dict({"characters": ["Bob Dobkin"]})), ["bob dobkin"])
+
+    def test_context_reads_the_whole_script(self) -> None:
+        from engine.slides import story_context
+
+        seen: list[str] = []
+
+        class Client:
+            def complete(self, *, label, system, user, **_kw):
+                seen.append(user)
+                return '{"focus": "mixed", "person_share": 35, "key_people": [{"name": "Hans Camenzind"}]}'
+
+        text = ("Начало. " * 2000) + "СЕРЕДИНА МОНТАЖ " + ("конец. " * 5000) + "ФИНАЛ ИСТОРИИ"
+        ctx = story_context.extract_story_context(text, Client())
+        self.assertIn("ФИНАЛ ИСТОРИИ", seen[0], "последняя часть сценария тоже прочитана")
+        self.assertGreater(len(seen[0]), 30000)
+        self.assertEqual((ctx.focus, ctx.person_share), ("mixed", 35))
+
+
 if __name__ == "__main__":
     unittest.main()

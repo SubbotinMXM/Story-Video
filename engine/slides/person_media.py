@@ -44,7 +44,7 @@ _STATUE_WORDS = re.compile(r"\b(statue|bust|sculpture|marble|bronze|engraving|an
 def person_mode(plan: ThemePlan) -> tuple[str, str] | None:
     """(имя, эпоха) если ролик про конкретного человека, иначе None."""
     ctx = plan.context
-    name = _main_name(ctx.characters)
+    name = (ctx.key_people[0]["name"] if ctx.key_people else "") or _main_name(ctx.characters)
     if not name or subject_of(ctx.subject, visual_style=ctx.visual_style, historical=ctx.historical) != "person":
         return None
     return name, hero_era(ctx)

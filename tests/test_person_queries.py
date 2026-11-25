@@ -84,7 +84,7 @@ class StocksSkipNameTests(unittest.TestCase):
         clients = {"google": object(), "pexels": object(), "wikimedia": object()}
         with mock.patch.object(tm, "_search_source", fake_search):
             tm._gather(clients, ["Anda Călugăreanu photo", "Bucharest 1970s street"], ["google", "wikimedia", "stocks"],
-                       prefer_video=False, rng=random.Random(1), cancel=None, hero_name="Anda Călugăreanu")
+                       prefer_video=False, rng=random.Random(1), cancel=None, heroes=["Anda Călugăreanu"])
         self.assertNotIn(("stocks", "Anda Călugăreanu photo"), calls)
         self.assertIn(("google", "Anda Călugăreanu photo"), calls)
         self.assertIn(("stocks", "Bucharest 1970s street"), calls, "фон эпохи/места на стоках ищем")

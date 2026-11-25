@@ -28,7 +28,10 @@ Schema:
   "brief": "2-3 English sentences: what or who the film is about, where (country, regions, cities) and when",
   "visual_markers": ["5-10 English visual cues that make a frame recognizably belong to THIS story's place and era: architecture, script on signs, typical people and clothing, landscape and climate, vehicles, landmarks"],
   "wrong_look": ["3-8 English descriptions of frames that would be WRONG for this story: other countries or cultures that are easy to confuse with it, wrong era, e.g. 'European alpine village', 'Chinese signage', 'modern cars' for a medieval story"],
-  "person_era": "only for subject=person: photo if real photos or videos of this person exist (born after ~1830: actors, singers, politicians, athletes of the 19th–21st century, living or recently died); pre_photo if they lived before photography (Caesar, Archimedes, Peter the Great); empty string otherwise"
+  "person_era": "only for subject=person: photo if real photos or videos of this person exist (born after ~1830: actors, singers, politicians, athletes of the 19th–21st century, living or recently died); pre_photo if they lived before photography (Caesar, Archimedes, Peter the Great); empty string otherwise",
+  "person_share": "integer 0-100: which share of the WHOLE narration is about specific people themselves (their life, personality, career, relationships) rather than about a thing, place, process or event",
+  "focus": "one of: person | people | mixed | topic (see the rules below)",
+  "key_people": [{"name": "full name in English", "search": "how to find THEIR real photos: full name plus one disambiguating word (profession, company or country), e.g. 'Hans Camenzind Signetics engineer'", "who": "profession and country, short"}]
 }
 
 Rules:
@@ -43,6 +46,23 @@ Rules:
   "era"; "avoid" lists only things that visibly break the story (e.g. smartphones). subject=person is only for a
   film about a celebrity's life as a personality (career, relationships, scandals).
 - Be concrete, English only, short phrases
+- READ THE WHOLE SCRIPT before deciding, from the first line to the last: the title and the opening paragraph often
+  hide what most of the narration is about. Estimate person_share over the entire text.
+- focus says what the footage must show:
+  * person — the film is the life story of ONE real person (a singer, actor, politician, athlete, scientist, ruler):
+    their life, career and relationships fill most of the narration (person_share about 65+). Photos and videos of
+    THAT person are the main footage. subject=person.
+  * people — several real people one after another (ten actresses, five dictators, a band). Each gets his own part.
+    subject=person. key_people lists them (up to 12).
+  * mixed — the film is about a THING and the real person or people behind it: an invention, device, chip, program,
+    company, building, artwork, discovery, expedition (person_share about 20-65). BOTH carry the story: the thing
+    (parts, diagrams, workplaces, the era) and the real person. subject=history or other, NOT person.
+    key_people lists the 1-3 people who matter most.
+  * topic — no person is central: a place, nature, a process, an event, an idea; people are mentioned in passing
+    (person_share below 20). key_people is empty.
+- key_people only for focus person, people and mixed; people mentioned in passing are not key people.
+- A person who is only named as the creator of something, while the narration explains how the thing works, makes
+  the film "mixed" (or "topic" when named once or twice), never "person".
 """
 
 
@@ -92,6 +112,11 @@ class StoryContext:
     brief: str = ""
     visual_markers: list[str] = field(default_factory=list)
     wrong_look: list[str] = field(default_factory=list)
+    # кто в центре ролика: person | people | mixed (вещь + её создатель) | topic; пусто — старый запуск (по subject)
+    focus: str = ""
+    # доля текста про самих людей (0–100) и главные люди: [{"name", "search", "who"}]
+    person_share: int = -1
+    key_people: list[dict] = field(default_factory=list)
 
     def clip_positive(self, query: str) -> str:
         parts = [query.strip()]
@@ -140,13 +165,29 @@ class StoryContext:
         chars = raw.get("characters") or []
         must = raw.get("must_include") or []
         avoid = raw.get("avoid") or []
+        subject = str(raw.get("subject") or "").strip().lower()
+        focus = str(raw.get("focus") or "").strip().lower()
+        if focus not in FOCUSES:
+            focus = ""
+        # focus и subject не спорят: человек/люди — subject=person; «вещь + создатель» и «тема» — не person
+        if focus in ("person", "people"):
+            subject = "person"
+        elif focus in ("mixed", "topic") and subject == "person":
+            subject = "history" if raw.get("historical") else "other"
+        try:
+            share = max(0, min(100, int(raw.get("person_share"))))
+        except (TypeError, ValueError):
+            share = -1
         return cls(
+            focus=focus,
+            person_share=share,
+            key_people=_people(raw.get("key_people")),
             era=str(raw.get("era") or "").strip(),
             place=str(raw.get("place") or "").strip(),
             title=str(raw.get("title") or "").strip(),
             characters=[str(x).strip() for x in chars if str(x).strip()],
             visual_style=str(raw.get("visual_style") or "documentary_archive").strip(),
-            subject=str(raw.get("subject") or "").strip().lower(),
+            subject=subject,
             must_include=[str(x).strip() for x in must if str(x).strip()],
             avoid=[str(x).strip() for x in avoid if str(x).strip()],
             # история, доходящая до наших дней, — не «историческая»: современное в приоритете
@@ -158,6 +199,40 @@ class StoryContext:
             visual_markers=_strs(raw.get("visual_markers")),
             wrong_look=_strs(raw.get("wrong_look")),
         )
+
+
+CONTEXT_CHARS = 60000  # весь сценарий на ~7–9 тыс. слов (≈15 тыс. токенов); дольше — вразбивку
+FOCUSES = ("person", "people", "mixed", "topic")
+
+
+def _people(raw: object) -> list[dict]:
+    out: list[dict] = []
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, str):
+            item = {"name": item}
+        if not isinstance(item, dict):
+            continue
+        name = " ".join(str(item.get("name") or "").split())
+        if 2 <= len(name) <= 60 and not any(p["name"].lower() == name.lower() for p in out):
+            out.append({"name": name, "search": " ".join(str(item.get("search") or "").split()) or name,
+                        "who": " ".join(str(item.get("who") or "").split())})
+    return out[:12]
+
+
+def focus_of(ctx: StoryContext) -> str:
+    """Кто в центре ролика. Старые запуски без поля: человек — по subject, иначе тема."""
+    if ctx.focus in FOCUSES:
+        return ctx.focus
+    return "person" if ctx.subject == "person" else "topic"
+
+
+def spread_text(text: str, limit: int = 9000, parts: int = 6) -> str:
+    """Сценарий целиком, но короче лимита: куски вразбивку, чтобы запросы покрывали весь рассказ, а не его начало."""
+    if len(text) <= limit:
+        return text
+    step = limit // parts
+    stride = (len(text) - step) // (parts - 1)
+    return " […] ".join(text[i * stride:i * stride + step] for i in range(parts))
 
 
 def _strs(raw: object) -> list[str]:
@@ -173,8 +248,9 @@ def extract_story_context(
     text = re.sub(r"\s+", " ", (script_text or "").strip())
     if not text:
         return StoryContext()
-    # не раздувать токены
-    snippet = text[:12000]
+    # контекст решает, как искать кадры для ВСЕГО ролика: читаем весь сценарий (начало ролика его не определяет);
+    # очень длинный — вразбивку, а не только первая четверть
+    snippet = spread_text(text, CONTEXT_CHARS, 12)
     user = (
         "Narration script:\n\n"
         f"{snippet}\n\n"
@@ -185,7 +261,8 @@ def extract_story_context(
         data = _parse_json_obj(raw)
         ctx = StoryContext.from_dict(data)
         log(
-            f"StoryContext: historical={ctx.historical} era={ctx.era!r} "
+            f"StoryContext: focus={ctx.focus or '—'} доля людей={ctx.person_share} "
+            f"люди={[p['name'] for p in ctx.key_people]} historical={ctx.historical} era={ctx.era!r} "
             f"place={ctx.place!r} must={ctx.must_include} avoid={ctx.avoid[:5]}"
         )
         return ctx

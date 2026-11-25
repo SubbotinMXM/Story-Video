@@ -71,7 +71,7 @@ from engine.slides.hook import HOOK_SEC as HOOK_SEC_COMMON
 from engine.slides.hook import NO_AI_SEC, add_beauty, head_rank, hook_first
 from engine.slides.look import fingerprint, seen
 from engine.slides.story_context import AMBIGUITY_RULE
-from engine.slides.theme_plan import _main_name, ThemePlan, ensure_theme_plan
+from engine.slides.theme_plan import ThemePlan, ensure_theme_plan, hero_names
 from engine.slides.vision_ranker import score_fit
 from engine.slides.whisper_timings import WordTiming
 
@@ -1584,8 +1584,7 @@ def _candidates(
     if hook and mix.subject != "person":
         # начало ролика: Google Images приносит флаги, графики, афиши, скриншоты — только стоки и YouTube
         groups_on = [g for g in groups_on if g != "google"] or groups_on
-    hero = _main_name(plan.context.characters).lower()
-    if hero and hero in query.lower():
+    if any(h in query.lower() for h in hero_names(plan.context)):
         # конкретного человека на Pexels/Pixabay/Unsplash нет — его места отдаём Google/YouTube/Wikimedia
         groups_on = [g for g in groups_on if g != "stocks"]
     quotas = allot(weights, groups_on, CANDIDATE_CAP)

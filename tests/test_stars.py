@@ -507,6 +507,42 @@ class AutoPeopleTests(unittest.TestCase):
                 self.assertIsNone(st.collect_people_timeline(self._req(run)))
             llm.complete.assert_not_called()  # разметка по героям — лишний запрос, не делаем
 
+    def test_thing_and_creator_skips_cast(self) -> None:
+        """Изобретение + изобретатель: блоков по героям нет, люди идут в общем подборе по теме."""
+        from engine.slides.story_context import StoryContext
+        from engine.slides.theme_plan import ThemePlan
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run = _run(tmp)
+            ctx = StoryContext.from_dict({"subject": "person", "focus": "mixed", "characters": ["A B", "C D"],
+                                          "key_people": [{"name": "Hans Camenzind"}]})
+            plan = ThemePlan(summary="555", context=ctx)
+            llm = mock.MagicMock()
+            with mock.patch("engine.slides.llm_client.LLMClient", return_value=llm), \
+                 mock.patch.object(st, "ensure_theme_plan", lambda *a: plan), \
+                 mock.patch.object(st, "probe_duration", lambda p: 300.0):
+                self.assertIsNone(st.collect_people_timeline(self._req(run)))
+            llm.complete.assert_not_called()
+
+    def test_many_key_people_still_go_by_heroes(self) -> None:
+        """Нейросеть назвала ролик про 6 артистов «вещью + создателем» — разметка по героям всё равно запрашивается."""
+        from engine.slides.story_context import StoryContext
+        from engine.slides.theme_plan import ThemePlan
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run = _run(tmp)
+            people = [{"name": f"Артист Номер{i}"} for i in range(6)]
+            ctx = StoryContext.from_dict({"subject": "other", "focus": "mixed", "characters": ["А Б", "В Г"],
+                                          "key_people": people})
+            plan = ThemePlan(summary="артисты", context=ctx)
+            llm = mock.MagicMock()
+            llm.complete.return_value = '{"stars": [], "parts": []}'
+            with mock.patch("engine.slides.llm_client.LLMClient", return_value=llm), \
+                 mock.patch.object(st, "ensure_theme_plan", lambda *a: plan), \
+                 mock.patch.object(st, "probe_duration", lambda p: 300.0):
+                st.collect_people_timeline(self._req(run))
+            self.assertEqual(llm.complete.call_count, 1)
+
     def test_no_heroes_answer_is_cached(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run = _run(tmp)
