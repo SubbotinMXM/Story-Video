@@ -15,6 +15,7 @@ def ping_stocks(
     pixabay: str = "",
     unsplash: str = "",
     youtube: str = "",
+    tmdb: str = "",
 ) -> str:
     lines: list[str] = []
     any_key = False
@@ -24,6 +25,7 @@ def ping_stocks(
             ("Pixabay", pixabay, _ping_pixabay),
             ("Unsplash", unsplash, _ping_unsplash),
             ("YouTube", youtube, _ping_youtube),
+            ("TMDB", tmdb, _ping_tmdb),
         ):
             keys = parse_keys(raw)
             if not keys:
@@ -109,3 +111,19 @@ def _ping_youtube(http: httpx.Client, key: str) -> None:
     if since:
         raise RuntimeError(f"ключ принимается, но поиск на нём исчерпан с {datetime.fromtimestamp(since):%H:%M} "
                            f"(обновится {yerr.reset_text()})")
+
+
+def _ping_tmdb(http: httpx.Client, key: str) -> None:
+    from engine.core import dnsfix
+
+    dnsfix.install()
+    headers = {"accept": "application/json"}
+    params: dict = {}
+    if key.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {key}"
+    else:
+        params["api_key"] = key
+    r = http.get("https://api.themoviedb.org/3/authentication", params=params, headers=headers)
+    if r.status_code == 401:
+        raise RuntimeError("ключ не принят (401)")
+    r.raise_for_status()

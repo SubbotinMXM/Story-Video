@@ -415,6 +415,7 @@ def ping(service: str) -> dict[str, Any]:
                     pixabay=str(cfg.get("pixabay_api_keys") or ""),
                     unsplash=str(cfg.get("unsplash_api_keys") or ""),
                     youtube=str(cfg.get("youtube_api_keys") or ""),
+                    tmdb=str(cfg.get("tmdb_api_keys") or ""),
                 ),
             }
     except Exception as exc:

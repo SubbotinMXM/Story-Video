@@ -33,6 +33,7 @@ export type Settings = {
   pixabay_api_keys: string;
   unsplash_api_keys: string;
   youtube_api_keys: string;
+  tmdb_api_keys: string;
   subtitles: boolean;
   transition: "calm" | "flash";
   subscribe: boolean;
@@ -194,7 +195,7 @@ export type Meta = {
 export type RewritePrompt = { id: string; name: string; section: string; text: string };
 export type CoverPrompt = { id: string; name: string; role: string; text: string };
 
-export type MixKey = "ai" | "stocks" | "youtube" | "google" | "wikimedia" | "archive";
+export type MixKey = "ai" | "stocks" | "youtube" | "google" | "wikimedia" | "archive" | "tmdb";
 
 /** Группа каналов во вкладке «Аналитика» (канал может быть в нескольких). */
 export type AnalyticsGroup = { id: string; name: string; channels: string[] };

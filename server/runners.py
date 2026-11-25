@@ -271,7 +271,7 @@ def _slides_result(render, extra: list[str] | None = None) -> dict[str, Any]:
 # уже запущенные это не задевает. Живыми остаются только ключи и адреса сервисов (исправленный ключ — сразу).
 SETTINGS_KEY = "_settings"
 _LIVE_KEYS = frozenset({
-    "llm_api_key", "llm_base_url", "llm_model", "pexels_api_keys", "pixabay_api_keys", "unsplash_api_keys",
+    "llm_api_key", "llm_base_url", "llm_model", "pexels_api_keys", "pixabay_api_keys", "unsplash_api_keys", "tmdb_api_keys",
     "youtube_api_keys", "royaltechno_api_key", "claude_model", "codex_model", "rewrite_llm_model",
     "adspower_url", "adspower_api_key",
     "stars_notes",  # уточнения о героях: вписал после вопроса программы — «Продолжить» их учтёт

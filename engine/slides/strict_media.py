@@ -1558,7 +1558,7 @@ class MixState:
 
 
 def _available_groups(clients: dict) -> list[str]:
-    out = [g for g in ("youtube", "google", "wikimedia", "archive") if g in clients]
+    out = [g for g in ("youtube", "google", "wikimedia", "archive", "tmdb") if g in clients]
     if any(n in clients for n in ("pexels", "pixabay", "unsplash")):
         out.append("stocks")
     return out

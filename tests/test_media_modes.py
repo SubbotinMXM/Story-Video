@@ -97,7 +97,8 @@ class ModeMappingTests(unittest.TestCase):
         mix = clean_mix({"ai": 5, "stocks": 60, "youtube": 0, "google": 20, "wikimedia": 10, "archive": 5})
         self.assertEqual(_media_mode({"source_mix": mix})["source_mix"], mix)
         self.assertEqual(custom_weights(mix, video=True), {"stocks": 60, "archive": 5}, "YouTube 0% — не ищем")
-        self.assertEqual(custom_weights(mix, video=False), {"google": 20, "stocks": 60, "wikimedia": 10, "archive": 5})
+        self.assertEqual(custom_weights(mix, video=False),
+                         {"google": 20, "stocks": 60, "wikimedia": 10, "archive": 5, "tmdb": 3}, "TMDB — по умолчанию 3%")
 
     def test_dropped_stock_means_media_again(self) -> None:
         from engine.slides.resume import detect_stage, drop_stock

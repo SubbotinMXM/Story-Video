@@ -346,7 +346,7 @@ def gather_pool(
         pct_lo=at(0.72), pct_hi=at(1.0), already=images, need=max(total, len(images)),
         exclude=exclude, judge=judge,
         # современная тема — сначала свежие качественные стоки, старые архивы — в запас
-        sources=["wikimedia", "archive", "stocks"] if plan.context.historical else ["stocks", "wikimedia", "archive"],
+        sources=["wikimedia", "tmdb", "archive", "stocks"] if plan.context.historical else ["stocks", "wikimedia", "tmdb", "archive"],
     )
     return videos, images, rejected_v, rejected_i + rejected_g
 
@@ -392,7 +392,7 @@ def _fill_kind(
         elif prefer_video:
             sources = ["stocks", "youtube", "archive"]
         else:
-            sources = ["google", "wikimedia", "archive", "stocks"]
+            sources = ["google", "wikimedia", "tmdb", "archive", "stocks"]
     # Порядок проверки кандидатов (берутся первыми, пока не наберётся нужное):
     # источники в порядке sources (для современной темы — свежие стоки впереди архивов),
     # внутри источника запросы вперемешку (разнообразие); потом герой ролика вперёд (_hero_first);

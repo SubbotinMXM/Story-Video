@@ -136,7 +136,19 @@ export function SettingsPage() {
             placeholder="ключ на строку"
           />
         </Field>
-        <PingButton service="stocks" label="Проверить стоки и YouTube" />
+        <Field
+          label={`TMDB · ключей: ${keyCount(settings.tmdb_api_keys)}`}
+          hint="Фото людей кино и ТВ и кадры фильмов (только картинки). Вставьте «Ключ доступа к API» (длинный, на eyJ…) или короткий «Ключ API». Пусто — TMDB не используется. This product uses the TMDB API but is not endorsed or certified by TMDB."
+        >
+          <Textarea
+            value={settings.tmdb_api_keys}
+            onChange={(v) => update({ tmdb_api_keys: v })}
+            rows={2}
+            mono
+            placeholder="ключ на строку"
+          />
+        </Field>
+        <PingButton service="stocks" label="Проверить стоки, YouTube и TMDB" />
       </Card>
 
       <Card

@@ -40,6 +40,7 @@ class MediaSourcesConfig:
     unsplash: list[str] = field(default_factory=list)
     google: bool = True
     youtube: list[str] = field(default_factory=list)
+    tmdb: list[str] = field(default_factory=list)  # TMDB: фото людей кино и кадры фильмов (только картинки)
 
     @property
     def youtube_api_key(self) -> str:
@@ -140,6 +141,7 @@ def stock_keys_from_config(cfg: dict) -> MediaSourcesConfig:
         ),
         google=True,  # Google/Bing ищем всегда, доля зависит от темы (source_mix)
         youtube=parse_keys(cfg.get("youtube_api_keys") or cfg.get("youtube_api_key")),
+        tmdb=parse_keys(cfg.get("tmdb_api_keys") or cfg.get("tmdb_api_key")),
     )
 
 
@@ -153,6 +155,13 @@ def _build_clients(cfg: MediaSourcesConfig) -> dict[str, Any]:
     if cfg.unsplash:
         out["unsplash"] = UnsplashClient(KeyPool(cfg.unsplash))
     out["wikimedia"] = WikimediaClient()
+    if cfg.tmdb:
+        try:
+            from engine.slides.source_tmdb import TmdbClient
+
+            out["tmdb"] = TmdbClient(KeyPool(cfg.tmdb))
+        except Exception as exc:
+            log(f"TMDB недоступен: {exc}")
     try:  # запасные источники фото людей без браузера и ключей: Яндекс.Картинки, статьи Википедии
         from engine.slides.source_wikipedia import WikipediaPhotosClient
         from engine.slides.source_yandex import YandexImagesClient

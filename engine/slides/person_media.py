@@ -231,6 +231,12 @@ def collect_person_pool(
         if lead is not None:
             lists.append([lead])  # главное фото статьи — по нему опознаётся лицо героя
         lists.append(article)
+    tmdb = clients.get("tmdb")
+    if tmdb is not None and photo and not only_plan:
+        try:  # портреты и кадры из фильмов с этим человеком (лицо проверяется как у всех, тёзки отсеются)
+            lists.append(tmdb.person_photos(name))
+        except Exception as exc:
+            log(f"TMDB: {str(exc)[:100]}")
     lists.append(_search(clients, "yandex", img_q[:10], video=False, cancel=cancel))
     lists.append(_search(clients, "wikimedia", img_q[:6], video=False, cancel=cancel))
     cands = _merge(lists)

@@ -26,6 +26,8 @@ DEFAULTS: dict[str, Any] = {
     "pexels_api_keys": "",
     "pixabay_api_keys": "",
     "unsplash_api_keys": "",
+    # TMDB (фото людей кино и кадры фильмов): токен «Ключ доступа к API» или короткий ключ, по одному на строку
+    "tmdb_api_keys": "",
     # YouTube Data API: по ключу на строку; кончилась суточная квота — берётся следующий
     "youtube_api_keys": "",
     # общие опции ролика

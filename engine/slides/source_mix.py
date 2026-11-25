@@ -35,11 +35,11 @@ _VIDEO_WEIGHTS = {
 }
 _IMAGE_WEIGHTS = {
     # про конкретного человека: его фото есть в основном в Google; стоки — только фон эпохи/места
-    "person": {"google": 4, "wikimedia": 1, "stocks": 1},
-    "place": {"stocks": 3, "google": 2, "wikimedia": 1},
+    "person": {"google": 4, "tmdb": 2, "wikimedia": 1, "stocks": 1},
+    "place": {"stocks": 3, "google": 2, "wikimedia": 1, "tmdb": 1},
     "nature": {"stocks": 4, "google": 2},
-    "history": {"google": 2, "wikimedia": 2, "archive": 1, "stocks": 1},
-    "other": {"google": 2, "stocks": 2, "wikimedia": 1, "archive": 1},
+    "history": {"google": 2, "wikimedia": 2, "archive": 1, "stocks": 1, "tmdb": 1},
+    "other": {"google": 2, "stocks": 2, "wikimedia": 1, "archive": 1, "tmdb": 1},
 }
 # Доля Google в пуле картинок (режим без строгого соответствия).
 GOOGLE_SHARE = {"person": 0.8, "place": 0.35, "nature": 0.3, "history": 0.45, "other": 0.45}
@@ -50,10 +50,10 @@ _STOCK_PROVIDERS = {"pexels", "pixabay", "unsplash"}
 # (_VIDEO_WEIGHTS/_IMAGE_WEIGHTS «other», видео и фото примерно поровну, AI — AI_SHARE).
 # Пока пользователь их не менял, доли сами сдвигаются под тему ролика (человек, место, природа…);
 # свои цифры (настройка source_mix) применяются как есть ко всем роликам.
-DEFAULT_MIX = {"ai": 12, "stocks": 30, "youtube": 22, "google": 15, "wikimedia": 7, "archive": 14}
+DEFAULT_MIX = {"ai": 12, "stocks": 30, "youtube": 22, "google": 15, "wikimedia": 6, "archive": 12, "tmdb": 3}
 MIX_KEYS = tuple(DEFAULT_MIX)
 _VIDEO_GROUPS = ("youtube", "stocks", "archive")
-_IMAGE_GROUPS = ("google", "stocks", "wikimedia", "archive")
+_IMAGE_GROUPS = ("google", "stocks", "wikimedia", "archive", "tmdb")
 
 
 def clean_mix(raw: object) -> dict[str, int] | None:

@@ -10,6 +10,7 @@ const ROWS: { key: MixKey; label: string; hint: string }[] = [
   { key: "google", label: "Google Images", hint: "Фото из поиска картинок" },
   { key: "wikimedia", label: "Wikimedia", hint: "Фото Wikimedia Commons" },
   { key: "archive", label: "Archive.org", hint: "Архивные фото и видео" },
+  { key: "tmdb", label: "TMDB", hint: "Фото людей кино и кадры фильмов (только картинки; нужен ключ в настройках)" },
 ];
 
 /** Доли источников в ролике, %. Пусто — по умолчанию (подбор сам подстраивает доли под тему ролика). */

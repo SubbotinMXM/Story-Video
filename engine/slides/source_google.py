@@ -1,6 +1,6 @@
-"""Google Images через Chromium (Playwright), 3 вкладки параллельно.
+"""Поиск картинок через Chromium (Playwright), 3 вкладки параллельно: Bing → Google (если Bing дал мало) → DuckDuckGo.
 
-Без API-ключа. Поиск → URL картинок → дальше обычный httpx download.
+Без API-ключа. Поиск → URL картинок → дальше обычный httpx download. Bing первый, потому что Google ловит капчу.
 """
 
 from __future__ import annotations
@@ -300,26 +300,28 @@ class GoogleImagesClient:
         return out
 
     async def _scrape(self, page, query: str, limit: int) -> list[str]:
-        urls: list[str] = []
+        """Bing — первым: Google часто отвечает капчей, и каждая такая попытка — потерянные секунды (по журналу
+        «Google пусто/капча» было ~3 тыс. раз за несколько дней). Google — только если Bing дал мало, потом DuckDuckGo."""
+        enough = max(3, limit // 3)
+        urls = await _bing_with_retry(page, query, limit)
+        if len(urls) >= enough:
+            return urls
         if time.monotonic() >= self._google_off_until:
-            urls = await _scrape_google(page, query, limit)
+            log(f"Bing мало ({len(urls)}) по {query!r} → Google")
+            google = await _scrape_google(page, query, limit)
             if _CAPTCHA_SEEN.pop(id(page), False):
                 self._captchas += 1
                 if self._captchas >= _CAPTCHA_LIMIT:
-                    # Google признал нас роботом — каждая попытка только тратит время: пока сразу Bing
+                    # Google признал нас роботом — пока в него не ходим
                     self._google_off_until = time.monotonic() + _CAPTCHA_PAUSE_SEC
                     self._captchas = 0
-                    log(f"Google Images: капча {_CAPTCHA_LIMIT} раза подряд — {_CAPTCHA_PAUSE_SEC // 60} мин ищу сразу в Bing")
+                    log(f"Google Images: капча {_CAPTCHA_LIMIT} раза подряд — {_CAPTCHA_PAUSE_SEC // 60} мин не обращаюсь к нему")
             else:
                 self._captchas = 0
-        if len(urls) >= max(3, limit // 3):
-            return urls
-        log(f"Google Images пусто/капча ({query!r}) → Bing")
-        bing = await _bing_with_retry(page, query, limit)
-        urls = _uniq_good(urls + bing)
-        if len(urls) >= max(3, limit // 3):
-            return urls
-        log(f"Bing мало ({query!r}) → DuckDuckGo")
+            urls = _uniq_good(urls + google)
+            if len(urls) >= enough:
+                return urls
+        log(f"Bing и Google мало ({len(urls)}) по {query!r} → DuckDuckGo")
         ddg = await asyncio.to_thread(_scrape_ddg_http, query, limit)
         return _uniq_good(urls + ddg)[: limit * 2]
 
