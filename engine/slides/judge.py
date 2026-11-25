@@ -52,7 +52,8 @@ Rate every candidate with integers 0-10:
 Era is judged only by what visibly dates a frame (clothes, cars, screens, devices that did not exist yet). A component,
 schematic, tool, material or place that looks the same across decades is NOT an anachronism.
 Be strict: a generic village with no sign of the film's country is NOT the film's country.
-Return ONLY JSON: {"items": [{"n": 1, "context": 7, "beat": 6, "quality": 8, "reject": ""}]}
+Return ONLY compact JSON, one short array per candidate IN THE ORDER OF THE NUMBERS, no keys, no explanations:
+{"r": [[context, beat, quality, "reject reason in 1-4 words or empty"]]}  e.g. {"r": [[7, 6, 8, ""], [2, 3, 5, "wrong country"]]}
 """
 _SYSTEM = _SYSTEM.replace("Be strict:", JUDGE_AMBIGUITY_RULE + "\nBe strict:", 1)
 
@@ -167,7 +168,16 @@ def _parse(raw: str, n: int) -> list[Verdict] | None:
     if data is None:
         return None
     got: dict[int, Verdict] = {}
-    for item in data.get("items") or []:
+    # короткая форма: {"r": [[контекст, момент, съёмка, "отказ"], ...]} по порядку кандидатов (ответ втрое короче)
+    for k, row in enumerate(data.get("r") or []):
+        if not isinstance(row, (list, tuple)) or len(row) < 3:
+            continue
+        try:
+            got[k + 1] = Verdict(context=_clamp(row[0]), beat=_clamp(row[1]), quality=_clamp(row[2]),
+                                 reject=str(row[3] if len(row) > 3 and row[3] else "").strip())
+        except (TypeError, ValueError):
+            continue
+    for item in data.get("items") or []:  # прежняя форма с ключами — модель могла ответить по-старому
         if not isinstance(item, dict):
             continue
         try:
@@ -224,6 +234,7 @@ class Judge:
         label: str = "judge",
         opening: bool = False,
         prime: bool = False,  # первые 30 секунд: только «вау»-кадры
+        model: str | None = None,
     ) -> list[Verdict] | None:
         """Оценки кандидатов по порядку. None — проверка недоступна (подбирай по CLIP).
         opening — кадр для первых минут ролика: оценка съёмки строже."""
@@ -242,7 +253,7 @@ class Judge:
         user = (f"FILM PASSPORT:\n{self.brief}\n\n{what}\n\n" + (_OPENING if opening else "")
                 + (_PRIME if prime else "") + f"Rate all {len(paths)} candidates.")
         try:
-            raw = self.client.complete_vision(label=label, system=_SYSTEM, user_text=user, image_b64=image)
+            raw = self.client.complete_vision(label=label, system=_SYSTEM, user_text=user, image_b64=image, model=model)
         except CancelledError:
             raise
         except Exception as exc:
@@ -320,7 +331,9 @@ class PoolBatcher:
             return
         try:
             with JUDGE_SLOTS:
-                verdicts = self.judge.rate([e["path"] for e in batch], thematic=True, label="judge_pool")
+                paths = [e["path"] for e in batch]
+                verdicts = self.judge.rate(paths, thematic=True, label="judge_pool")
+                verdicts = self._audit(paths, verdicts)
         except BaseException:
             for e in batch:
                 e["done"].set()
@@ -328,3 +341,20 @@ class PoolBatcher:
         for k, e in enumerate(batch):
             e["verdict"] = verdicts[k] if verdicts is not None else None
             e["done"].set()
+
+    def _audit(self, paths: list[Path], cheap: list[Verdict] | None) -> list[Verdict] | None:
+        """Каждый N-й лист, проверенный дешёвой моделью, проверяется ещё и умной: решения сравниваются (контроль
+        качества), а для этих кадров берётся ответ умной. Своя модель в настройках — без контроля (она одна на всё)."""
+        from engine.slides import judge_audit, llm_models
+
+        client = self.judge.client
+        if cheap is None or client.model.strip() or not judge_audit.use_light():
+            return cheap
+        if not judge_audit.should_sample():
+            return cheap
+        smart = llm_models.chain(client.base_url, client.api_key, "smart")[0]
+        ref = self.judge.rate(paths, thematic=True, label="judge_pool_audit", model=smart)
+        if ref is None:
+            return cheap
+        judge_audit.record([(a.ok, b.ok) for a, b in zip(cheap, ref)])
+        return ref

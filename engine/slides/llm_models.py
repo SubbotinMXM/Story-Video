@@ -51,6 +51,19 @@ LOW_REASONING_LABELS = ("rewrite_review",)
 LOW_REASONING_VISION = ("judge_pool",)
 
 
+# кадры пула проверяет дешёвая модель; контроль качества — engine/slides/judge_audit.py (расходятся — умная)
+LIGHT_VISION = ("judge_pool",)
+
+
+def vision_tier(label: str) -> str:
+    if label.startswith(LIGHT_VISION):
+        from engine.slides import judge_audit
+
+        if judge_audit.use_light():
+            return "light"
+    return "smart"
+
+
 def reasoning_for(label: str, vision: bool = False) -> str:
     """Какое усилие размышлений просить у встроенной нейросети: «low» — простым задачам и коротким ответам."""
     if vision:

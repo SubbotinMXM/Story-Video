@@ -343,7 +343,7 @@ class LLMClient:
         """Модели для запроса по порядку: явная (аргумент или настройки), потом по цене для этой задачи."""
         from engine.slides import llm_models
 
-        tier = "smart" if vision else llm_models.tier_of(label)
+        tier = llm_models.vision_tier(label) if vision else llm_models.tier_of(label)
         auto = llm_models.chain(self.base_url, self.api_key, tier)
         first = (model or self.model or "").strip()
         models = list(dict.fromkeys([first, *auto] if first else auto)) or ["gpt-6.1-sol"]

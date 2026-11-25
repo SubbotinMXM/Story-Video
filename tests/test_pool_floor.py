@@ -161,5 +161,148 @@ class FocusTests(unittest.TestCase):
         self.assertEqual((ctx.focus, ctx.person_share), ("mixed", 35))
 
 
+
+class JudgeCompactTests(unittest.TestCase):
+    def test_compact_answer_is_parsed_in_order(self) -> None:
+        from engine.slides import judge
+
+        got = judge._parse('{"r": [[7, 6, 8, ""], [2, 3, 5, "wrong country"], [9, 9, 9]]}', 3)
+        self.assertEqual([(v.context, v.beat, v.quality, v.reject) for v in got],
+                         [(7, 6, 8, ""), (2, 3, 5, "wrong country"), (9, 9, 9, "")])
+        self.assertTrue(got[0].ok and not got[1].ok)
+
+    def test_old_keyed_answer_still_works(self) -> None:
+        from engine.slides import judge
+
+        got = judge._parse('{"items": [{"n": 1, "context": 7, "beat": 6, "quality": 8, "reject": ""}]}', 2)
+        self.assertEqual(got[0].context, 7)
+        self.assertEqual(got[1].reject, "нет оценки", "кандидат без оценки не берётся")
+
+    def test_prompt_asks_for_the_short_form(self) -> None:
+        from engine.slides import judge
+
+        self.assertIn('{"r":', judge._SYSTEM)
+
+
+class FileDefectCacheTests(unittest.TestCase):
+    def test_defective_file_is_not_sent_to_the_judge_twice(self) -> None:
+        import os
+        from unittest import mock
+
+        from engine.slides import judge_cache, theme_media
+        from engine.slides.judge import Verdict
+        from engine.slides.stocks_base import StockCandidate
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["STORY_VIDEO_JUDGE_CACHE_DIR"] = tmp
+            self.addCleanup(os.environ.pop, "STORY_VIDEO_JUDGE_CACHE_DIR", None)
+            judge_cache.reset_for_tests()
+            self.addCleanup(judge_cache.reset_for_tests)
+            img = Path(tmp) / "a.jpg"
+            img.write_bytes(b"some image bytes")
+            cand = StockCandidate(provider="google", id="1", kind="photo", query="q", preview_url="p", download_url="u", width=1, height=1)
+            judge = mock.MagicMock()
+            judge.pool.return_value.rate.return_value = Verdict(2, 2, 3, "watermark")
+            self.assertIsNone(theme_media._judge_pool_item(judge, img, cand, prefer_video=False))
+            self.assertEqual(judge.pool.return_value.rate.call_count, 1)
+            self.assertIsNone(theme_media._judge_pool_item(judge, img, cand, prefer_video=False))
+            self.assertEqual(judge.pool.return_value.rate.call_count, 1, "второй раз — без запроса к нейросети")
+
+    def test_wrong_country_is_not_remembered(self) -> None:
+        import os
+        from unittest import mock
+
+        from engine.slides import judge_cache, theme_media
+        from engine.slides.judge import Verdict
+        from engine.slides.stocks_base import StockCandidate
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["STORY_VIDEO_JUDGE_CACHE_DIR"] = tmp
+            self.addCleanup(os.environ.pop, "STORY_VIDEO_JUDGE_CACHE_DIR", None)
+            judge_cache.reset_for_tests()
+            self.addCleanup(judge_cache.reset_for_tests)
+            img = Path(tmp) / "b.jpg"
+            img.write_bytes(b"other image")
+            cand = StockCandidate(provider="google", id="2", kind="photo", query="q", preview_url="p", download_url="u", width=1, height=1)
+            judge = mock.MagicMock()
+            judge.pool.return_value.rate.return_value = Verdict(1, 1, 5, "wrong country")
+            theme_media._judge_pool_item(judge, img, cand, prefer_video=False)
+            theme_media._judge_pool_item(judge, img, cand, prefer_video=False)
+            self.assertEqual(judge.pool.return_value.rate.call_count, 2, "чужая страна зависит от ролика — проверяем заново")
+
+
+
+class CheapJudgeAuditTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import os
+
+        from engine.slides import judge_audit
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        os.environ["STORY_VIDEO_JUDGE_CACHE_DIR"] = self.tmp.name
+        self.addCleanup(os.environ.pop, "STORY_VIDEO_JUDGE_CACHE_DIR", None)
+        judge_audit.reset_for_tests()
+        self.addCleanup(judge_audit.reset_for_tests)
+        self.audit = judge_audit
+
+    def test_cheap_model_until_there_is_enough_evidence(self) -> None:
+        from engine.slides import llm_models
+
+        self.assertTrue(self.audit.use_light())
+        self.assertEqual(llm_models.vision_tier("judge_pool"), "light")
+        self.assertEqual(llm_models.vision_tier("judge_5"), "smart", "кадры под фразу — всегда умная")
+        self.assertEqual(llm_models.vision_tier("judge_ai"), "smart")
+
+    def test_good_agreement_keeps_the_cheap_model(self) -> None:
+        self.audit.record([(True, True)] * 20 + [(False, False)] * 12 + [(False, True)] * 4 + [(True, False)] * 2)
+        self.assertEqual(self.audit.stats()["compared"], 38)
+        self.assertTrue(self.audit.use_light())
+
+    def test_cheap_model_letting_bad_frames_through_is_switched_off(self) -> None:
+        from engine.slides import llm_models
+
+        self.audit.record([(True, True)] * 20 + [(True, False)] * 8 + [(False, False)] * 10)
+        self.assertFalse(self.audit.use_light(), "ложных принятий 21% — возвращаемся на умную")
+        self.assertEqual(llm_models.vision_tier("judge_pool"), "smart")
+
+    def test_stats_survive_restart(self) -> None:
+        self.audit.record([(True, False)] * 40)
+        self.audit.reset_for_tests()
+        self.assertEqual(self.audit.stats()["compared"], 40)
+
+    def test_every_eighth_sheet_is_double_checked(self) -> None:
+        picks = [self.audit.should_sample() for _ in range(17)]
+        self.assertEqual([i for i, p in enumerate(picks) if p], [0, 8, 16])
+
+    def test_sampled_sheet_uses_the_smart_answer(self) -> None:
+        from unittest import mock
+
+        from engine.slides.judge import PoolBatcher, Verdict
+
+        cheap = [Verdict(8, 8, 8, ""), Verdict(8, 8, 8, "")]
+        smart = [Verdict(8, 8, 8, ""), Verdict(1, 1, 1, "wrong subject")]
+        judge = mock.MagicMock()
+        judge.client.model = ""
+        judge.client.base_url, judge.client.api_key = "https://x/v1", "k"
+        judge.rate.return_value = smart
+        with mock.patch("engine.slides.llm_models.chain", return_value=["big-model"]):
+            got = PoolBatcher(judge)._audit([Path("a"), Path("b")], cheap)
+        self.assertEqual(got, smart)
+        self.assertEqual(judge.rate.call_args.kwargs["model"], "big-model")
+        self.assertEqual(self.audit.stats()["false_accept"], 1)
+
+    def test_own_model_in_settings_is_not_audited(self) -> None:
+        from unittest import mock
+
+        from engine.slides.judge import PoolBatcher, Verdict
+
+        judge = mock.MagicMock()
+        judge.client.model = "my-model"
+        cheap = [Verdict(8, 8, 8, "")]
+        self.assertEqual(PoolBatcher(judge)._audit([Path("a")], cheap), cheap)
+        judge.rate.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -567,6 +567,9 @@ def _fill_kind(
                     f"{kind}: взял {len(saved) - start_n}, отбраковал {rejected}"
                     + (f", {unique_sec:.0f}с" if prefer_video else ""),
                 )
+    from engine.slides import judge_cache
+
+    judge_cache.flush()  # запомненный брак файлов — на диск раз за подбор
     return saved, rejected
 
 
@@ -670,9 +673,24 @@ def _judge_pool_item(judge, trial: Path, cand: StockCandidate, *, prefer_video: 
     if shake is not None and shake > 2 * SHAKY:
         log(f"Пул: {cand.provider} {cand.id} — сильная тряска ({shake:.1f}), не беру")
         return None
+    # брак самого файла (водяной знак, надпись, коллаж, скриншот) от ролика не зависит: уже отбракованный в другом
+    # ролике снимок не отправляем на проверку повторно (токены и время)
+    from engine.slides import judge_cache
+
+    try:
+        key = judge_cache.fingerprint(trial)
+    except OSError:
+        key = ""
+    if key:
+        known = judge_cache.get(key)
+        if known:
+            log(f"Пул: {cand.provider} {cand.id} — уже отбракован раньше ({known}), без проверки")
+            return None
     v = judge.pool().rate(trial, cand.query or "")
     if v is None:
         return _CLIP_KEEP
+    if key and v.reject and any(w in v.reject.lower() for w in _FILE_DEFECTS):
+        judge_cache.put(key, v.reject)
     log(f"Пул: {cand.provider} {'видео' if prefer_video else 'фото'} ({cand.query}) — {v.note()}")
     if not v.ok:
         return None
@@ -681,6 +699,8 @@ def _judge_pool_item(judge, trial: Path, cand: StockCandidate, *, prefer_video: 
     return round(max(0.0, score) / 10, 3), max(0, quality)
 
 
+# причины отказа, которые принадлежат самому файлу, а не ролику (чужая страна/эпоха сюда не входят)
+_FILE_DEFECTS = ("watermark", "burned-in text", "burned in text", "subtitle", "collage", "split screen", "meme", "screenshot")
 _CLIP_KEEP = -1.0  # метка «проверки не было»: оценку CLIP не трогаем
 
 
