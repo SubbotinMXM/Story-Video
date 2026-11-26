@@ -100,11 +100,16 @@ def lane_of(kind: str) -> str:
     return "upload" if kind in UPLOAD_KINDS else "light" if kind in LIGHT_KINDS else "main"
 # краткий сбой сети или сервиса (обрыв, 5xx/522, «LLM перегружен») — очередь сама повторит задачу
 # с места падения через столько минут; дальше — ждёт «Продолжить»
-AUTO_RETRY_MIN = (5, 15, 30)
+# (ночью YouTube бывает недоступен часами: прокси профиля лагает, на адресе VPN «подтвердите, что вы не робот» —
+# коротких трёх повторов хватало на 20 минут и задача оставалась упавшей до утра)
+AUTO_RETRY_MIN = (3, 10, 20, 40, 60, 90)
+WATCHDOG_SEC = 300  # как часто сторож смотрит на идущие задачи
+STALL_SEC = 90 * 60  # идущая задача без прогресса и строк журнала столько — зависла
 _TRANSIENT = (
     "connecttimeout", "connecterror", "readtimeout", "handshake operation timed out", "timed out",
     "connection reset", "connection refused", "remoteprotocolerror", "server disconnected",
     "nodename nor servname", "temporary failure in name resolution", "network is unreachable",
+    "adspower не отвечает",  # Local API AdsPower под нагрузкой на минуту замолкает — потом отвечает
     "сервис llm перегружен", "no upstream accounts", "нет связи", "временно не работает", "временно не скачивается",
     " 500", " 502", " 503", " 504", " 520", " 521", " 522", " 523", " 524", "cloudflare",
     # YouTube временно ограничил доступ с этого адреса — обычно проходит само через какое-то время
@@ -143,6 +148,7 @@ class Job:
     cancel: CancelToken = field(default_factory=CancelToken)
     stop_at: float | None = None  # когда нажали «Стоп» на идущей задаче (для счётчика в карточке)
     on_state: Callable[[], None] | None = None
+    beat: float = field(default_factory=time.time)  # когда задача последний раз подала признак жизни (прогресс, журнал)
 
     @property
     def run_name(self) -> str:
@@ -278,6 +284,7 @@ class JobManager:
             threading.Thread(target=self._loop, args=("main",), name=f"job-worker-{n + 1}", daemon=True).start()
         threading.Thread(target=self._loop, args=("upload",), name="upload-worker", daemon=True).start()
         threading.Thread(target=self._loop, args=("light",), name="light-worker", daemon=True).start()
+        threading.Thread(target=self._watchdog, name="job-watchdog", daemon=True).start()
 
     # --- API ---
 
@@ -492,7 +499,12 @@ class JobManager:
             except (KeyError, TypeError, ValueError):
                 continue
             scheduled = job.status == QUEUED and float(job.state.get("retry_at") or 0) > 0
-            if job.status in (QUEUED, RUNNING) and (job.id in resume or scheduled):
+            # приложение закрылось/упало посреди очереди — после запуска работа продолжается сама
+            # (остановленные руками — CANCELLED, их не трогаем; тихие задачи идут по своему расписанию)
+            from server import retry_policy
+
+            if job.status in (QUEUED, RUNNING) and (
+                    job.id in resume or scheduled or job.kind not in retry_policy.QUIET_KINDS):
                 # ждущая повтора по расписанию (лимит YouTube и т. п.) не «прервана» закрытием —
                 # она и так стояла, поэтому после любого перезапуска продолжает ждать своего времени
                 # плановый перезапуск: задача продолжится сама (идущая — с места остановки, по своему state)
@@ -605,7 +617,10 @@ class JobManager:
         self._emit(job)
         log(f"▶ {job.title}" + (f" (попытка {job.attempts})" if job.attempts > 1 else ""))
 
+        job.beat = time.time()
+
         def progress(pct: float, msg: str) -> None:
+            job.beat = time.time()
             job.progress = max(0.0, min(1.0, float(pct)))
             if job.cancel.is_cancelled():
                 # «Стоп» нажат, шаг ещё доделывается: не затираем «Останавливаю…» обычным прогрессом —
@@ -623,18 +638,16 @@ class JobManager:
             job.progress = 1.0
             job.message = (job.result or {}).get("summary") or "Готово"
             log(f"✓ {job.title}: {job.message}")
-        except CancelledError:
-            job.status = CANCELLED
-            job.message = "Остановлено — можно продолжить"
-            log(f"■ {job.title}: остановлено")
+        except CancelledError as exc:
+            if job.state.pop("stalled", None):
+                # остановила не рука человека, а сторож: задача зависла — это сбой, а не «Стоп»
+                self._failed(job, RuntimeError(f"Зависла: {STALL_SEC / 60:g} мин без движения — перезапускаю с места остановки"))
+            else:
+                job.status = CANCELLED
+                job.message = "Остановлено — можно продолжить"
+                log(f"■ {job.title}: остановлено")
         except Exception as exc:
-            job.status = FAILED
-            job.error = f"{exc}" if _is_user_error(exc) else f"{type(exc).__name__}: {exc}"
-            job.message = "Ошибка — можно продолжить с места падения"
-            if not getattr(exc, "retry_at", None):  # ожидание по расписанию (лимит, AdsPower) — без трассировки
-                log(traceback.format_exc())
-            log(f"✗ {job.title}: {job.error}")
-            self._maybe_retry(job, exc)
+            self._failed(job, exc)
         finally:
             job.finished = time.time()
             self._save()
@@ -697,9 +710,33 @@ class JobManager:
         try:
             from engine.publish import collabs
 
+            # Очередь за ночь пустеет много раз, а окно открывают утром: итог — ОДИН за всё время, пока прошлый не
+            # открыли (иначе в нём «1 из 4», а то, что было раньше, потерялось). Плюс всё упавшее в журнале.
+            carried, carried_start = rep.carry()
+            merged = {**carried, **batch["snaps"]}
+            jobs = list(getattr(self, "_jobs", None) or [])
+            if jobs:
+                by_id = {j.id: j for j in jobs}
+                for jid in list(merged):
+                    j = by_id.get(jid)
+                    if j is None:
+                        if merged[jid].get("status") != DONE:
+                            del merged[jid]  # задачу убрали из журнала — упавшей она уже не числится
+                    elif jid not in batch["snaps"]:
+                        if j.status in (DONE, FAILED):
+                            merged[jid] = j.stored()  # свежее состояние (упала → продолжили → дошла)
+                        else:
+                            del merged[jid]  # снова в работе или ждёт повтора — в «ждут повтора» ниже
+                day_ago = time.time() - 24 * 3600
+                for j in jobs:
+                    if (j.status == FAILED and j.id not in merged and float(j.finished or 0) >= day_ago
+                            and j.kind not in rep.QUIET_KINDS):
+                        merged[j.id] = j.stored()
+            snaps = list(merged.values())
+            started = min((x for x in (batch["started"], carried_start) if x), default=0.0)
             report = rep.build(snaps, names=_channel_names, pending_pairs=collabs.pending(),
-                               started=batch["started"], finished=time.time(), waiting=batch.get("waiting") or [])
-            rep.add(report)
+                               started=started, finished=time.time(), waiting=batch.get("waiting") or [])
+            rep.add(report, merged)
         except Exception as exc:  # noqa: BLE001 — отчёт не важнее самой работы
             log(f"Итоговый отчёт не собрался: {exc}")
             return False
@@ -709,6 +746,29 @@ class JobManager:
         notify(f"Story Video: {report['title']}", report["text"])
         log(f"Итог: {report['title']} — {report['text']}")
         return True
+
+    def _failed(self, job: Job, exc: BaseException) -> None:
+        job.status = FAILED
+        job.error = f"{exc}" if _is_user_error(exc) else f"{type(exc).__name__}: {exc}"
+        job.message = "Ошибка — можно продолжить с места падения"
+        if not getattr(exc, "retry_at", None):  # ожидание по расписанию (лимит, AdsPower) — без трассировки
+            log("".join(traceback.format_exception(exc)))
+        log(f"✗ {job.title}: {job.error}")
+        self._maybe_retry(job, exc)
+
+    def _watchdog(self) -> None:
+        """Сторож зависаний: идущая задача, от которой нет ни прогресса, ни строки в журнале STALL_SEC, — зависла
+        (браузер, сеть без таймаута). Останавливаем и перезапускаем с места остановки по общим правилам повторов."""
+        while True:
+            time.sleep(WATCHDOG_SEC)
+            now = time.time()
+            with self._lock:
+                stuck = [j for j in self._jobs if j.status == RUNNING and now - j.beat > STALL_SEC
+                         and not j.cancel.is_cancelled() and j.kind not in ("analytics", "scan")]
+            for j in stuck:
+                log(f"⚠ {j.title}: {STALL_SEC / 60:g} мин без движения — считаю зависшей, останавливаю и перезапускаю")
+                j.state["stalled"] = True
+                j.cancel.cancel()
 
     def _maybe_retry(self, job: Job, exc: BaseException) -> None:
         """Краткий сбой сети/сервиса — поставить задачу обратно в очередь с паузой (с места падения)."""
@@ -743,21 +803,42 @@ class JobManager:
             log(f"↻ {job.title}: {job.message}")
             return
         n = int(job.state.get("auto_retries") or 0)
-        if not is_transient(exc) or n >= len(AUTO_RETRY_MIN):
+        if isinstance(exc, (ValueError, FileNotFoundError)) and not is_transient(exc):
+            return  # ошибка настроек/данных — повтор её не исправит
+        from server import retry_policy
+
+        first = float(job.state.setdefault("first_failure", time.time()))
+        wait, why = retry_policy.plan(f"{type(exc).__name__}: {exc}", n=n, kind=job.kind, first_failure=first,
+                                      now=time.time(), early=AUTO_RETRY_MIN)
+        if wait is None:
+            if why:
+                log(f"✋ {job.title}: сама не повторю ({why})")
+                if why == "нужен человек лично":
+                    self._ping_user(job)
             return
         try:
             title, runner = self._build(job.kind, job.params, job.state)
         except Exception as build_exc:  # настройки сломались — ждём человека
             log(f"Автоповтор не получился: {build_exc}")
             return
-        wait = AUTO_RETRY_MIN[n]
         job.state["auto_retries"] = n + 1
         job.state["retry_at"] = time.time() + wait * 60
         job.runner, job.title = runner, title
         job.status = QUEUED
         job.cancel = CancelToken()
-        job.message = f"Сбой сети или сервиса — сам повторю через {wait} мин (повтор {n + 1} из {len(AUTO_RETRY_MIN)})"
+        mins = f"{wait:g}" if wait < 1 else f"{wait:.0f}"
+        job.message = f"Сбой — сам повторю через {mins} мин (повтор {n + 1})"
         log(f"↻ {job.title}: {job.message}")
+
+    @staticmethod
+    def _ping_user(job: Job) -> None:
+        """Задача упёрлась в то, что может сделать только человек (вход в Google): уведомление сразу, не по концу очереди."""
+        try:
+            from server.notify import notify
+
+            notify("Story Video: нужен ваш шаг", f"{job.title[:80]} — требуется подтвердить вход в аккаунт Google; остальные задачи идут дальше")
+        except Exception as exc:  # noqa: BLE001
+            log(f"Уведомление не отправилось: {exc}")
 
     def _on_net(self, snap: dict[str, Any]) -> None:
         """Сторож связи: состояние — в интерфейс; связь вернулась — ждавшие её задачи идут сразу."""
@@ -780,7 +861,12 @@ class JobManager:
         hub.publish("job", {"job": job.public()})
 
     def _on_log(self, line: str) -> None:
-        hub.publish("log", {"line": line, "job_id": current_job.get()})
+        jid = current_job.get()
+        if jid:
+            job = self._find(jid)
+            if job is not None:
+                job.beat = time.time()
+        hub.publish("log", {"line": line, "job_id": jid})
 
     def _on_usage(self, job_id: str | None, label: str, tokens_in: int, cached: int, tokens_out: int) -> None:
         """Токены встроенной нейросети — в карточку задачи, которая их тратит. На диск уйдут со следующим

@@ -19,9 +19,23 @@ def client(handler) -> ap.AdsPower:
 
 class AdsPowerTests(unittest.TestCase):
     def setUp(self) -> None:
-        p = mock.patch.object(ap, "MIN_INTERVAL", 0)
-        p.start()
-        self.addCleanup(p.stop)
+        for name, value in (("MIN_INTERVAL", 0), ("TRANSPORT_PAUSES", (0, 0, 0))):
+            p = mock.patch.object(ap, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_timeout_then_answer_is_not_adspower_down(self) -> None:
+        calls = []
+
+        def flaky(req):
+            calls.append(1)
+            if len(calls) < 3:
+                raise httpx.ReadTimeout("timed out")
+            return httpx.Response(200, json={"code": 0, "data": {}})
+
+        with client(flaky) as c:
+            c.status()
+        self.assertEqual(len(calls), 3, "две заминки — не повод считать AdsPower закрытым")
 
     def test_key_in_bearer_header(self) -> None:
         seen = []

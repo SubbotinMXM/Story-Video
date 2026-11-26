@@ -938,9 +938,17 @@ def translate_cover(cs: CoverSettings, image: Path, text: list[str], language: s
 
 def youtube_original(url: str, *, with_image: bool = True) -> tuple[str, bytes | None, str]:
     """Ролик-оригинал → (название, обложка в максимальном размере, язык)."""
-    from engine.rewrite.source import video_info
+    from engine.rewrite.source import SourceError, video_info
 
-    info = video_info(url)
+    try:
+        info = video_info(url)
+    except SourceError:
+        # Страница не открылась (проверка на робота и т.п.), но картинка обложки лежит на i.ytimg.com
+        # по id ролика и от этой проверки не зависит: без неё обложка не должна теряться.
+        m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/)([\w-]{11})", url or "")
+        if not with_image or not m:
+            raise
+        info = {"id": m.group(1)}
     if not with_image:
         return str(info.get("title") or ""), None, str(info.get("language") or "")
     vid = str(info.get("id") or "")

@@ -6,6 +6,7 @@ import _isolate  # noqa: F401  (до импорта engine)
 
 import json
 import tempfile
+import random
 import unittest
 from pathlib import Path
 
@@ -302,6 +303,64 @@ class CheapJudgeAuditTests(unittest.TestCase):
         cheap = [Verdict(8, 8, 8, "")]
         self.assertEqual(PoolBatcher(judge)._audit([Path("a")], cheap), cheap)
         judge.rate.assert_not_called()
+
+
+class VideoSecondPassTests(unittest.TestCase):
+    """26.11: сеть была забита, клипы не скачались — в пуле 0 видео. Теперь малое число видео — второй заход."""
+
+    def test_few_videos_trigger_second_pass_and_budget_starts_after_search(self) -> None:
+        from unittest import mock
+
+        from engine.slides import theme_media as tm
+
+        calls: list[tuple[str, int]] = []
+
+        def fake_fill(*a, **k):
+            calls.append((k["kind"], len(k.get("already") or [])))
+            if k["kind"] == "video":
+                return ([{"path": f"v{len(calls)}.mp4"}] * (3 if len(calls) == 2 else 0)), 0
+            return [], 0
+
+        plan = mock.Mock()
+        plan.video_queries, plan.image_queries = ["q"], ["q"]
+        req = mock.Mock(source_mix=None)
+        with mock.patch.object(tm, "_fill_kind", fake_fill), mock.patch.object(tm, "_google_need", lambda *a: 0), \
+                mock.patch.object(tm, "_stocks_need", lambda *a, **k: 0, create=True):
+            try:
+                tm.gather_pool(None, {}, plan, rng=random.Random(1), pool=Path("."), trials=Path("."), frames=Path("."),
+                               req=req, cancel=None, progress=lambda *a: None, pct_lo=0, pct_hi=1,
+                               image_need=0, video_need=12, video_search_sec=1.0)
+            except Exception:
+                pass  # дальше — картинки, их здесь не проверяем
+        self.assertEqual([c for c in calls if c[0] == "video"][:2], [("video", 0), ("video", 0)],
+                         "второй заход по видео сделан")
+
+
+class FrameLinesTests(unittest.TestCase):
+    def test_counts_photos_videos_ai_and_sources_once_per_file(self) -> None:
+        import json
+        import tempfile
+
+        from engine.slides.paths import TIMELINE_NAME
+        from engine.slides.pool_floor import frame_lines, frame_stats
+
+        raw = {
+            "slots": [{"kind": "image", "path": "a.jpg", "provider": "google"},
+                      {"kind": "video", "path": "v1.mp4", "provider": "pexels"}],
+            "loop_block": [{"kind": "image", "path": "a.jpg", "provider": "google"},
+                           {"kind": "image", "path": "b.jpg", "provider": "pexels"},
+                           {"kind": "image", "path": "c.png", "provider": "ai"},
+                           {"kind": "video", "path": "v2.mp4", "provider": "pixabay"}],
+        }
+        st = frame_stats(raw)
+        self.assertEqual((st["total"], st["photos"], st["videos"], st["ai"]), (5, 2, 2, 1))
+        self.assertEqual(st["sources"]["pexels"], 2)
+        d = Path(tempfile.mkdtemp())
+        (d / TIMELINE_NAME).write_text(json.dumps(raw), encoding="utf-8")
+        lines = frame_lines(d)
+        self.assertIn("5 разных — фото 2, видео 2, AI-кадров 1", lines[0])
+        self.assertIn("pexels 2", lines[1])
+        self.assertEqual(frame_lines(Path(tempfile.mkdtemp())), [], "нет таймлайна — строк нет")
 
 
 if __name__ == "__main__":

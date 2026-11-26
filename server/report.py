@@ -64,7 +64,8 @@ def diagnose(text: str, *, profile: str = "") -> dict[str, Any]:
     def out(tag: str, cause: str, mode: str, steps: list[str] | None = None) -> dict[str, Any]:
         return {"tag": tag, "cause": cause, "mode": mode, "steps": steps or []}
 
-    if "verify it" in low or "подтвердить вход" in low or "подтвердите, что это" in low:
+    if any(w in low for w in ("verify it", "подтвердить вход", "подтвердите, что это", "выкладка ждёт тебя",
+                              "не выполнен вход в google", "подтвердить канал по телефону")):
         return out("verify", "Google просит подтвердить вход в аккаунт (окно «Verify it's you»)", "manual",
                    _verify_steps(profile))
     if "adspower" in low and any(w in low for w in ("не отвечает", "etimedout", "econnrefused", "не запущен", "недоступен")):
@@ -205,6 +206,8 @@ def build(snaps: list[dict[str, Any]], *, names: Callable[[list[str]], list[str]
             item["details"] = [_clean(x, 200) for x in (res.get("lines") or [])[:3]]
         elif status == "done":
             item["details"] = [_clean(x, 200) for x in (res.get("lines") or [])[:4]]
+            if kind == "fixvideo" and any("обложка поставлена" in x for x in item["details"]):
+                counts["covers"] += 1
 
         if status != "done" and not any(p["job_id"] == item["job_id"] for p in problems):
             err = _clean(snap.get("error") or snap.get("message") or "неизвестная ошибка", 600)
@@ -212,7 +215,7 @@ def build(snaps: list[dict[str, Any]], *, names: Callable[[list[str]], list[str]
             targets = names((snap.get("params") or {}).get("channels") or []) if kind in ("polls", "comments", "publish") else []
             where = f" · {', '.join(targets[:3])}" if targets else ""
             problems.append(_problem(
-                scope="job", title=f"{KIND_LABEL.get(kind, kind)} не выполнена{where}", text=err, diag=d,
+                scope="job", title=f"Не выполнено: {item['title'] or KIND_LABEL.get(kind, kind)}{where}", text=err, diag=d,
                 job_id=item["job_id"], action={"type": "resume", "job_id": item["job_id"]}))
         # предупреждения готовой задачи, которых не покрывают другие разделы (соавторов ведёт журнал пар)
         if status == "done":
@@ -310,16 +313,41 @@ def _save(reports: list[dict[str, Any]]) -> None:
         log(f"Отчёт не сохранён: {exc}")
 
 
-def add(report: dict[str, Any]) -> None:
+CARRY_HOURS = 24  # непросмотренный отчёт не старше этого считается продолжением текущей пачки
+
+
+def _pub(r: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Отчёт для окна: без служебных снимков задач."""
+    return None if r is None else {k: v for k, v in r.items() if k != "snaps"}
+
+
+def add(report: dict[str, Any], snaps: dict[str, Any] | None = None) -> None:
+    """Сохранить отчёт. Снимки задач хранятся только у последнего непросмотренного отчёта: следующая пачка, пока
+    отчёт не открыли, дополняет его (ночью очередь пустеет много раз — утром нужен ОДИН итог за всю ночь)."""
     with _LOCK:
-        reports = _load()
+        stale = time.time() - CARRY_HOURS * 3600
+        # непросмотренный свежий отчёт вытесняется: новый включает его задачи (см. carry)
+        reports = [r for r in _load() if r.get("seen") or float(r.get("created") or 0) < stale]
+        for r in reports:
+            r.pop("snaps", None)
+        if snaps:
+            report = {**report, "snaps": snaps}
         reports.append(report)
         _save(reports)
 
 
+def carry() -> tuple[dict[str, Any], float]:
+    """(снимки задач, начало пачки) последнего непросмотренного отчёта — чтобы новая пачка его продолжила."""
+    with _LOCK:
+        last = next((r for r in reversed(_load()) if not r.get("seen")), None)
+    if not last or time.time() - float(last.get("created") or 0) > CARRY_HOURS * 3600:
+        return {}, 0.0
+    return dict(last.get("snaps") or {}), float(last.get("started") or 0)
+
+
 def get(report_id: str) -> dict[str, Any] | None:
     with _LOCK:
-        return next((r for r in _load() if r.get("id") == report_id), None)
+        return _pub(next((r for r in _load() if r.get("id") == report_id), None))
 
 
 def listing() -> list[dict[str, Any]]:
@@ -335,9 +363,10 @@ def mark_seen(report_id: str | None = None) -> None:
         for r in reports:
             if report_id is None or r.get("id") == report_id:
                 r["seen"] = True
+                r.pop("snaps", None)
         _save(reports)
 
 
 def unseen() -> dict[str, Any] | None:
     with _LOCK:
-        return next((r for r in reversed(_load()) if not r.get("seen")), None)
+        return _pub(next((r for r in reversed(_load()) if not r.get("seen")), None))

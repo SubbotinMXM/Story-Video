@@ -320,9 +320,21 @@ def gather_pool(
     videos, rejected_v = _fill_kind(
         http, clients, plan, rng=rng, pool=pool, trials=trials, frames=frames,
         kind="video", queries=plan.video_queries, req=req, cancel=cancel, progress=progress,
-        pct_lo=at(0.0), pct_hi=at(0.4), deadline=time.monotonic() + video_search_sec, need=video_need,
+        pct_lo=at(0.0), pct_hi=at(0.4), budget_sec=video_search_sec, need=video_need,
         exclude=exclude, judge=judge,
     )
+    if len(videos) < video_need // 2:
+        # видео мало (чаще всего сеть/VPN в это время была забита и клипы не скачались) — ещё один заход, а не ролик
+        # почти без видео: норма 10–15 клипов
+        log(f"Видео в пуле {len(videos)} из {video_need} — второй заход")
+        progress(at(0.4), f"Видео {len(videos)} из {video_need} — второй заход")
+        videos, more_rejected = _fill_kind(
+            http, clients, plan, rng=rng, pool=pool, trials=trials, frames=frames,
+            kind="video", queries=plan.video_queries, req=req, cancel=cancel, progress=progress,
+            pct_lo=at(0.4), pct_hi=at(0.45), budget_sec=video_search_sec, need=video_need,
+            already=videos, exclude=exclude, judge=judge,
+        )
+        rejected_v += more_rejected
     images: list[dict] = []
     rejected_g = 0
     custom = getattr(req, "source_mix", None)
@@ -368,7 +380,7 @@ def _fill_kind(
     pct_lo: float,
     pct_hi: float,
     already: list[dict] | None = None,
-    deadline: float | None = None,
+    budget_sec: float | None = None,
     need: int = IMAGE_NEED_MIN,
     sources: list[str] | None = None,
     exclude: list[dict] | None = None,
@@ -411,6 +423,9 @@ def _fill_kind(
     found = _hero_first(gathered, plan, prefer_video=prefer_video)
     found.sort(key=lambda c: bool((c.meta or {}).get("watermark")))
     progress(pct_lo, f"{kind}: кандидатов {len(found)}, качаю и смотрю файл")
+    # Время на скачивание отсчитываем ОТСЮДА, а не от начала поиска: при забитой сети поиск съедал все 3,5 минуты,
+    # и скачивание не начиналось (07:12 26.11: «кандидатов 154» и сразу «поиск стоп» — в пуле 0 видео).
+    deadline = time.monotonic() + budget_sec if budget_sec is not None else None
     saved: list[dict] = list(already or [])
     start_n = len(saved)
     have = {

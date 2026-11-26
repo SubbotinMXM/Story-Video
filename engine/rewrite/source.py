@@ -48,20 +48,40 @@ def _ydl_opts() -> dict:
             "socket_timeout": 30, "retries": 3}
 
 
+# Запасные «клиенты» YouTube: когда обычный запрос упирается в «подтвердите, что вы не робот» (бывает ночью
+# на адресе VPN), через другой клиент та же страница обычно открывается — субтитры и обложка те же.
+_FALLBACK_CLIENTS = (["tv_embedded"], ["android_vr"], ["mweb", "web_safari"])
+
+
+def _is_bot_check(msg: str) -> bool:
+    return "not a bot" in msg or "Sign in" in msg
+
+
 def video_info(url: str) -> dict:
     try:
         import yt_dlp
     except ImportError as exc:
         raise SourceError("Нет yt-dlp — переустанови зависимости (run.sh)") from exc
-    try:
-        with yt_dlp.YoutubeDL(_ydl_opts()) as ydl:
-            return ydl.extract_info(url, download=False) or {}
-    except Exception as exc:
-        msg = str(exc)
-        if "not a bot" in msg or "Sign in" in msg:
-            raise SourceError("YouTube просит подтвердить, что это не робот (временное ограничение с этого адреса) — "
-                              "повторю сам позже; если не пройдёт — другая сеть или повтор через пару часов") from exc
-        raise SourceError(f"Не открыл ролик: {msg[:200]}") from exc
+    first: Exception | None = None
+    for clients in (None, *_FALLBACK_CLIENTS):
+        opts = _ydl_opts()
+        if clients:
+            opts["extractor_args"] = {"youtube": {"player_client": clients}}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False) or {}
+            if clients:
+                log(f"Ролик {url}: обычный запрос упёрся в проверку на робота, открылся через клиент {clients[0]}")
+            return info
+        except Exception as exc:
+            first = first or exc
+            if not _is_bot_check(str(exc)):
+                break  # другая беда (ролик удалён, закрыт) — другие клиенты не помогут
+    msg = str(first)
+    if _is_bot_check(msg):
+        raise SourceError("YouTube просит подтвердить, что это не робот (временное ограничение с этого адреса) — "
+                          "повторю сам позже; если не пройдёт — другая сеть или повтор через пару часов") from first
+    raise SourceError(f"Не открыл ролик: {msg[:200]}") from first
 
 
 def _pick_track(info: dict) -> tuple[str, str, list[dict]] | None:

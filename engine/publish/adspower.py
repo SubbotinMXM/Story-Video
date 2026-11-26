@@ -72,6 +72,7 @@ class Session:
     webdriver: str = ""
 
 
+TRANSPORT_PAUSES = (4, 10, 25)  # AdsPower не ответил — пауза перед следующей попыткой, с
 BUSY_WAITS = (5, 15, 30, 40)  # «профиль занят» — освобождаем и ждём столько секунд между попытками
 
 
@@ -104,6 +105,22 @@ class AdsPower:
 
     # ---------- запросы ----------
 
+    def _request_retrying(self, method: str, path: str, params: dict | None, body: dict | None):
+        """Запрос к Local API. Таймаут или обрыв — не «AdsPower закрыт»: под нагрузкой (рендер, десяток профилей,
+        медленный прокси) он иногда отвечает дольше минуты. Пробуем ещё пару раз, и только потом сдаёмся."""
+        for k, pause in enumerate((*TRANSPORT_PAUSES, None)):
+            try:
+                return self._http.request(method, path, params=params, json=body,
+                                          headers={"Authorization": f"Bearer {self.api_key}"})
+            except httpx.TransportError as exc:
+                if pause is None:
+                    raise AdsPowerDown(
+                        f"AdsPower не отвечает ({self.base_url}) — открой программу AdsPower на этом Mac "
+                        "и проверь, что Local API включён"
+                    ) from exc
+                log(f"AdsPower: {path} не ответил ({type(exc).__name__}) — пробую снова через {pause} с ({k + 1}/{len(TRANSPORT_PAUSES)})")
+                time.sleep(pause)
+
     def _call(self, method: str, path: str, *, params: dict | None = None, body: dict | None = None,
               retries: int = 3) -> dict:
         global _last
@@ -115,13 +132,7 @@ class AdsPower:
                 if wait > 0:
                     time.sleep(wait)
                 try:
-                    resp = self._http.request(method, path, params=params, json=body,
-                                              headers={"Authorization": f"Bearer {self.api_key}"})
-                except httpx.TransportError as exc:
-                    raise AdsPowerDown(
-                        f"AdsPower не отвечает ({self.base_url}) — открой программу AdsPower на этом Mac "
-                        "и проверь, что Local API включён"
-                    ) from exc
+                    resp = self._request_retrying(method, path, params, body)
                 finally:
                     _last = time.monotonic()
             try:

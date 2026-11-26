@@ -135,6 +135,44 @@ def unique_frames(raw: dict) -> int:
     return len(paths)
 
 
+def frame_stats(raw: dict) -> dict:
+    """Что реально стоит в монтаже (слоты начала + блок после начала): сколько РАЗНЫХ файлов — фото, видео, AI-кадров —
+    и с каких источников они скачаны."""
+    seen: dict[str, dict] = {}
+    for key in ("slots", "loop_block"):
+        for it in raw.get(key) or []:
+            if isinstance(it, dict) and it.get("path") and str(it["path"]) not in seen:
+                seen[str(it["path"])] = it
+    photos = videos = ai = 0
+    sources: dict[str, int] = {}
+    for it in seen.values():
+        provider = str(it.get("provider") or "?")
+        if provider == "ai":
+            ai += 1
+        elif it.get("kind") == "video":
+            videos += 1
+        else:
+            photos += 1
+        sources[provider] = sources.get(provider, 0) + 1
+    return {"total": len(seen), "photos": photos, "videos": videos, "ai": ai,
+            "sources": dict(sorted(sources.items(), key=lambda kv: -kv[1]))}
+
+
+def frame_lines(run_dir: Path) -> list[str]:
+    """Строки для итога готового ролика: сколько фото и видео скачано и использовано в монтаже (пусто — нет данных)."""
+    try:
+        raw = json.loads((Path(run_dir) / TIMELINE_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    st = frame_stats(raw)
+    if not st["total"]:
+        return []
+    ai = f", AI-кадров {st['ai']}" if st["ai"] else ""
+    src = ", ".join(f"{k} {v}" for k, v in st["sources"].items())
+    return [f"Кадры в монтаже: {st['total']} разных — фото {st['photos']}, видео {st['videos']}{ai}",
+            f"Источники кадров: {src}"]
+
+
 def min_frames(duration: float) -> int:
     """Норма для ролика такой длины: 80 разных кадров на ролик от 20 минут, у короткого — пропорционально."""
     if duration <= 0:

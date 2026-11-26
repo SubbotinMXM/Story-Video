@@ -214,5 +214,57 @@ class EndToEndTests(unittest.TestCase):
         self.assertIn("report", events)
 
 
+class NightCumulativeTests(unittest.TestCase):
+    """Ночью очередь пустеет много раз: утренний итог — один, за всю ночь, пока прошлый не открыли."""
+
+    def _snap(self, jid: str, kind: str, status: str, title: str) -> dict:
+        return {"id": jid, "kind": kind, "title": title, "status": status, "finished": time.time(), "params": {},
+                "state": {}, "result": {"summary": "ok", "lines": []} if status == "done" else None,
+                "error": "" if status == "done" else "нет связи", "message": ""}
+
+    def test_second_batch_continues_unseen_report(self) -> None:
+        from unittest import mock
+
+        from server.jobs import JobManager
+
+        report._FILE.unlink(missing_ok=True)
+        mgr = JobManager.__new__(JobManager)
+        first = {"done": 2, "failed": 1, "sec": 99.0, "last": "", "started": 100.0, "snaps": {
+            "r1": self._snap("r1", "rewrite", "done", "Рерайт 1"), "r2": self._snap("r2", "rewrite", "done", "Рерайт 2"),
+            "r3": self._snap("r3", "rewrite", "failed", "Рерайт 3")}}
+        second = {"done": 0, "failed": 1, "sec": 99.0, "last": "", "started": 200.0, "snaps": {
+            "c1": self._snap("c1", "fixvideo", "failed", "Доделать ролик (обложка): Канал — https://youtu.be/x")}}
+        with mock.patch("server.jobs.hub"), mock.patch("server.notify.notify"):
+            self.assertTrue(mgr._report(first))
+            self.assertTrue(mgr._report(second))
+        self.assertEqual(len(report.listing()), 1, "прошлый непросмотренный вытеснен новым")
+        full = report.get(report.listing()[0]["id"])
+        self.assertNotIn("snaps", full)
+        self.assertEqual((full["counts"]["jobs"], full["counts"]["ok"], full["counts"]["failed"]), (4, 2, 2))
+        self.assertEqual(full["title"], "Готово 2 из 4")
+        self.assertEqual(full["started"], 100.0)
+        self.assertEqual(sorted(full["fix"]["jobs"]), ["c1", "r3"], "«Исправить» продолжает ВСЁ упавшее, не только последнюю пачку")
+        self.assertTrue(any("Канал" in p["title"] for p in full["problems"]), "в проблеме видно, какой это ролик")
+
+    def test_seen_report_is_not_carried(self) -> None:
+        from unittest import mock
+
+        from server.jobs import JobManager
+
+        report._FILE.unlink(missing_ok=True)
+        mgr = JobManager.__new__(JobManager)
+        b1 = {"done": 0, "failed": 1, "sec": 99.0, "last": "", "started": 1.0,
+              "snaps": {"a": self._snap("a", "polls", "failed", "Голосования")}}
+        b2 = {"done": 1, "failed": 0, "sec": 99.0, "last": "", "started": 2.0,
+              "snaps": {"b": self._snap("b", "cover", "done", "Обложка")}}
+        with mock.patch("server.jobs.hub"), mock.patch("server.notify.notify"):
+            mgr._report(b1)
+            report.mark_seen(None)
+            mgr._report(b2)
+        full = report.get(report.listing()[0]["id"])
+        self.assertEqual(full["counts"]["jobs"], 1)
+        self.assertEqual(len(report.listing()), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -290,5 +290,5 @@ class ScheduledRetrySurvivesRestartTest(unittest.TestCase):
             self.assertEqual(w.status, jobs_mod.QUEUED, "ждущая повтора отменилась при закрытии")
             self.assertEqual(w.message, "лимит обложек — поставлю завтра", "причина ожидания потерялась")
             self.assertAlmostEqual(w.public()["retry_at"], later, places=0)
-            self.assertEqual(p.status, jobs_mod.CANCELLED, "обычная очередь при закрытии — как раньше")
+            self.assertIn(p.status, (jobs_mod.QUEUED, jobs_mod.RUNNING, jobs_mod.DONE), "обычная очередь при закрытии продолжается сама")
             self.assertIsNone(p.public()["retry_at"])

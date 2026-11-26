@@ -378,12 +378,11 @@ class JobManagerEdgeTests(_ManagerCase):
             {"broken": True},
         ]
         (self.root / "jobs.json").write_text(json.dumps(data), encoding="utf-8")
-        m = jobs_mod.JobManager(lambda *a: ("T", lambda *b: {}))
+        with mock.patch.object(jobs_mod.JobManager, "_claim", side_effect=lambda lane="main": threading.Event().wait()):
+            m = jobs_mod.JobManager(lambda *a: ("T", lambda *b: {}))
         by_id = {j["id"]: j for j in m.list()}
-        self.assertEqual(by_id["a"]["status"], "failed")
-        self.assertIn("закрыто", by_id["a"]["error"])
-        self.assertEqual(by_id["b"]["status"], "cancelled")
-        self.assertTrue(by_id["a"]["resumable"] and by_id["b"]["resumable"])
+        self.assertEqual(by_id["a"]["status"], "queued", "прерванная закрытием приложения продолжится сама")
+        self.assertEqual(by_id["b"]["status"], "queued")
         self.assertEqual(by_id["c"]["status"], "done")
         self.assertEqual(len(by_id), 3, "битая запись пропущена")
         self.assertEqual(m._find("a").state["work_dir"], "/x")
@@ -406,10 +405,11 @@ class JobManagerEdgeTests(_ManagerCase):
 
             return "Т", run
 
-        m = jobs_mod.JobManager(builder)
-        a = m.add(m.create("x", {"user": True}))
-        b = m.add(m.create("x", {"user": False}))
-        _wait(lambda: a.status == jobs_mod.FAILED and b.status == jobs_mod.FAILED)
+        with mock.patch.object(jobs_mod, "AUTO_RETRY_MIN", ()):  # повторы выключены — смотрим только текст ошибки
+            m = jobs_mod.JobManager(builder)
+            a = m.add(m.create("x", {"user": True}))
+            b = m.add(m.create("x", {"user": False}))
+            _wait(lambda: a.status == jobs_mod.FAILED and b.status == jobs_mod.FAILED)
         self.assertEqual(a.error, "Укажи папку")
         self.assertTrue(b.error.startswith("KeyError"))
 
@@ -646,6 +646,114 @@ class AnalyticsGroupsConfigTest(unittest.TestCase):
         self.assertEqual(_normalize({})["analytics_groups"], [])
 
 
+class UnattendedTests(_ManagerCase):
+    """Очередь можно оставить на двое суток: задача выполняется сама, пока не нужен человек."""
+
+    def test_unknown_failure_is_retried_until_it_passes(self) -> None:
+        calls = []
+
+        def builder(kind, params, state):
+            def run(job, p, c):
+                calls.append(1)
+                if len(calls) < 3:
+                    raise RuntimeError("Studio: шаг «название»: нет элемента «title»")  # не сеть, а сбой страницы
+                return {"summary": "ок"}
+            return "Ролик", run
+
+        with mock.patch.object(jobs_mod, "AUTO_RETRY_MIN", (0.0005, 0.0005, 0.0005)):
+            m = jobs_mod.JobManager(builder)
+            job = m.add(m.create("publish", {}))
+            _wait(lambda: job.status == jobs_mod.DONE, timeout=8)
+        self.assertEqual(len(calls), 3)
+
+    def test_google_verification_is_not_retried(self) -> None:
+        from unittest import mock as _m
+
+        def builder(kind, params, state):
+            def run(job, p, c):
+                raise RuntimeError("Google просит подтвердить вход (Verify it's you)")
+            return "Выкладка", run
+
+        with mock.patch.object(jobs_mod, "AUTO_RETRY_MIN", (0.0005,)), \
+                _m.patch.object(jobs_mod.JobManager, "_ping_user") as ping:
+            m = jobs_mod.JobManager(builder)
+            job = m.add(m.create("publish", {}))
+            _wait(lambda: job.status == jobs_mod.FAILED)
+            time.sleep(0.3)
+        self.assertEqual(job.status, jobs_mod.FAILED, "вход в Google человек подтверждает сам")
+        ping.assert_called_once()
+
+    def test_settings_error_is_not_retried(self) -> None:
+        def builder(kind, params, state):
+            def run(job, p, c):
+                raise ValueError("Укажи папку футажей")
+            return "Ролик", run
+
+        with mock.patch.object(jobs_mod, "AUTO_RETRY_MIN", (0.0005,)):
+            m = jobs_mod.JobManager(builder)
+            job = m.add(m.create("x", {}))
+            _wait(lambda: job.status == jobs_mod.FAILED)
+            time.sleep(0.3)
+        self.assertEqual(job.status, jobs_mod.FAILED)
+
+    def test_interrupted_jobs_continue_after_restart(self) -> None:
+        data = [
+            {"id": "a", "kind": "slides_full", "title": "А", "params": {}, "state": {}, "status": "running", "started": 1.0},
+            {"id": "b", "kind": "publish", "title": "Б", "params": {}, "state": {}, "status": "queued"},
+            {"id": "c", "kind": "analytics", "title": "В", "params": {}, "state": {}, "status": "running"},
+            {"id": "d", "kind": "publish", "title": "Г", "params": {}, "state": {}, "status": "cancelled"},
+        ]
+        (self.root / "jobs.json").write_text(json.dumps(data), encoding="utf-8")
+        with mock.patch.object(jobs_mod.JobManager, "_claim", side_effect=lambda lane="main": threading.Event().wait()):
+            m = jobs_mod.JobManager(lambda *a: ("T", lambda *b: {}))
+        st = {j.id: j.status for j in m._jobs}
+        self.assertEqual((st["a"], st["b"]), (jobs_mod.QUEUED, jobs_mod.QUEUED), "работа продолжится сама")
+        self.assertEqual(st["c"], jobs_mod.FAILED, "тихая задача пойдёт по расписанию")
+        self.assertEqual(st["d"], jobs_mod.CANCELLED, "остановленное руками не трогаем")
+
+
+class WatchdogTests(_ManagerCase):
+    def test_stuck_job_is_stopped_and_restarted(self) -> None:
+        calls = []
+
+        def builder(kind, params, state):
+            def run(job, progress, cancel):
+                calls.append(1)
+                if len(calls) == 1:
+                    for _ in range(200):  # «зависла»: ни прогресса, ни строк журнала
+                        cancel.check()
+                        time.sleep(0.05)
+                return {"summary": "ок"}
+            return "Ролик", run
+
+        with mock.patch.object(jobs_mod, "STALL_SEC", 0.3), \
+                mock.patch.object(jobs_mod, "WATCHDOG_SEC", 0.1), mock.patch.object(jobs_mod, "AUTO_RETRY_MIN", (0.0005,)):
+            m = jobs_mod.JobManager(builder)
+            job = m.add(m.create("slides_full", {}))
+            _wait(lambda: job.status == jobs_mod.DONE, timeout=10)
+        self.assertEqual(len(calls), 2, "зависшая остановлена сторожем и запущена заново")
+
+
+class RetryPolicyTests(unittest.TestCase):
+    def test_plan(self) -> None:
+        from server import retry_policy as rp
+
+        early = (3, 10, 20)
+        now = 1_000_000.0
+        kw = dict(kind="slides_full", first_failure=now - 60, now=now, early=early)
+        self.assertEqual(rp.plan("ConnectTimeout: timed out", n=0, **kw)[0], 3)
+        self.assertEqual(rp.plan("ConnectTimeout: timed out", n=7, **kw)[0], rp.TAIL_MIN, "дальше — раз в 2 часа")
+        self.assertIsNone(rp.plan("Google: Verify it's you", n=0, **kw)[0])
+        self.assertIsNone(rp.plan("Выкладка ждёт тебя: канал X: в профиле не выполнен вход в Google", n=0, **kw)[0])
+        self.assertEqual(rp.plan("Недостаточно средств на счёте", n=0, **kw)[0], rp.SLOW_MIN)
+        self.assertEqual(rp.plan("AdsPower не отвечает", n=1, **kw)[0], 10)
+        self.assertEqual(rp.plan("AdsPower не отвечает", n=5, **kw)[0], rp.SLOW_MIN)
+        self.assertIsNone(rp.plan("что-то непонятное", n=rp.UNKNOWN_MAX, **kw)[0], "неопознанное — не бесконечно")
+        self.assertIsNone(rp.plan("ConnectTimeout", n=1, **{**kw, "first_failure": now - 80 * 3600})[0], "дальше 72 ч — стоп")
+        self.assertIsNone(rp.plan("ConnectTimeout", n=0, **{**kw, "kind": "analytics"})[0])
+        self.assertIsNone(rp.plan("ConnectTimeout", n=0, **{**kw, "early": ()})[0], "пусто — повторы выключены")
+
+
 class PlannedRestartTests(_ManagerCase):
     def test_queue_survives_planned_restart(self) -> None:
         def builder(kind, params, state):
@@ -664,7 +772,7 @@ class PlannedRestartTests(_ManagerCase):
             st = {j.id: (j.status, j.runner is not None) for j in m._jobs}
             self.assertEqual(st["a"], (jobs_mod.QUEUED, True), "шедшая — продолжится")
             self.assertEqual(st["b"], (jobs_mod.QUEUED, True))
-            self.assertEqual(st["c"][0], jobs_mod.CANCELLED, "не из метки — как раньше, ждёт решения")
+            self.assertEqual(st["c"][0], jobs_mod.QUEUED, "и не из метки: прерванное закрытием продолжается само")
             self.assertFalse((self.root / "resume.json").exists(), "метка одноразовая")
 
 

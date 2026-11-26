@@ -206,7 +206,11 @@ class QueueApiTests(ApiTestCase):
         self.fail(f"задача не дошла до {status}")
 
     def test_failed_job_resume_and_reset(self) -> None:
-        with mock.patch.object(runners_mod, "write_speed_copies", side_effect=RuntimeError("ffmpeg упал")):
+        from server import jobs as jobs_mod
+
+        # автоповторы выключены: проверяем ручное «Продолжить» упавшей задачи
+        with mock.patch.object(runners_mod, "write_speed_copies", side_effect=RuntimeError("ffmpeg упал")), \
+                mock.patch.object(jobs_mod, "AUTO_RETRY_MIN", ()):
             jid = self._copies_job()
             job = self._wait(jid, "failed")
         self.assertTrue(job["resumable"])

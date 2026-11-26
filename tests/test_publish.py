@@ -1789,7 +1789,7 @@ class FixAfterPublishTest(unittest.TestCase):
 
 
 class FixVideoTest(unittest.TestCase):
-    def _run(self, shown_before, shown_after, thumb=None, srcs=(set(), set())):
+    def _run(self, shown_before, shown_after, thumb=None, srcs=(set(), set()), custom=None):
         page = mock.MagicMock()
         field = mock.MagicMock()
         state = {"saved": False}
@@ -1811,6 +1811,8 @@ class FixVideoTest(unittest.TestCase):
              mock.patch.object(youtube, "_act", lambda c=None: None), \
              mock.patch.object(youtube, "_pick_playlist", return_value=[]) as pick, \
              mock.patch.object(youtube, "_thumb_srcs", lambda p: next(src_iter)), \
+             mock.patch.object(youtube, "_wait_saved", lambda *a, **k: None), \
+             mock.patch.object(youtube, "_wait_custom_thumb", custom or (lambda *a, **k: True)), \
              mock.patch.object(youtube.human, "click", click), \
              mock.patch.object(youtube.human, "choose_file", return_value="кнопкой"), \
              mock.patch("engine.publish.studio_kit.el", lambda p, key, **kw: save):
@@ -1833,6 +1835,23 @@ class FixVideoTest(unittest.TestCase):
         notes, pick = self._run("истории", "истории", thumb=f, srcs=({"old.jpg"}, {"new.jpg"}))
         pick.assert_not_called()  # плейлист уже стоит — не трогаем
         self.assertIn("обложка поставлена", notes[0])
+
+    def test_cover_not_sticking_is_set_again(self) -> None:
+        """26.11: прокси лагал, после «Save» обложки на странице не было — раньше сразу ошибка, теперь второй заход."""
+        f = Path(tempfile.mkdtemp()) / "обложка.jpg"
+        f.write_bytes(b"x")
+        answers = iter([True, False, True, True])  # заход 1: загрузилась, но после сохранения нет; заход 2: всё есть
+        notes, _ = self._run("истории", "истории", thumb=f, custom=lambda *a, **k: next(answers),
+                             srcs=({"old"}, {"old"}, {"old"}, {"new"}))
+        self.assertIn("обложка поставлена", notes[0])
+
+    def test_cover_never_sticking_is_still_an_error(self) -> None:
+        f = Path(tempfile.mkdtemp()) / "обложка.jpg"
+        f.write_bytes(b"x")
+        answers = iter([True, False] * 3)
+        with self.assertRaises(youtube.StudioError):
+            self._run("истории", "истории", thumb=f, custom=lambda *a, **k: next(answers),
+                      srcs=tuple({"old"} for _ in range(6)))
 
     def test_nothing_to_do(self) -> None:
         notes, pick = self._run("истории", "истории")

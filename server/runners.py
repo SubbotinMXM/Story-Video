@@ -238,10 +238,14 @@ def _render_flags(cfg: dict) -> dict[str, Any]:
 
 def _slides_result(render, extra: list[str] | None = None) -> dict[str, Any]:
     from engine.slides.ai_fill import report_lines
+    from engine.slides.pool_floor import frame_lines
 
     folder = render.desktop_video or render.run_dir
     mb = render.size_bytes / 1e6
     ai_lines, warnings = report_lines(render.run_dir)
+    frames = frame_lines(render.run_dir)
+    for line in frames:  # и в журнал: после готового ролика видно, сколько кадров в нём и откуда они
+        log(line)
     summary = f"Готово: {render.duration:.0f} с, {mb:.1f} MB"
     return {
         "summary": summary + (" · AI-кадры не все — см. карточку" if warnings else ""),
@@ -251,6 +255,7 @@ def _slides_result(render, extra: list[str] | None = None) -> dict[str, Any]:
             f"Папка: {folder}",
             f"Длительность: {render.duration:.1f} с",
             f"Размер: {mb:.1f} MB",
+            *frames,
             *ai_lines,
             *(extra or []),
         ],

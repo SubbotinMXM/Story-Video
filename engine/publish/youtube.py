@@ -324,7 +324,8 @@ def _is_active(page, cid: str) -> bool:
     return studio_channel(page, STUDIO) == cid or studio_channel(page, f"{STUDIO}/channel/{cid}/videos/upload") == cid
 
 
-GOTO_TRIES = 3  # обрыв связи с Studio (ERR_CONNECTION_CLOSED и т.п. — сеть/прокси профиля) — повторяем загрузку
+GOTO_TRIES = 6  # обрыв связи с Studio («Die Website ist nicht erreichbar», ERR_… — прокси профиля лагает): перезагружаем
+GOTO_PAUSE = (5, 10, 20, 30, 45)  # пауза перед очередной перезагрузкой, с
 
 
 def goto(page, url: str, *, wait_until: str = "domcontentloaded", timeout: int = 45000) -> None:
@@ -348,7 +349,7 @@ def goto(page, url: str, *, wait_until: str = "domcontentloaded", timeout: int =
         if attempt == GOTO_TRIES:
             raise StudioError(f"страница не открывается — связь обрывается ({broken}); проверь интернет/прокси профиля")
         log(f"Studio: связь оборвалась ({broken}) — повторяю загрузку ({attempt}/{GOTO_TRIES - 1})")
-        page.wait_for_timeout(5000 * attempt)
+        page.wait_for_timeout(1000 * GOTO_PAUSE[min(attempt, len(GOTO_PAUSE)) - 1])
 
 
 def studio_channel(page, url: str) -> str:
@@ -1740,8 +1741,26 @@ def _thumb_srcs(page) -> set[str]:
         return set()
 
 
+FIX_ROUNDS = 3  # столько раз «Доделать ролик» ставит обложку заново, если после сохранения её на странице нет
+
+
+def _wait_saved(page, timeout: float = 45.0) -> None:
+    """После «Save» дождаться, пока Studio действительно сохранила (кнопка снова недоступна): при лагающем прокси
+    сохранение идёт десятки секунд, а фиксированная пауза перечитывала страницу раньше — обложка «не вставала»."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            if page.locator("ytcp-button#save").first.get_attribute("aria-disabled", timeout=3000) == "true":
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        page.wait_for_timeout(1500)
+    log("Studio: «Save» так и не стал недоступным — перечитываю страницу и проверяю по факту")
+
+
 def fix_video(cdp_url: str, channel, url: str, *, thumbnail: Path | None = None, playlists: list[str] | None = None,
-              create_playlist: str = "", only_missing: bool = False, cancel: CancelToken | None = None) -> list[str]:
+              create_playlist: str = "", only_missing: bool = False, cancel: CancelToken | None = None,
+              _round: int = 1) -> list[str]:
     """Доделать уже выложенный ролик: поставить обложку и/или плейлист на странице ролика в Studio, сохранить и
     проверить, что встало (перечитать страницу). → строки для итогов. Ролик не удаляется и не перезаливается."""
     from engine.publish.studio_kit import el, set_channel, step
@@ -1757,8 +1776,18 @@ def fix_video(cdp_url: str, channel, url: str, *, thumbnail: Path | None = None,
     edit = f"{STUDIO}/video/{vid}/edit"
 
     def open_edit() -> None:
-        goto(page, edit)
-        page.locator("ytcp-video-metadata-playlists").first.wait_for(timeout=40000)
+        # страница ролика не успела прогрузиться (лаг прокси профиля, Studio «зависла» на заставке) — перезагружаем
+        for attempt in (1, 2, 3):
+            goto(page, edit)
+            try:
+                page.locator("ytcp-video-metadata-playlists").first.wait_for(timeout=40000)
+                break
+            except CancelledError:
+                raise
+            except Exception:
+                if attempt == 3:
+                    raise
+                log(f"Studio {channel.handle}: страница ролика {vid} не прогрузилась — перезагружаю ({attempt}/2)")
         page.wait_for_timeout(4000)
 
     def shown_playlist() -> str:
@@ -1808,23 +1837,35 @@ def fix_video(cdp_url: str, channel, url: str, *, thumbnail: Path | None = None,
                 raise StudioError("Studio не даёт сохранить изменения ролика (кнопка «Save» недоступна)")
             _act(cancel)
             human.click(page, save)
-            page.wait_for_timeout(6000)
+            page.wait_for_timeout(3000)
+            _wait_saved(page)
+        again = False
         with step(page, "доделка: проверка после сохранения"):
             open_edit()
             if thumbnail is not None:
                 after = _thumb_srcs(page)
                 if _wait_custom_thumb(page, timeout=30) is False:
-                    raise StudioError("обложку выбрал и сохранил, но своей обложки на ролике нет")
+                    if _round >= FIX_ROUNDS:
+                        raise StudioError("обложку выбрал и сохранил, но своей обложки на ролике нет")
+                    again = True  # не сохранилась (лаг прокси/Studio) — повторим всю доделку заново, а не сдадимся
+                    log(f"Studio {channel.handle}: обложка {vid} после сохранения не стоит — ставлю ещё раз "
+                        f"({_round}/{FIX_ROUNDS - 1})")
+            if again:
+                pass
+            elif thumbnail is not None:
                 if after and after != before:
                     notes.append(f"обложка поставлена ({url})")
                 else:
                     notes.append(f"обложку выбрал и сохранил, но по странице не видно, что она сменилась — глянь "
                                  f"ролик в Studio ({url})")
-            if want_pl:
+            if want_pl and not again:
                 if names[0].casefold() in shown_playlist().casefold():
                     notes.append(f"плейлист «{names[0]}» поставлен ({url})")
                 else:
                     raise StudioError(f"плейлист «{names[0]}» после сохранения не стоит")
+    if again:  # окно Studio закрыто — второй заход начинает с чистого листа
+        return fix_video(cdp_url, channel, url, thumbnail=thumbnail, playlists=playlists,
+                         create_playlist=create_playlist, only_missing=only_missing, cancel=cancel, _round=_round + 1)
     return notes
 
 
